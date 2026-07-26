@@ -5,7 +5,9 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import manifest from "../test-workspaces.config.mjs";
+import manifest, {
+	desktopUnitWorkerCount,
+} from "../test-workspaces.config.mjs";
 import {
 	buildPnpmArgs,
 	checkIncludeCoverage,
@@ -136,7 +138,14 @@ test("unit workspace concurrency reserves the full worker budget for heavy works
 		(workspace) => workspace.cwd === "packages/maker-core",
 	);
 	assert.equal(desktop.tiers.unit.execution, "exclusive");
-	assert.deepEqual(desktop.tiers.unit.command.args, ["run", "--maxWorkers=8"]);
+	assert.deepEqual(desktop.tiers.unit.command.args, [
+		"run",
+		`--maxWorkers=${desktopUnitWorkerCount()}`,
+	]);
+	assert.equal(desktopUnitWorkerCount(1), 1);
+	assert.equal(desktopUnitWorkerCount(4), 4);
+	assert.equal(desktopUnitWorkerCount(32), 8);
+	assert.equal(desktopUnitWorkerCount(Number.NaN), 1);
 	assert.equal(mobile.tiers.unit.execution, "exclusive");
 	assert.deepEqual(mobile.tiers.unit.command.args, ["run", "--maxWorkers=4"]);
 	assert.equal(makerCore.tiers.unit.execution, undefined);
@@ -653,7 +662,7 @@ test("workspace concurrency defaults to a bounded CPU count and accepts both CLI
 		3,
 	);
 	assert.equal(
-		parseCliOptions(["--workspace-concurrency=2"]).workspaceConcurrency,
+		parseCliOptions(["--", "--workspace-concurrency=2"]).workspaceConcurrency,
 		2,
 	);
 	for (const value of ["0", "-1", "1.5", "nope", "999999999999999999999"]) {
@@ -884,12 +893,13 @@ test("createWorkspaceRunReporter keeps passing output concise and flushes failed
 	reporter.onRunComplete(run, {
 		exitCode: 1,
 		failure: "COMMAND_FAILED",
+		durationMs: 1_500,
 	});
 	assert.equal(
 		writes.join(""),
 		"START packages/a unit\n" +
 			"\n[packages/a unit test]\nfailed output\n" +
-			"FAIL COMMAND_FAILED packages/a unit (1.3s)\n",
+			"FAIL COMMAND_FAILED packages/a unit (1.5s)\n",
 	);
 });
 

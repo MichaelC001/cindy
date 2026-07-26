@@ -73,8 +73,9 @@ worktree 会话契约、直推 `main` 的额外门禁与 review 严重度口径�
     启动一轮。Vitest 的单测试例超时仍由各 package 配置控制，不受这条外层约束影响。
   - **workspace 有界并行**：`test-workspaces.mjs` 默认最多并行
     `min(4, os.availableParallelism())` 个普通 workspace；每个普通 Vitest workspace 只使用
-    1 个 worker。Mobile 使用完整的 4-worker 配额；Desktop 使用基准验证过的单池 8-worker
-    配额。重型 workspace 必须独占执行，避免外层并发与内部 worker 池相乘。
+    1 个 worker。Mobile 使用完整的 4-worker 配额；Desktop 使用基准验证过的单池最多
+    8-worker 配额，低于 8 CPU 时按 `os.availableParallelism()` 自动下调。重型 workspace
+    必须独占执行，避免外层并发与内部 worker 池相乘。
     排查并发相关问题时可用
     `pnpm test:unit -- --workspace-concurrency=1` 临时退回 workspace 串行；该参数只改变
     workspace 调度，不减少测试覆盖。

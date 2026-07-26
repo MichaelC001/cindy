@@ -1,3 +1,5 @@
+import os from 'node:os';
+
 const vitestBin = (...args) => ({ type: 'packageBin', bin: 'vitest', args });
 // Workspace-level parallelism owns the global process budget. Keep ordinary
 // Vitest workspaces at one worker each so outer concurrency cannot multiply
@@ -17,6 +19,15 @@ const desktopDbExclude = [
   'src/main/localDb/__tests__/migrationReplay.test.ts',
   'src/main/localDb/__tests__/drizzle-proxy-perf.test.ts',
 ];
+
+export function desktopUnitWorkerCount(
+  availableParallelism = os.availableParallelism(),
+) {
+  const available = Number.isFinite(availableParallelism)
+    ? Math.floor(availableParallelism)
+    : 1;
+  return Math.max(1, Math.min(8, available));
+}
 
 const noCollectableWorkspace = (name, cwd, reason = noCollectableTestsReason) => ({
   name,
@@ -51,8 +62,9 @@ export default {
           execution: 'exclusive',
           // Desktop unit tests spawn many Git/filesystem subprocesses. Benchmarking
           // found eight workers to be the best complexity/resource tradeoff.
+          // Lower-CPU hosts stay capped by their available parallelism.
           // It runs exclusively so these workers never overlap outer workspaces.
-          command: vitestBin('run', '--maxWorkers=8'),
+          command: vitestBin('run', `--maxWorkers=${desktopUnitWorkerCount()}`),
           exclude: [
             'src/main/localDb/**',
             'src/main/__tests__/*Migration.test.ts',

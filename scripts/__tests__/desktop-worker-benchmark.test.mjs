@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   desktopUnitBenchmarkPnpmArgs,
+  median,
   parseDesktopWorkerBenchmarkOptions,
   percentile,
   summarizeDesktopWorkerSamples,
@@ -11,7 +12,8 @@ import {
 test('desktop worker benchmark parses bounded worker and output options', () => {
   assert.deepEqual(
     parseDesktopWorkerBenchmarkOptions([
-      '--workers=4,1,4',
+      '--',
+      '--workers=4, 1,4',
       '--runs',
       '2',
       '--top=5',
@@ -59,6 +61,12 @@ test('percentile uses the nearest-rank value', () => {
   assert.equal(percentile([40, 10, 30, 20], 0.95), 40);
 });
 
+test('median averages the two middle values for even-sized samples', () => {
+  assert.equal(median([]), 0);
+  assert.equal(median([30, 10, 20]), 20);
+  assert.equal(median([40, 10, 30, 20]), 25);
+});
+
 test('desktop worker benchmark summarizes median wall time and speedup', () => {
   assert.deepEqual(
     summarizeDesktopWorkerSamples([
@@ -73,7 +81,7 @@ test('desktop worker benchmark summarizes median wall time and speedup', () => {
         runs: 2,
         passed: 2,
         failed: 0,
-        medianWallMs: 100,
+        medianWallMs: 110,
         minWallMs: 100,
         maxWallMs: 120,
         speedupVsOneWorker: 1,
@@ -83,10 +91,10 @@ test('desktop worker benchmark summarizes median wall time and speedup', () => {
         runs: 2,
         passed: 2,
         failed: 0,
-        medianWallMs: 60,
+        medianWallMs: 65,
         minWallMs: 60,
         maxWallMs: 70,
-        speedupVsOneWorker: 100 / 60,
+        speedupVsOneWorker: 110 / 65,
       },
     ],
   );

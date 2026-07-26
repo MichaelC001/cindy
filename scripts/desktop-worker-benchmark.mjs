@@ -46,13 +46,16 @@ export function parseDesktopWorkerBenchmarkOptions(args) {
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+    if (arg === '--') continue;
     if (arg === '--help' || arg === '-h') {
       options.help = true;
       continue;
     }
     if (arg === '--workers' || arg.startsWith('--workers=')) {
       const { value, consumed } = readOptionValue(args, index, '--workers');
-      const workers = value.split(',').map((item) => positiveInteger(item, '--workers'));
+      const workers = value
+        .split(',')
+        .map((item) => positiveInteger(item.trim(), '--workers'));
       if (workers.length === 0) throw new Error('--workers requires at least one value');
       options.workers = [...new Set(workers)];
       index += consumed;
@@ -88,6 +91,15 @@ export function percentile(values, quantile) {
   return sorted[Math.max(0, Math.min(sorted.length - 1, index))];
 }
 
+export function median(values) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
+}
+
 export function summarizeDesktopWorkerSamples(samples) {
   const successfulSamples = samples.filter((sample) => sample.success !== false);
   const baseline = successfulSamples.find((sample) => sample.workers === 1);
@@ -95,8 +107,7 @@ export function summarizeDesktopWorkerSamples(samples) {
     const workerSamples = samples.filter((sample) => sample.workers === workers);
     const successful = workerSamples.filter((sample) => sample.success !== false);
     const wallValues = successful.map((sample) => sample.wallMs);
-    const medianWallMs =
-      wallValues.length > 0 ? percentile(wallValues, 0.5) : null;
+    const medianWallMs = wallValues.length > 0 ? median(wallValues) : null;
     return {
       workers,
       runs: workerSamples.length,
@@ -107,11 +118,10 @@ export function summarizeDesktopWorkerSamples(samples) {
       maxWallMs: wallValues.length > 0 ? Math.max(...wallValues) : null,
       speedupVsOneWorker:
         baseline && medianWallMs !== null && medianWallMs > 0
-          ? percentile(
+          ? median(
               successfulSamples
                 .filter((sample) => sample.workers === 1)
                 .map((sample) => sample.wallMs),
-              0.5,
             ) / medianWallMs
           : null,
     };

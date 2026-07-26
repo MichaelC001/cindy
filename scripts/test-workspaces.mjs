@@ -48,6 +48,7 @@ export function parseCliOptions(args) {
 	};
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index];
+		if (arg === "--") continue;
 		if (arg === "--all") {
 			options.all = true;
 			continue;
@@ -646,7 +647,12 @@ export function createWorkspaceRunReporter({
 		},
 		onRunComplete(run, result) {
 			const key = `${run.workspace.cwd}\0${run.tier}`;
-			const durationMs = Math.max(0, now() - (startedAt.get(key) ?? now()));
+			const started = startedAt.get(key);
+			const fallbackDurationMs =
+				started === undefined ? 0 : Math.max(0, now() - started);
+			const durationMs = Number.isFinite(result.durationMs)
+				? Math.max(0, result.durationMs)
+				: fallbackDurationMs;
 			startedAt.delete(key);
 			const status = result.exitCode === 0 ? "PASS" : `FAIL ${result.failure}`;
 			stdout.write(
