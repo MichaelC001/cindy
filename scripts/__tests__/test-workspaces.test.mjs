@@ -13,6 +13,7 @@ import {
 	checkIncludeCoverage,
 	checkTestFiles,
 	classifyFailure,
+	createBoundedOutputBuffer,
 	createOutputForwarder,
 	createWorkspaceRunReporter,
 	defaultWorkspaceConcurrency,
@@ -789,6 +790,35 @@ test("resolveOutputStream preserves explicit null while defaulting undefined", (
 	const fallback = new EventEmitter();
 	assert.equal(resolveOutputStream(undefined, fallback), fallback);
 	assert.equal(resolveOutputStream(null, fallback), null);
+});
+
+test("createBoundedOutputBuffer keeps bounded head and tail diagnostics", () => {
+	const output = createBoundedOutputBuffer(20);
+	output.append("0123456789");
+	output.append("abcdefghij");
+	output.append("KLMNOPQRST");
+	assert.equal(
+		output.toString(),
+		"01234\n... 10 output characters omitted ...\nfghijKLMNOPQRST",
+	);
+});
+
+test("runCommand bounds captured output while retaining head and tail", async () => {
+	const result = await runCommand(
+		process.execPath,
+		["-e", "process.stdout.write(`HEAD${'x'.repeat(100)}TAIL`)"],
+		{
+			shell: false,
+			stdout: null,
+			stderr: null,
+			maxOutputChars: 20,
+		},
+	);
+	assert.equal(result.exitCode, 0);
+	assert.match(result.output, /^HEAD/);
+	assert.match(result.output, /output characters omitted/);
+	assert.match(result.output, /TAIL$/);
+	assert.ok(result.output.length < 100);
 });
 
 test("runCommand completes successfully when its output consumer closes with EPIPE", async () => {

@@ -26,6 +26,7 @@ const VALID_STATUSES = new Set([
 const VALID_COVERAGE_MODES = new Set(["workspace", "allowlist"]);
 const VALID_EXECUTION_MODES = new Set(["normal", "exclusive"]);
 const MAX_DEFAULT_WORKSPACE_CONCURRENCY = 4;
+const DEFAULT_CAPTURED_OUTPUT_LIMIT = 2 * 1024 * 1024;
 
 export function normalizeRelPath(value) {
 	return value.replace(/\\/g, "/");
@@ -514,6 +515,43 @@ export function resolveOutputStream(configured, fallback) {
 	return configured === undefined ? fallback : configured;
 }
 
+export function createBoundedOutputBuffer(
+	maxChars = DEFAULT_CAPTURED_OUTPUT_LIMIT,
+) {
+	const limit =
+		Number.isFinite(maxChars) && maxChars > 0
+			? Math.floor(maxChars)
+			: DEFAULT_CAPTURED_OUTPUT_LIMIT;
+	const headLimit = Math.floor(limit / 4);
+	const tailLimit = limit - headLimit;
+	let head = "";
+	let tail = "";
+	let totalChars = 0;
+	return {
+		append(value) {
+			let text = String(value);
+			totalChars += text.length;
+			if (head.length < headLimit) {
+				const headRemaining = headLimit - head.length;
+				head += text.slice(0, headRemaining);
+				text = text.slice(headRemaining);
+			}
+			if (text.length > 0) {
+				const tailInput =
+					text.length > tailLimit ? text.slice(-tailLimit) : text;
+				tail = `${tail}${tailInput}`.slice(-tailLimit);
+			}
+		},
+		toString() {
+			if (totalChars <= limit) return `${head}${tail}`;
+			const omitted = totalChars - head.length - tail.length;
+			return (
+				`${head}\n... ${omitted} output characters omitted ...\n${tail}`
+			);
+		},
+	};
+}
+
 export function runCommand(command, args, options = {}) {
 	return new Promise((resolve) => {
 		const child = spawn(command, args, {
@@ -521,7 +559,7 @@ export function runCommand(command, args, options = {}) {
 			shell: options.shell,
 			windowsHide: true,
 		});
-		let output = "";
+		const output = createBoundedOutputBuffer(options.maxOutputChars);
 		let settled = false;
 		const stdout = createOutputForwarder(resolveOutputStream(options.stdout, process.stdout));
 		const stderr = createOutputForwarder(resolveOutputStream(options.stderr, process.stderr));
@@ -532,24 +570,26 @@ export function runCommand(command, args, options = {}) {
 			const stderrError = stderr.finish();
 			const forwardingError = stdoutError ?? stderrError;
 			if (forwardingError) {
-				output += `\nOutput forwarding failed: ${forwardingError.message ?? String(forwardingError)}`;
-				resolve({ exitCode: 1, output });
+				output.append(
+					`\nOutput forwarding failed: ${forwardingError.message ?? String(forwardingError)}`,
+				);
+				resolve({ exitCode: 1, output: output.toString() });
 				return;
 			}
-			resolve({ ...result, output });
+			resolve({ ...result, output: output.toString() });
 		};
 		child.stdout?.on("data", (chunk) => {
 			const text = chunk.toString();
-			output += text;
+			output.append(text);
 			stdout.write(chunk);
 		});
 		child.stderr?.on("data", (chunk) => {
 			const text = chunk.toString();
-			output += text;
+			output.append(text);
 			stderr.write(chunk);
 		});
 		child.on("error", (error) => {
-			output += error.message;
+			output.append(error.message);
 			finish({ exitCode: 1 });
 		});
 		child.on("close", (code) => {

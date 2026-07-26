@@ -160,6 +160,22 @@ function roundMs(value) {
   return Math.round(value * 10) / 10;
 }
 
+export function removeBenchmarkOutputFile(
+  outputFile,
+  { remove = fs.rmSync, warn = console.warn } = {},
+) {
+  try {
+    remove(outputFile, { force: true });
+    return true;
+  } catch (error) {
+    warn(
+      `Warning: could not remove benchmark report ${outputFile}: ` +
+        `${error?.message ?? String(error)}`,
+    );
+    return false;
+  }
+}
+
 async function runSample({ workers, iteration, top }) {
   const outputFile = path.join(
     os.tmpdir(),
@@ -232,7 +248,7 @@ async function runSample({ workers, iteration, top }) {
         .slice(0, top),
     };
   } finally {
-    fs.rmSync(outputFile, { force: true });
+    removeBenchmarkOutputFile(outputFile);
   }
 }
 

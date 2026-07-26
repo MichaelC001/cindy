@@ -6,6 +6,7 @@ import {
   median,
   parseDesktopWorkerBenchmarkOptions,
   percentile,
+  removeBenchmarkOutputFile,
   summarizeDesktopWorkerSamples,
 } from '../desktop-worker-benchmark.mjs';
 
@@ -129,4 +130,20 @@ test('desktop worker benchmark keeps failed configurations in the summary', () =
       },
     ],
   );
+});
+
+test('benchmark cleanup never masks the benchmark result', () => {
+  const warnings = [];
+  assert.equal(
+    removeBenchmarkOutputFile('locked-report.json', {
+      remove: () => {
+        throw Object.assign(new Error('file is busy'), { code: 'EBUSY' });
+      },
+      warn: (message) => warnings.push(message),
+    }),
+    false,
+  );
+  assert.deepEqual(warnings, [
+    'Warning: could not remove benchmark report locked-report.json: file is busy',
+  ]);
 });
