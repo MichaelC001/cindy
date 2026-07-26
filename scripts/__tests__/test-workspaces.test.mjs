@@ -136,7 +136,7 @@ test("unit workspace concurrency reserves the full worker budget for heavy works
 		(workspace) => workspace.cwd === "packages/maker-core",
 	);
 	assert.equal(desktop.tiers.unit.execution, "exclusive");
-	assert.deepEqual(desktop.tiers.unit.command.args, ["run", "--maxWorkers=4"]);
+	assert.deepEqual(desktop.tiers.unit.command.args, ["run", "--maxWorkers=8"]);
 	assert.equal(mobile.tiers.unit.execution, "exclusive");
 	assert.deepEqual(mobile.tiers.unit.command.args, ["run", "--maxWorkers=4"]);
 	assert.equal(makerCore.tiers.unit.execution, undefined);

@@ -49,10 +49,10 @@ export default {
         unit: {
           status: 'required',
           execution: 'exclusive',
-          // Desktop unit tests spawn many Git/filesystem subprocesses; cap workers so
-          // Windows does not exhaust process and file-lock budgets under full-suite load.
-          // It runs exclusively so these four workers never overlap outer workspace workers.
-          command: vitestBin('run', '--maxWorkers=4'),
+          // Desktop unit tests spawn many Git/filesystem subprocesses. Benchmarking
+          // found eight workers to be the best complexity/resource tradeoff.
+          // It runs exclusively so these workers never overlap outer workspaces.
+          command: vitestBin('run', '--maxWorkers=8'),
           exclude: [
             'src/main/localDb/**',
             'src/main/__tests__/*Migration.test.ts',
