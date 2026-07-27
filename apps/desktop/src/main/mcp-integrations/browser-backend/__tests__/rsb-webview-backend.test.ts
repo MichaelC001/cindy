@@ -7,6 +7,7 @@
 //  - advanced unsupported actions yield a structured error (no throw)
 
 import fs from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -943,14 +944,25 @@ describe('RsbWebviewBackend — MCP session id injection', () => {
 });
 
 describe('RsbWebviewBackend — uploads and page dialogs', () => {
-  function buildPageEnv(options?: { uploadRoot?: string }) {
+  function buildPageEnv(options?: { uploadRoot?: string; resourceUrl?: string }) {
     let attached = false;
     const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+    const sessionListeners = new Map<string, Set<(...args: unknown[]) => void>>();
     const sendCommand = vi.fn(async (method: string) => {
       if (method === 'Network.enable' || method === 'Page.enable') return {};
       if (method === 'Accessibility.enable') return {};
       if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
-      if (method === 'Runtime.evaluate') return { result: { objectId: 'file-input' } };
+      if (method === 'Runtime.evaluate') {
+        return options?.resourceUrl
+          ? {
+              result: {
+                value: {
+                  resources: [{ kind: 'download', url: options.resourceUrl }],
+                },
+              },
+            }
+          : { result: { objectId: 'file-input' } };
+      }
       if (method === 'DOM.describeNode') return { node: { backendNodeId: 11 } };
       if (method === 'Runtime.callFunctionOn') {
         return { result: { value: { ok: true, multiple: true } } };
@@ -960,8 +972,39 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
       throw new Error(`unexpected command: ${method}`);
     });
     const wc = fakeWc();
+    const session = {
+      on: (event: string, listener: (...args: unknown[]) => void) => {
+        const group = sessionListeners.get(event) ?? new Set();
+        group.add(listener);
+        sessionListeners.set(event, group);
+      },
+      removeListener: (event: string, listener: (...args: unknown[]) => void) => {
+        sessionListeners.get(event)?.delete(listener);
+      },
+    };
+    const downloadURL = vi.fn((url: string) => {
+      let doneListener: ((...args: unknown[]) => void) | undefined;
+      const item = {
+        getFilename: () => 'page-resource.bin',
+        getURL: () => url,
+        getMimeType: () => 'application/octet-stream',
+        getTotalBytes: () => 4,
+        getReceivedBytes: () => 4,
+        setSavePath: (filePath: string) => writeFileSync(filePath, 'data'),
+        cancel: vi.fn(),
+        once: (event: string, listener: (...args: unknown[]) => void) => {
+          if (event === 'done') doneListener = listener;
+        },
+      };
+      for (const listener of sessionListeners.get('will-download') ?? []) {
+        listener({}, item, wc);
+      }
+      setTimeout(() => doneListener?.({}, 'completed'), 0);
+    });
     Object.assign(wc, {
       once: vi.fn(),
+      session,
+      downloadURL,
       debugger: {
         isAttached: () => attached,
         attach: vi.fn(() => {
@@ -1000,7 +1043,7 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
         listener({}, method, params);
       }
     };
-    return { backend, emit, sendCommand };
+    return { backend, emit, sendCommand, downloadURL };
   }
 
   it('validates upload paths before assigning files to the page input', async () => {
@@ -1062,6 +1105,47 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
       { accept: false },
     );
     await env.backend.dispose();
+  });
+
+  it('saves only a resource listed by the latest page snapshot', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-browser-resource-'));
+    try {
+      const resourceUrl = 'https://cdn.example.test/archive.bin';
+      const env = buildPageEnv({ uploadRoot: root, resourceUrl });
+      const snapshot = await env.backend.call({
+        action: 'snapshot',
+        targetId: 't1',
+        urls: true,
+      });
+      expect(snapshot.data).toMatchObject({
+        resources: [{ kind: 'download', url: resourceUrl }],
+      });
+
+      const saved = await env.backend.call({
+        action: 'act',
+        targetId: 't1',
+        request: { kind: 'saveResource', url: resourceUrl, timeoutMs: 1000 },
+      });
+
+      expect(saved.ok).toBe(true);
+      expect(saved.data).toMatchObject({
+        kind: 'saveResource',
+        downloads: [
+          {
+            fileName: 'page-resource.bin',
+            state: 'completed',
+          },
+        ],
+      });
+      expect(env.downloadURL).toHaveBeenCalledWith(resourceUrl);
+      const artifactPath = (saved.data as {
+        downloads: Array<{ path: string }>;
+      }).downloads[0].path;
+      await expect(fs.readFile(artifactPath, 'utf8')).resolves.toBe('data');
+      await env.backend.dispose();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
 

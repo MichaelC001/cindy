@@ -56,6 +56,15 @@ export interface RsbSnapshotResult {
   url: string;
   snapshot?: string;
   refs?: Record<string, SnapshotRef>;
+  resources?: Array<{
+    kind: string;
+    url: string;
+    label?: string;
+  }>;
+  barrier?: {
+    kind: 'human-verification';
+    evidence: string[];
+  };
   nodes?: Array<{
     ref?: string;
     role: string;
@@ -75,6 +84,11 @@ export interface RsbActResult {
   tabId: string;
   kind: BrowserActRequest['kind'];
   [key: string]: unknown;
+}
+
+interface PageInspection {
+  resources: Array<{ kind: string; url: string; label?: string }>;
+  barrier?: { kind: 'human-verification'; evidence: string[] };
 }
 
 const INTERACTIVE_ROLES = new Set([
@@ -305,6 +319,127 @@ async function resolveHref(
   return typeof result.result?.value === 'string' && result.result.value !== ''
     ? result.result.value
     : undefined;
+}
+
+async function inspectPage(
+  send: DebuggerTransport['sendCommand'],
+  includeResources: boolean,
+): Promise<PageInspection> {
+  const evaluated = await send('Runtime.evaluate', {
+    expression: `(() => {
+      const normalize = (value) => String(value ?? "").replace(/\\s+/g, " ").trim();
+      const pageText = normalize(document.body?.innerText || "").slice(0, 6000);
+      const title = normalize(document.title);
+      const evidence = [];
+      const titleMatch = /(verify you are human|checking your browser|just a moment|unusual traffic|captcha|人机验证|安全验证|访问验证)/i.test(title);
+      if (titleMatch) {
+        evidence.push("page title indicates manual verification");
+      }
+      const challengeSelector = [
+        '[data-sitekey]',
+        'iframe[src*="captcha" i]',
+        'iframe[src*="challenge" i]',
+        '[id*="captcha" i]',
+        '[class*="captcha" i]',
+      ].join(",");
+      const verificationControl = [...document.querySelectorAll(challengeSelector)].find((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width >= 20 && rect.height >= 20 && style.visibility !== "hidden" && style.display !== "none";
+      });
+      if (verificationControl) {
+        evidence.push("page contains a verification control");
+      }
+      const textMatch = /(verify you are human|checking your browser|unusual traffic|complete the security check|i['’]?m not a robot|人机验证|安全验证|访问验证)/i.test(pageText);
+      if (textMatch) {
+        evidence.push("page text asks for a manual check");
+      }
+      const verificationBlocked = titleMatch || Boolean(verificationControl && textMatch);
+
+      const resources = [];
+      if (${JSON.stringify(includeResources)}) {
+        const seen = new Set();
+        const add = (kind, raw, label) => {
+          if (resources.length >= 200) return;
+          let url;
+          try {
+            url = new URL(String(raw || ""), document.baseURI);
+          } catch {
+            return;
+          }
+          if (!["http:", "https:"].includes(url.protocol)) return;
+          const href = url.href;
+          if (seen.has(href)) return;
+          seen.add(href);
+          const item = { kind, url: href };
+          const text = normalize(label);
+          if (text) item.label = text.slice(0, 200);
+          resources.push(item);
+        };
+        document.querySelectorAll('img[src],video[src],audio[src],source[src],a[download][href],link[rel~="stylesheet"][href],link[rel~="icon"][href],link[rel="manifest"][href]').forEach((element) => {
+          const tag = element.tagName.toLowerCase();
+          const rel = normalize(element.getAttribute("rel")).toLowerCase();
+          const kind = tag === "img"
+            ? "image"
+            : tag === "video" || tag === "source" && element.parentElement?.tagName.toLowerCase() === "video"
+              ? "video"
+              : tag === "audio" || tag === "source" && element.parentElement?.tagName.toLowerCase() === "audio"
+                ? "audio"
+                : tag === "a"
+                  ? "download"
+                  : rel.includes("stylesheet")
+                    ? "stylesheet"
+                    : "link";
+          add(kind, element.getAttribute("src") || element.getAttribute("href"), element.getAttribute("alt") || element.getAttribute("download") || element.getAttribute("title"));
+        });
+      }
+      return {
+        resources,
+        ...(verificationBlocked ? { barrier: { kind: "human-verification", evidence: [...new Set(evidence)] } } : {}),
+      };
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  }) as { result?: { value?: unknown }; exceptionDetails?: { text?: string } };
+  if (evaluated.exceptionDetails) {
+    throw new Error(evaluated.exceptionDetails.text ?? 'page inspection failed');
+  }
+  const value = evaluated.result?.value;
+  if (!value || typeof value !== 'object') return { resources: [] };
+  const raw = value as {
+    resources?: unknown;
+    barrier?: { kind?: unknown; evidence?: unknown };
+  };
+  const resources: PageInspection['resources'] = [];
+  if (Array.isArray(raw.resources)) {
+    for (const entry of raw.resources.slice(0, 200)) {
+      if (!entry || typeof entry !== 'object') continue;
+      const item = entry as { kind?: unknown; url?: unknown; label?: unknown };
+      if (typeof item.kind !== 'string' || typeof item.url !== 'string') continue;
+      if (item.url.length > 4096) continue;
+      try {
+        const parsed = new URL(item.url);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+        if (parsed.username || parsed.password) continue;
+      } catch {
+        continue;
+      }
+      resources.push({
+        kind: item.kind.slice(0, 32),
+        url: item.url,
+        ...(typeof item.label === 'string' && item.label !== ''
+          ? { label: item.label.slice(0, 200) }
+          : {}),
+      });
+    }
+  }
+  const evidence = Array.isArray(raw.barrier?.evidence)
+    ? raw.barrier.evidence.filter((item): item is string => typeof item === 'string').slice(0, 8)
+    : [];
+  return {
+    resources,
+    ...(evidence.length > 0 ? { barrier: { kind: 'human-verification', evidence } } : {}),
+  };
 }
 
 async function resolveSelector(
@@ -1231,11 +1366,13 @@ async function dispatchKey(
 
 export class RsbWebviewAutomation {
   private readonly refsByTab = new Map<string, Map<string, SnapshotRef>>();
+  private readonly resourcesByTab = new Map<string, Set<string>>();
 
   constructor(private readonly logger: AutomationLogger) {}
 
   forgetTab(tabId: string): void {
     this.refsByTab.delete(tabId);
+    this.resourcesByTab.delete(tabId);
   }
 
   async snapshot(
@@ -1244,6 +1381,27 @@ export class RsbWebviewAutomation {
     req: BrowserControlRequest,
   ): Promise<RsbSnapshotResult> {
     return withDebugger(wc, async (send) => {
+      let inspection: PageInspection = { resources: [] };
+      try {
+        inspection = await inspectPage(send, req.urls === true);
+      } catch (err) {
+        this.logger.warn('failed to inspect page state', { tabId, err });
+      }
+      this.resourcesByTab.delete(tabId);
+      if (inspection.resources.length > 0) {
+        this.resourcesByTab.set(tabId, new Set(inspection.resources.map((resource) => resource.url)));
+      }
+      if (inspection.barrier) {
+        this.refsByTab.set(tabId, new Map());
+        return {
+          format: req.snapshotFormat ?? 'ai',
+          targetId: tabId,
+          url: wc.getURL(),
+          ...(inspection.resources.length > 0 ? { resources: inspection.resources } : {}),
+          barrier: inspection.barrier,
+          stats: { lines: 0, chars: 0, refs: 0, interactive: 0 },
+        };
+      }
       await send('Accessibility.enable');
       let response: { nodes?: RawAxNode[] };
       if (typeof req.selector === 'string' && req.selector !== '') {
@@ -1304,6 +1462,7 @@ export class RsbWebviewAutomation {
           format,
           targetId: tabId,
           url: wc.getURL(),
+          ...(inspection.resources.length > 0 ? { resources: inspection.resources } : {}),
           nodes: tree.slice(0, limit).map((node) => ({
             ...(node.ref && visible[node.ref] ? { ref: node.ref } : {}),
             role: node.role,
@@ -1318,11 +1477,18 @@ export class RsbWebviewAutomation {
         format,
         targetId: tabId,
         url: wc.getURL(),
+        ...(inspection.resources.length > 0 ? { resources: inspection.resources } : {}),
         snapshot,
         refs: visible,
         stats,
       };
     });
+  }
+
+  assertResource(tabId: string, url: string): void {
+    if (!this.resourcesByTab.get(tabId)?.has(url)) {
+      throw new Error('resource is not present in the latest page resource list');
+    }
   }
 
   async setFiles(
@@ -1416,6 +1582,8 @@ export class RsbWebviewAutomation {
       };
 
       switch (request.kind) {
+        case 'saveResource':
+          throw new Error('saveResource must be handled by the browser artifact manager');
         case 'click': {
           const target = await resolveTarget();
           await waitForActionable(send, target, { timeoutMs: request.timeoutMs });

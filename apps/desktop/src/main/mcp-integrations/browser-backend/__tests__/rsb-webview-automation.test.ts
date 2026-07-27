@@ -120,6 +120,84 @@ describe('RsbWebviewAutomation snapshot', () => {
       { backendNodeId: 2, fetchRelatives: false },
     );
   });
+
+  it('returns a bounded resource list and authorizes only the latest snapshot URLs', async () => {
+    const instance = automation();
+    const harness = debuggerHarness(async (method, params) => {
+      if (method === 'Runtime.evaluate') {
+        expect(params?.expression).toContain('document.querySelectorAll');
+        return {
+          result: {
+            value: {
+              resources: [
+                {
+                  kind: 'image',
+                  url: 'https://cdn.example.test/image.png',
+                  label: 'Preview',
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (method === 'Accessibility.enable') return {};
+      if (method === 'Accessibility.getFullAXTree') return AX_TREE;
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    const result = await instance.snapshot('tab-1', harness.wc, {
+      action: 'snapshot',
+      urls: true,
+    });
+
+    expect(result.resources).toEqual([
+      {
+        kind: 'image',
+        url: 'https://cdn.example.test/image.png',
+        label: 'Preview',
+      },
+    ]);
+    expect(() => instance.assertResource(
+      'tab-1',
+      'https://cdn.example.test/image.png',
+    )).not.toThrow();
+    expect(() => instance.assertResource(
+      'tab-1',
+      'https://other.example.test/file.zip',
+    )).toThrow('not present in the latest page resource list');
+  });
+
+  it('returns a structured verification barrier without creating action refs', async () => {
+    const harness = debuggerHarness(async (method) => {
+      if (method === 'Runtime.evaluate') {
+        return {
+          result: {
+            value: {
+              resources: [],
+              barrier: {
+                kind: 'human-verification',
+                evidence: ['page contains a verification control'],
+              },
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    const result = await automation().snapshot('tab-1', harness.wc, {
+      action: 'snapshot',
+    });
+
+    expect(result).toMatchObject({
+      barrier: {
+        kind: 'human-verification',
+        evidence: ['page contains a verification control'],
+      },
+      stats: { refs: 0, interactive: 0 },
+    });
+    expect(harness.sendCommand).not.toHaveBeenCalledWith('Accessibility.enable');
+  });
 });
 
 describe('RsbWebviewAutomation act', () => {

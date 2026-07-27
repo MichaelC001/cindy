@@ -35,6 +35,7 @@ import type {
   BrowserBackend,
 } from './types.js';
 import { RsbWebviewAutomation } from './rsb-webview-automation.js';
+import { RsbWebviewArtifacts } from './rsb-webview-artifacts.js';
 import { RsbWebviewDialogs } from './rsb-webview-dialogs.js';
 import { RsbWebviewNetwork } from './rsb-webview-network.js';
 import { resolveUploadFiles } from './rsb-webview-upload-policy.js';
@@ -138,15 +139,39 @@ function safeTabMeta(wc: WebContents): { url: string; title: string } {
   return { url, title };
 }
 
+function isHttpResourceUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && !parsed.username
+      && !parsed.password
+    );
+  } catch {
+    return false;
+  }
+}
+
+function mayStartDownload(kind: string): boolean {
+  return kind === 'click'
+    || kind === 'clickCoords'
+    || kind === 'press'
+    || kind === 'select';
+}
+
 export class RsbWebviewBackend implements BrowserBackend {
   readonly kind = 'rsb-webview' as const;
   private readonly automation: RsbWebviewAutomation;
+  private readonly artifacts?: RsbWebviewArtifacts;
   private readonly dialogs: RsbWebviewDialogs;
   private readonly network: RsbWebviewNetwork;
   private readonly activity: BrowserActivity[] = [];
 
   constructor(private readonly opts: RsbWebviewBackendOptions) {
     this.automation = new RsbWebviewAutomation(opts.logger);
+    this.artifacts = opts.artifactRoot
+      ? new RsbWebviewArtifacts(opts.artifactRoot, opts.logger)
+      : undefined;
     this.dialogs = new RsbWebviewDialogs(opts.logger);
     this.network = new RsbWebviewNetwork(opts.logger);
   }
@@ -184,6 +209,7 @@ export class RsbWebviewBackend implements BrowserBackend {
   async dispose(): Promise<void> {
     // Switching backends never closes the user's tabs. Only the listeners and
     // debugger attachments owned by this backend are released.
+    await this.artifacts?.dispose();
     this.dialogs.dispose();
     this.network.dispose();
   }
@@ -259,6 +285,7 @@ export class RsbWebviewBackend implements BrowserBackend {
       totalRegisteredTabs: this.opts.registry.listAll().length,
       pinnedTabs: this.opts.registry.listPinned(),
       dialogs: this.dialogs.diagnostics(),
+      ...(this.artifacts ? { artifacts: this.artifacts.diagnostics() } : {}),
       network: this.network.diagnostics(),
       recentActivity: this.activity.slice(-20),
     });
@@ -449,6 +476,36 @@ export class RsbWebviewBackend implements BrowserBackend {
     if (!resolved.ok) return resolved.result;
     const wc = resolved.wc;
 
+    if (inner.kind === 'saveResource') {
+      if (!this.artifacts) return actionFailed(req.action, 'managed downloads are unavailable');
+      if (typeof inner.url !== 'string' || !isHttpResourceUrl(inner.url)) {
+        return actionFailed(req.action, 'saveResource.url must be an http(s) URL from snapshot(urls:true)');
+      }
+      this.automation.assertResource(tabId, inner.url);
+      const sessionId = this.resolveSessionId(requestWithInnerTarget);
+      if (!sessionId) return actionFailed(req.action, 'no active RSB session');
+      return this.withTabPin(tabId, async () => {
+        await this.tryObservePageSignals(wc, tabId);
+        const captured = await this.artifacts!.capture(
+          wc,
+          { sessionId, timeoutMs: inner.timeoutMs ?? req.timeoutMs },
+          async () => {
+            wc.downloadURL(inner.url!);
+            return undefined;
+          },
+        );
+        if (!captured.downloads.some((artifact) => artifact.state === 'completed')) {
+          return actionFailed(req.action, 'resource download did not complete');
+        }
+        return actionOk(req.action, {
+          tabId,
+          kind: inner.kind,
+          url: inner.url,
+          downloads: captured.downloads,
+        });
+      });
+    }
+
     if (inner.kind === 'evaluate') {
       if (typeof inner.fn !== 'string' || inner.fn === '') {
         return actionFailed(req.action, 'evaluate.fn (JS expression source) required');
@@ -488,10 +545,27 @@ export class RsbWebviewBackend implements BrowserBackend {
       });
     }
 
-    return this.withTabPin(tabId, async () => {
+    const runAction = async () => {
       await this.tryObservePageSignals(wc, tabId);
       const data = await this.automation.act(tabId, wc, inner);
-      return actionOk(req.action, data);
+      return data;
+    };
+    return this.withTabPin(tabId, async () => {
+      const captured = this.artifacts
+        && mayStartDownload(inner.kind)
+        ? await this.artifacts.capture(
+          wc,
+          {
+            sessionId: this.resolveSessionId(requestWithInnerTarget) ?? 'rsb',
+            timeoutMs: inner.timeoutMs ?? req.timeoutMs,
+          },
+          runAction,
+        )
+        : { value: await runAction(), downloads: [] };
+      return actionOk(req.action, {
+        ...captured.value,
+        ...(captured.downloads.length > 0 ? { downloads: captured.downloads } : {}),
+      });
     });
   }
 

@@ -98,11 +98,18 @@ const ACT_KINDS = [
   'resize',
   'wait',
   'evaluate',
+  'saveResource',
   'close',
 ] as const;
 
 function getRuntime(deps: BrowserMcpDeps): BrowserControlRuntime {
   return deps.getRuntime();
+}
+
+function isSafeResourceUrl(value: string): boolean {
+  if (!isHttpUrl(value)) return false;
+  const parsed = new URL(value);
+  return parsed.username === '' && parsed.password === '';
 }
 
 // Server-enforced ceiling on a single tool result (~50k tokens). A huge page /
@@ -279,7 +286,7 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
           height: z.number().int().positive().optional(),
           timeMs: z.number().int().nonnegative().optional(),
           selector: z.string().optional(),
-          url: z.string().optional(),
+          url: z.string().optional().describe('saveResource 时使用 snapshot(urls:true) 返回的资源 URL'),
           loadState: z.string().optional(),
           textGone: z.string().optional(),
           timeoutMs: z.number().int().positive().optional(),
@@ -314,6 +321,19 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
               `url 必须是 http(s);不支持 file:// / chrome:// / data: 等协议(收到 "${u}")`,
             );
           }
+        }
+        if (
+          args.action === 'act'
+          && args.request?.kind === 'saveResource'
+          && (
+            typeof args.request.url !== 'string'
+            || !isSafeResourceUrl(args.request.url)
+          )
+        ) {
+          return errorResult(
+            args.action,
+            'saveResource.url 必须是 snapshot(urls:true) 返回的 http(s) 资源地址',
+          );
         }
 
         // recipe: run a declarative per-site flow (composition over primitives).

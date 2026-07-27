@@ -123,6 +123,73 @@ describe('createBrowserMcpServer', () => {
     await h.cleanup();
   });
 
+  it('passes through a page resource and rejects unsafe resource URLs', async () => {
+    const h = await makeHarness();
+    await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'browser',
+        args: {
+          action: 'act',
+          targetId: 't1',
+          request: {
+            kind: 'saveResource',
+            url: 'https://cdn.example.test/archive.zip',
+          },
+        },
+      },
+    });
+    expect(h.calls).toEqual([
+      {
+        action: 'act',
+        targetId: 't1',
+        request: {
+          kind: 'saveResource',
+          url: 'https://cdn.example.test/archive.zip',
+        },
+      },
+    ]);
+
+    const blocked = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'browser',
+        args: {
+          action: 'act',
+          targetId: 't1',
+          request: { kind: 'saveResource', url: 'file:///tmp/secret' },
+        },
+      },
+    });
+    expect(h.calls).toHaveLength(1);
+    const parsed = JSON.parse(
+      (blocked.content as Array<{ text: string }>)[0].text,
+    ) as { ok: boolean; message?: string };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.message).toMatch(/http\(s\)/);
+
+    const credentialed = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'browser',
+        args: {
+          action: 'act',
+          targetId: 't1',
+          request: {
+            kind: 'saveResource',
+            url: 'https://user:secret@cdn.example.test/archive.zip',
+          },
+        },
+      },
+    });
+    expect(h.calls).toHaveLength(1);
+    const credentialedResult = JSON.parse(
+      (credentialed.content as Array<{ text: string }>)[0].text,
+    ) as { ok: boolean };
+    expect(credentialedResult.ok).toBe(false);
+    await h.cleanup();
+  });
+
   it('compiles extract into an act:evaluate call', async () => {
     const h = await makeHarness();
     await h.client.callTool({

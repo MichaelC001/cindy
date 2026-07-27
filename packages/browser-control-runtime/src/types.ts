@@ -41,6 +41,7 @@ export type BrowserActKind =
   | 'resize'
   | 'wait'
   | 'evaluate'
+  | 'saveResource'
   | 'close';
 
 export type BrowserControlTarget = 'sandbox' | 'host' | 'node';
