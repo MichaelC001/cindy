@@ -220,12 +220,15 @@ describe('im default settings store', () => {
     expect(migrated.channels.wechat.agentKind).toBe(IM_DEFAULT_SETTINGS.agentKind);
   });
 
-  it('rejects Full Access for personal WeChat without changing saved defaults', () => {
-    expect(() =>
-      writeImDefaultSettingsPatch({ permissionMode: 'bypassPermissions' }, 'wechat'),
-    ).toThrow('WECHAT_FULL_ACCESS_UNSUPPORTED');
-    expect(readImDefaultSettings('wechat').permissionMode).toBe('auto');
-  });
+  it.each(['acceptEdits', 'bypassPermissions'] as const)(
+    'rejects %s for personal WeChat without changing saved defaults',
+    (permissionMode) => {
+      expect(() =>
+        writeImDefaultSettingsPatch({ permissionMode }, 'wechat'),
+      ).toThrow('WECHAT_FULL_ACCESS_UNSUPPORTED');
+      expect(readImDefaultSettings('wechat').permissionMode).toBe('auto');
+    },
+  );
 
   it('detects legacy files even when v2 defaults are merged in by createOverrideSettingsFile', () => {
     // createOverrideSettingsFile calls normalize({ ...defaults(), ...overrides }).

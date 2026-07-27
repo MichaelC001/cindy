@@ -1514,7 +1514,8 @@
       "permission": {
         "label": "권한 모드",
         "hint": "/new 이후의 새 컨텍스트에 적용됩니다. 위험한 작업은 계속 Cindy Desktop에서 확인해야 합니다.",
-        "fullAccessDisabled": "WeChat에서 확인할 수 없는 작업이 바로 실행되지 않도록 개인 WeChat에서는 아직 Full Access를 지원하지 않습니다."
+        "fullAccessDisabled": "WeChat에서 확인할 수 없는 작업이 바로 실행되지 않도록 개인 WeChat에서는 아직 Full Access를 지원하지 않습니다.",
+        "permissionModeDisabled": "개인 WeChat은 항상 Cindy Desktop의 확인 정책을 사용하므로 이 권한 모드는 사용할 수 없습니다."
       },
       "authorization": {
         "title": "WeChat 인증",

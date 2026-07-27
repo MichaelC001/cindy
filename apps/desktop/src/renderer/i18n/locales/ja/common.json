@@ -1514,7 +1514,8 @@
       "permission": {
         "label": "権限モード",
         "hint": "/new 後の新しいコンテキストに適用されます。高リスク操作は引き続き Cindy Desktop での確認が必要です。",
-        "fullAccessDisabled": "WeChat 内で確認できない操作が直接実行されないよう、個人 WeChat では Full Access をまだ利用できません。"
+        "fullAccessDisabled": "WeChat 内で確認できない操作が直接実行されないよう、個人 WeChat では Full Access をまだ利用できません。",
+        "permissionModeDisabled": "個人 WeChat では常に Cindy Desktop の確認ポリシーを使用するため、この権限モードは利用できません。"
       },
       "authorization": {
         "title": "WeChat を認証",

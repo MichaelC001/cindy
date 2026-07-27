@@ -1514,7 +1514,8 @@
       "permission": {
         "label": "权限模式",
         "hint": "仅影响 /new 后的新上下文。高风险操作仍会要求你回到 Cindy 桌面端确认。",
-        "fullAccessDisabled": "个人微信首版不支持 Full Access，避免无法在微信内确认的操作被直接执行。"
+        "fullAccessDisabled": "个人微信首版不支持 Full Access，避免无法在微信内确认的操作被直接执行。",
+        "permissionModeDisabled": "个人微信始终使用 Cindy 桌面端的确认策略，因此该权限模式不可用。"
       },
       "authorization": {
         "title": "微信授权",

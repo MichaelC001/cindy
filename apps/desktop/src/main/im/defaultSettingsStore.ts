@@ -20,6 +20,7 @@ import {
   isImDefaultAgentKind,
   isImDefaultEffort,
   isImDefaultPermissionMode,
+  isWechatUnsupportedPermissionMode,
 } from '../../shared/imDefaultSettings.js';
 import { desktopMakerLogger } from '../maker-host/logger-adapter.js';
 import {
@@ -218,7 +219,7 @@ export function writeImDefaultSettingsPatch(
   patch: ImDefaultSettingsPatch,
   channel?: ImDefaultSettingsChannel,
 ): OverrideSettingsState<ImDefaultSettings> {
-  if (channel === 'wechat' && patch.permissionMode === 'bypassPermissions') {
+  if (channel === 'wechat' && isWechatUnsupportedPermissionMode(patch.permissionMode)) {
     throw new Error('WECHAT_FULL_ACCESS_UNSUPPORTED');
   }
   const document = store.read();

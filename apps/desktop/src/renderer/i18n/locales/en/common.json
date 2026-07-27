@@ -1515,7 +1515,8 @@
       "permission": {
         "label": "Permission mode",
         "hint": "Applies to new context after /new. Risky actions still require confirmation in Cindy Desktop.",
-        "fullAccessDisabled": "Personal WeChat does not support Full Access yet because actions that cannot be confirmed in WeChat must not run directly."
+        "fullAccessDisabled": "Personal WeChat does not support Full Access yet because actions that cannot be confirmed in WeChat must not run directly.",
+        "permissionModeDisabled": "Personal WeChat always uses Cindy Desktop's confirmation policy, so this permission mode is unavailable."
       },
       "authorization": {
         "title": "Authorize WeChat",

@@ -30,6 +30,7 @@ import {
   type ImDefaultSettingsState,
   isImDefaultEffort,
   isImDefaultPermissionMode,
+  isWechatUnsupportedPermissionMode,
 } from '../../../shared/imDefaultSettings';
 import { DefaultOverrideControls } from './DefaultOverrideControls';
 import { buildAgentSettingsPatch, mergeSettingsPatch } from './imDefaultSettingsLogic';
@@ -217,7 +218,7 @@ export function ImDefaultSettingsSection({
   const changePermissionMode = (permissionMode: string) => {
     if (
       !isImDefaultPermissionMode(permissionMode) ||
-      permissionMode === 'bypassPermissions' ||
+      isWechatUnsupportedPermissionMode(permissionMode) ||
       permissionMode === settings.permissionMode
     ) {
       return;
@@ -332,6 +333,7 @@ export function ImDefaultSettingsSection({
             ariaContext={t('settings.wechatBot.permission.label')}
             disabledModes={{
               bypassPermissions: t('settings.wechatBot.permission.fullAccessDisabled'),
+              acceptEdits: t('settings.wechatBot.permission.permissionModeDisabled'),
             }}
           />
           <p className="text-[12px] leading-[1.5] text-[var(--settings-section-desc)]">
