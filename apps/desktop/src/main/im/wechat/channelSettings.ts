@@ -8,7 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { normalizeWorkingDirForStorage } from '../../../shared/workingDir';
 import { createLogger, maskPath } from '../../logger';
@@ -83,11 +83,18 @@ export function resolveWechatWorkingDir(botId: string, rootPath?: string): strin
   const configured = readWechatChannelSettings(rootPath);
   if (configured.workingDir && configured.workingDirAvailable) return configured.workingDir;
 
+  const managedDirName = managedWorkingDirName(botId);
   const dir = rootPath
-    ? path.join(rootPath, 'im-working-dir', `wechat-${botId}`)
-    : ownerScopedImUserDataPath('im-working-dir', `wechat-${botId}`);
+    ? path.join(rootPath, 'im-working-dir', managedDirName)
+    : ownerScopedImUserDataPath('im-working-dir', managedDirName);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+function managedWorkingDirName(botId: string): string {
+  if (/^[A-Za-z0-9_-]{1,128}$/.test(botId)) return `wechat-${botId}`;
+  const digest = createHash('sha256').update(botId).digest('hex').slice(0, 24);
+  return `wechat-external-${digest}`;
 }
 
 function normalizeSelectedDirectory(selectedPath: string): string {
@@ -147,6 +154,7 @@ function writeSettings(settings: WechatChannelSettings, rootPath?: string): void
 }
 
 export const __testing = {
+  managedWorkingDirName,
   normalizeSettings,
   normalizeSelectedDirectory,
 };

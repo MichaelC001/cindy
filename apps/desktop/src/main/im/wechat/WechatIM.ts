@@ -503,8 +503,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   async commitFinal(output: ImFinalOutput): Promise<void> {
     const active = this.#activeTasks.get(output.userId);
     if (!active) throw new Error('WECHAT_NO_ACTIVE_TASK');
-    const text = filterWechatMarkdown(output.text);
-    const chunks = chunkWechatText(text || '（本轮无文本输出）');
+    const chunks = chunkWechatText(normalizeFinalOutputText(output.text));
     const kind =
       output.terminal === 'done'
         ? ('final' as const)
@@ -1513,9 +1512,17 @@ function safeMachineCode(value: string): string {
   return normalized || 'PRE_DISPATCH_REJECTED';
 }
 
+function normalizeFinalOutputText(text: string): string {
+  return filterWechatMarkdown(text) || '✅ (本轮无文本输出)';
+}
+
 function machineErrorCode(error: unknown): string {
   return error instanceof Error ? safeMachineCode(error.message) : 'unknown_error';
 }
+
+export const __testing = {
+  normalizeFinalOutputText,
+};
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.resolve();

@@ -4,7 +4,7 @@ import type { IMHost } from '@cindy/im';
 import type { WechatCredentials, WechatTransport } from '@cindy/wechat-ilink';
 
 import type { DbClient } from '../../../localDb/client/DbClient';
-import { sessionIdFor, WechatIM, type WechatIMDeps } from '../WechatIM';
+import { __testing, sessionIdFor, WechatIM, type WechatIMDeps } from '../WechatIM';
 
 describe('WechatIM host boundary', () => {
   it('derives a stable session id without exposing either platform identifier', () => {
@@ -35,6 +35,11 @@ describe('WechatIM host boundary', () => {
     await expect(im.updateInteractiveCard()).rejects.toThrow('WECHAT_RICH_OUTPUT_UNSUPPORTED');
     await expect(im.patchMarkdownCard()).rejects.toThrow('WECHAT_RICH_OUTPUT_UNSUPPORTED');
     await expect(im.startStreamingText('peer')).rejects.toThrow('WECHAT_RICH_OUTPUT_UNSUPPORTED');
+  });
+
+  it('uses the shared empty-output copy after filtering the final text', () => {
+    expect(__testing.normalizeFinalOutputText('')).toBe('✅ (本轮无文本输出)');
+    expect(__testing.normalizeFinalOutputText('hello')).toBe('hello');
   });
 
   it('fails closed before authorization when the signed compatibility policy disables it', async () => {

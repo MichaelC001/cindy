@@ -48,6 +48,25 @@ describe('personal WeChat channel settings', () => {
     expect(fs.statSync(resolved).isDirectory()).toBe(true);
   });
 
+  it('maps unsafe external bot ids to stable managed directory names', () => {
+    const managedRoot = path.join(root, 'im-working-dir');
+    const unsafeIds = ['../../escape', 'nested/bot', 'nested\\bot', 'bot:name'];
+
+    for (const botId of unsafeIds) {
+      const first = resolveWechatWorkingDir(botId, root);
+      const second = resolveWechatWorkingDir(botId, root);
+      expect(first).toBe(second);
+      expect(path.dirname(first)).toBe(managedRoot);
+      expect(path.basename(first)).toMatch(/^wechat-external-[a-f0-9]{24}$/);
+      expect(fs.statSync(first).isDirectory()).toBe(true);
+    }
+
+    expect(resolveWechatWorkingDir('bot-1', root)).toBe(
+      path.join(managedRoot, 'wechat-bot-1'),
+    );
+    expect(fs.existsSync(path.join(root, 'escape'))).toBe(false);
+  });
+
   it('reset removes the override and restores the managed directory', () => {
     const selected = path.join(root, 'project');
     fs.mkdirSync(selected);
