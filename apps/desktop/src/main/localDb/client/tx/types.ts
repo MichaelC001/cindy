@@ -23,7 +23,11 @@ export type DbTxName =
   | 'wechatActivateBindingEpoch'
   | 'wechatCommitPollBatch'
   | 'wechatLeaseNextTask'
+  | 'wechatReleaseDispatch'
   | 'wechatMarkAccepted'
+  | 'wechatSetWaitingDesktop'
+  | 'wechatCommitPreDispatchFailure'
+  | 'wechatCancelForCommand'
   | 'wechatCommitInterrupted'
   | 'wechatCommitTerminal'
   | 'wechatMarkOutboxDelivered'
@@ -499,6 +503,17 @@ export interface WechatMarkAcceptedArgs {
   taskId: string;
 }
 
+export interface WechatReleaseDispatchArgs {
+  bindingEpoch: string;
+  taskId: string;
+}
+
+export interface WechatSetWaitingDesktopArgs {
+  bindingEpoch: string;
+  taskId: string;
+  waiting: boolean;
+}
+
 export interface WechatOutboxChunkInput {
   id: string;
   clientId: string;
@@ -515,6 +530,26 @@ export interface WechatCommitInterruptedArgs {
   errorCode: string;
   outbox?: WechatOutboxChunkInput[];
   context?: WechatEncryptedContext;
+}
+
+export interface WechatCommitPreDispatchFailureArgs {
+  bindingEpoch: string;
+  taskId: string;
+  now: number;
+  errorCode: string;
+  outbox: WechatOutboxChunkInput[];
+}
+
+export interface WechatCancelForCommandArgs {
+  bindingEpoch: string;
+  commandTaskId: string;
+  peerId?: string;
+  now: number;
+}
+
+export interface WechatCancelForCommandResult {
+  cancelled: number;
+  interrupted: number;
 }
 
 export interface WechatCommitTerminalArgs {
@@ -611,7 +646,11 @@ export type DbTxArgsByName = {
   wechatActivateBindingEpoch: WechatActivateBindingEpochArgs;
   wechatCommitPollBatch: WechatCommitPollBatchArgs;
   wechatLeaseNextTask: WechatLeaseNextTaskArgs;
+  wechatReleaseDispatch: WechatReleaseDispatchArgs;
   wechatMarkAccepted: WechatMarkAcceptedArgs;
+  wechatSetWaitingDesktop: WechatSetWaitingDesktopArgs;
+  wechatCommitPreDispatchFailure: WechatCommitPreDispatchFailureArgs;
+  wechatCancelForCommand: WechatCancelForCommandArgs;
   wechatCommitInterrupted: WechatCommitInterruptedArgs;
   wechatCommitTerminal: WechatCommitTerminalArgs;
   wechatMarkOutboxDelivered: WechatMarkOutboxDeliveredArgs;
@@ -647,7 +686,11 @@ export type DbTxResultByName = {
   wechatActivateBindingEpoch: WechatActivateBindingEpochResult;
   wechatCommitPollBatch: WechatCommitPollBatchResult;
   wechatLeaseNextTask: WechatLeasedTask | null;
+  wechatReleaseDispatch: boolean;
   wechatMarkAccepted: boolean;
+  wechatSetWaitingDesktop: boolean;
+  wechatCommitPreDispatchFailure: boolean;
+  wechatCancelForCommand: WechatCancelForCommandResult;
   wechatCommitInterrupted: boolean;
   wechatCommitTerminal: WechatCommitTerminalResult;
   wechatMarkOutboxDelivered: WechatMarkOutboxDeliveredResult;

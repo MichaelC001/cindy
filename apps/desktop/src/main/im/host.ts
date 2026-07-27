@@ -11,9 +11,10 @@
  */
 
 import path from 'node:path';
-import { app, ipcMain, BrowserWindow, net } from 'electron';
+import { app, ipcMain, BrowserWindow, net, shell } from 'electron';
 
 import { createIM, createDiscordIM, createFeishuIM, type IMHost } from '@cindy/im';
+import { TencentIlinkTransport } from '@cindy/wechat-ilink';
 
 import { createLogger } from '../logger';
 import { resolveSafe as resolveXdtImageUrl } from '../imageCacheStore';
@@ -28,6 +29,9 @@ import { t } from '../i18n';
 import { discordUiText } from './discord/uiText';
 import { imHostAccountScope } from './accountScopeBridge';
 import { ownerScopedImSecrets } from './ownerScopedStorage';
+import { captureImAccountGeneration, isImAccountGenerationCurrent } from './accountBoundary';
+import { getDbClient } from '../localDb/client/current';
+import { WechatIM, WECHAT_AUTH_BASE_URL } from './wechat/WechatIM';
 
 const log = createLogger('im/host');
 
@@ -119,4 +123,30 @@ export const discordIm = createDiscordIM(host, {
   expiredCardNotice: discordUiText.expiredCardNotice,
   ownerNoticeText: (phase) => t(`settings.discordBot.ownerNotice.${phase}`),
 });
-export const im = createIM([feishuIm, discordIm]);
+export const wechatIm = new WechatIM({
+  host,
+  getDbClient,
+  createTransport: ({ credentials, onAuthorizationEvent }) =>
+    new TencentIlinkTransport({
+      baseUrl: credentials?.baseUrl ?? WECHAT_AUTH_BASE_URL,
+      ...(credentials
+        ? {
+            token: credentials.botToken,
+            appId: credentials.ilinkBotId,
+          }
+        : {}),
+      botAgent: `Cindy/${app.getVersion()}`,
+      fetch: (input, init) => net.fetch(input instanceof URL ? input.toString() : input, init),
+      ...(onAuthorizationEvent
+        ? {
+            authorizationObserver: {
+              onEvent: onAuthorizationEvent,
+            },
+          }
+        : {}),
+    }),
+  openAuthorizationUrl: (url) => shell.openExternal(url),
+  captureAccountGeneration: captureImAccountGeneration,
+  isAccountGenerationCurrent: isImAccountGenerationCurrent,
+});
+export const im = createIM([feishuIm, discordIm, wechatIm]);

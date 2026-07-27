@@ -26,6 +26,7 @@ const SESSION_SOURCES = [
   'slack',
   'telegram',
   'discord',
+  'wechat',
   'scheduler',
   'learn',
   'shared',

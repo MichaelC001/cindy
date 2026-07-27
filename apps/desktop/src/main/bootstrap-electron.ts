@@ -517,6 +517,7 @@ import {
   IM_DEFAULT_SETTINGS,
   isImDefaultAgentKind,
   isImDefaultEffort,
+  isImDefaultPermissionMode,
   isImDefaultSettingsChannel,
   type ImDefaultAgentKind,
   type ImDefaultAgentSettings,
@@ -5803,6 +5804,12 @@ function parseImDefaultSettingsPatch(raw: unknown): ImDefaultSettingsPatch {
       throwIpcError('INVALID_PARAMS', 'im default agentKind invalid');
     }
     patch.agentKind = input.agentKind;
+  }
+  if ('permissionMode' in input) {
+    if (!isImDefaultPermissionMode(input.permissionMode)) {
+      throwIpcError('INVALID_PARAMS', 'im default permissionMode invalid');
+    }
+    patch.permissionMode = input.permissionMode;
   }
   if ('agents' in input) {
     if (!input.agents || typeof input.agents !== 'object' || Array.isArray(input.agents)) {

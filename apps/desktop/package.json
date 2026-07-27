@@ -134,6 +134,7 @@
     "jszip": "^3.10.1",
     "katex": "^0.16.45",
     "@cindy/im": "workspace:*",
+    "@cindy/wechat-ilink": "workspace:*",
     "@cindy/mcps": "workspace:*",
     "loudness": "^0.4.2",
     "lucide-react": "^0.468.0",

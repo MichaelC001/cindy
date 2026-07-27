@@ -1697,6 +1697,10 @@ export function createTurnRunner(
 
   /** 处理一条 scheduler-origin stray 事件,转播到远程控制 thread。 */
   function transpondScheduledEvent(state: SessionState, event: AgentEvent): void {
+    // Durable text channels need an inbound context token to address replies.
+    // A desktop-originated scheduler turn has no such token, so it cannot be
+    // safely mirrored and must never fall through to rich-card primitives.
+    if (output.kind === 'chunked-text') return;
     // 首条事件惰性建转播态(避免给空 turn 开卡)。
     if (!state.scheduledTranspond) {
       const origin = event.turnOrigin;

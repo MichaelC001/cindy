@@ -21,7 +21,7 @@ import type { AgentKind, Effort, PermissionMode } from '@cindy/maker-core';
 import type { ChannelIM, ImOutputDriver, IMUnsupportedEntry } from '@cindy/im';
 
 /** 渠道名 — 同时是 sessions.source 列值与 IdentityKey.channel 的值域。 */
-export type ImChannelName = 'feishu' | 'slack' | 'discord';
+export type ImChannelName = 'feishu' | 'slack' | 'discord' | 'wechat';
 
 /**
  * IM 编排层的产品默认配置(由 main/im/index.ts 产品接线层注入)。

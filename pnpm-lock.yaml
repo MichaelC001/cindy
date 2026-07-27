@@ -116,6 +116,9 @@ importers:
       '@cindy/voice-input-core':
         specifier: workspace:*
         version: link:../../packages/voice-input-core
+      '@cindy/wechat-ilink':
+        specifier: workspace:*
+        version: link:../../packages/wechat-ilink
       '@codemirror/commands':
         specifier: ^6.10.3
         version: 6.10.4

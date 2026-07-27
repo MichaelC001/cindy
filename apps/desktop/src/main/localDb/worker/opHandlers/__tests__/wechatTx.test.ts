@@ -228,6 +228,122 @@ describe('WeChat reliable worker transactions', () => {
     expect(readTaskStatus(db, 'task-1')).toBe('delivery_pending');
   });
 
+  it('releases a busy pre-dispatch lease and persists Desktop-waiting state', () => {
+    const db = createDb();
+    activate(db, 'epoch-1', null);
+    commitBatch(db, {
+      bindingEpoch: 'epoch-1',
+      expectedCursor: '',
+      nextCursor: 'cursor-1',
+      messages: [message('task-1', 'platform-1', 'session-1')],
+    });
+
+    lease(db, 'epoch-1', 200);
+    expect(
+      runTx(db, 'wechatReleaseDispatch', {
+        bindingEpoch: 'epoch-1',
+        taskId: 'task-1',
+      }),
+    ).toBe(true);
+    expect(readTaskStatus(db, 'task-1')).toBe('pending');
+
+    lease(db, 'epoch-1', 201);
+    expect(
+      runTx(db, 'wechatMarkAccepted', {
+        bindingEpoch: 'epoch-1',
+        taskId: 'task-1',
+      }),
+    ).toBe(true);
+    expect(
+      runTx(db, 'wechatSetWaitingDesktop', {
+        bindingEpoch: 'epoch-1',
+        taskId: 'task-1',
+        waiting: true,
+      }),
+    ).toBe(true);
+    expect(readTaskStatus(db, 'task-1')).toBe('waiting_desktop');
+    expect(
+      runTx(db, 'wechatSetWaitingDesktop', {
+        bindingEpoch: 'epoch-1',
+        taskId: 'task-1',
+        waiting: false,
+      }),
+    ).toBe(true);
+    expect(readTaskStatus(db, 'task-1')).toBe('accepted_running');
+  });
+
+  it('commits a pre-dispatch rejection without crossing the accepted barrier', () => {
+    const db = createDb();
+    activate(db, 'epoch-1', null);
+    commitBatch(db, {
+      bindingEpoch: 'epoch-1',
+      expectedCursor: '',
+      nextCursor: 'cursor-1',
+      messages: [message('task-1', 'platform-1', 'session-1')],
+    });
+    lease(db, 'epoch-1', 200);
+
+    expect(
+      runTx(db, 'wechatCommitPreDispatchFailure', {
+        bindingEpoch: 'epoch-1',
+        taskId: 'task-1',
+        now: 201,
+        errorCode: 'UNSUPPORTED_PERMISSION_MODE',
+        outbox: [
+          {
+            ...outbox('outbox-error', 'client-error', 0, '请修改权限模式。'),
+            kind: 'error',
+          },
+        ],
+      }),
+    ).toBe(true);
+    expect(readTaskStatus(db, 'task-1')).toBe('delivery_pending');
+    expect(
+      db.prepare('SELECT kind, text FROM wechat_outbox WHERE task_id = ?').get('task-1'),
+    ).toEqual({ kind: 'error', text: '请修改权限模式。' });
+  });
+
+  it('lets a stop command interrupt its peer without consuming the command task', () => {
+    const db = createDb();
+    activate(db, 'epoch-1', null);
+    commitBatch(db, {
+      bindingEpoch: 'epoch-1',
+      expectedCursor: '',
+      nextCursor: 'cursor-1',
+      messages: [message('active-task', 'platform-1', 'session-1')],
+    });
+    expect(lease(db, 'epoch-1', 200)).toMatchObject({ id: 'active-task' });
+    runTx(db, 'wechatMarkAccepted', {
+      bindingEpoch: 'epoch-1',
+      taskId: 'active-task',
+    });
+    commitBatch(db, {
+      bindingEpoch: 'epoch-1',
+      expectedCursor: 'cursor-1',
+      nextCursor: 'cursor-2',
+      messages: [
+        {
+          ...message('stop-command', 'platform-2', 'session-1'),
+          payloadJson: JSON.stringify({ text: '/stop' }),
+        },
+        message('other-peer-task', 'platform-3', 'session-2'),
+      ],
+    });
+
+    expect(
+      runTx(db, 'wechatCancelForCommand', {
+        bindingEpoch: 'epoch-1',
+        commandTaskId: 'stop-command',
+        peerId: 'peer-session-1',
+        now: 201,
+      }),
+    ).toEqual({ cancelled: 0, interrupted: 1 });
+    expect(readTaskStatus(db, 'active-task')).toBe('interrupted');
+    expect(readTaskStatus(db, 'stop-command')).toBe('pending');
+    expect(readTaskStatus(db, 'other-peer-task')).toBe('pending');
+    expect(lease(db, 'epoch-1', 202)).toMatchObject({ id: 'stop-command' });
+  });
+
   it('commits every final chunk before delivery_pending and completes after all deliveries', () => {
     const db = createDb();
     activate(db, 'epoch-1', null);

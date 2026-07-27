@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 
 import type {
   WechatActivateBindingEpochResult,
+  WechatCancelForCommandResult,
   WechatCommitPollBatchResult,
   WechatCommitTerminalResult,
   WechatInboxStatus,
@@ -277,7 +278,13 @@ export function wechatLeaseNextTask(db: Database.Database, args: unknown): Wecha
                AND running.session_id = i.session_id
                AND running.status IN (${sqlPlaceholders(RUNNING_STATUSES.length)})
            )
-         ORDER BY i.received_at ASC, i.id ASC
+         ORDER BY
+           CASE
+             WHEN json_extract(i.payload_json, '$.text') IN ('/stop', '/stop all') THEN 0
+             ELSE 1
+           END,
+           i.received_at ASC,
+           i.id ASC
          LIMIT 1`,
       )
       .get(bindingEpoch, now, ...RUNNING_STATUSES) as
@@ -343,6 +350,43 @@ export function wechatMarkAccepted(db: Database.Database, args: unknown): boolea
   })();
 }
 
+export function wechatReleaseDispatch(db: Database.Database, args: unknown): boolean {
+  const payload = asRecord(args, 'wechatReleaseDispatch args');
+  const bindingEpoch = expectId(payload.bindingEpoch, 'bindingEpoch');
+  const taskId = expectId(payload.taskId, 'taskId');
+  return db.transaction(() => {
+    if (readActiveEpoch(db)?.bindingEpoch !== bindingEpoch) return false;
+    const result = db
+      .prepare(
+        `UPDATE wechat_inbox
+         SET status = 'pending', lease_until = NULL
+         WHERE id = ? AND binding_epoch = ? AND status = 'dispatching'`,
+      )
+      .run(taskId, bindingEpoch);
+    return result.changes === 1;
+  })();
+}
+
+export function wechatSetWaitingDesktop(db: Database.Database, args: unknown): boolean {
+  const payload = asRecord(args, 'wechatSetWaitingDesktop args');
+  const bindingEpoch = expectId(payload.bindingEpoch, 'bindingEpoch');
+  const taskId = expectId(payload.taskId, 'taskId');
+  const waiting = expectBoolean(payload.waiting, 'waiting');
+  const from = waiting ? 'accepted_running' : 'waiting_desktop';
+  const to = waiting ? 'waiting_desktop' : 'accepted_running';
+  return db.transaction(() => {
+    if (readActiveEpoch(db)?.bindingEpoch !== bindingEpoch) return false;
+    const result = db
+      .prepare(
+        `UPDATE wechat_inbox
+         SET status = ?
+         WHERE id = ? AND binding_epoch = ? AND status = ?`,
+      )
+      .run(to, taskId, bindingEpoch, from);
+    return result.changes === 1;
+  })();
+}
+
 export function wechatCommitInterrupted(db: Database.Database, args: unknown): boolean {
   const payload = asRecord(args, 'wechatCommitInterrupted args');
   const bindingEpoch = expectId(payload.bindingEpoch, 'bindingEpoch');
@@ -394,6 +438,105 @@ export function wechatCommitInterrupted(db: Database.Database, args: unknown): b
       releaseTaskMediaRefs(db, taskId);
     }
     return true;
+  })();
+}
+
+export function wechatCommitPreDispatchFailure(db: Database.Database, args: unknown): boolean {
+  const payload = asRecord(args, 'wechatCommitPreDispatchFailure args');
+  const bindingEpoch = expectId(payload.bindingEpoch, 'bindingEpoch');
+  const taskId = expectId(payload.taskId, 'taskId');
+  const now = expectTimestamp(payload.now, 'now');
+  const errorCode = expectMachineCode(payload.errorCode, 'errorCode');
+  const outbox = parseOutbox(payload.outbox, 'outbox');
+  if (outbox.length === 0) throw invalidArgs('outbox must contain at least one chunk');
+
+  return db.transaction(() => {
+    if (readActiveEpoch(db)?.bindingEpoch !== bindingEpoch) return false;
+    const row = db
+      .prepare('SELECT status FROM wechat_inbox WHERE id = ? AND binding_epoch = ?')
+      .get(taskId, bindingEpoch) as InboxStatusRow | undefined;
+    if (row?.status !== 'dispatching') return false;
+    const insertOutbox = prepareOutboxInsert(db);
+    for (const chunk of outbox) {
+      insertOutboxChunk(insertOutbox, bindingEpoch, taskId, chunk, now);
+    }
+    const updated = db
+      .prepare(
+        `UPDATE wechat_inbox
+         SET status = 'delivery_pending', lease_until = NULL, last_error_code = ?
+         WHERE id = ? AND binding_epoch = ? AND status = 'dispatching'`,
+      )
+      .run(errorCode, taskId, bindingEpoch);
+    if (updated.changes !== 1) {
+      throw invariantViolation('pre-dispatch outbox was inserted without task transition');
+    }
+    return true;
+  })();
+}
+
+export function wechatCancelForCommand(
+  db: Database.Database,
+  args: unknown,
+): WechatCancelForCommandResult {
+  const payload = asRecord(args, 'wechatCancelForCommand args');
+  const bindingEpoch = expectId(payload.bindingEpoch, 'bindingEpoch');
+  const commandTaskId = expectId(payload.commandTaskId, 'commandTaskId');
+  const peerId = payload.peerId === undefined ? null : expectString(payload.peerId, 'peerId', 512);
+  const now = expectTimestamp(payload.now, 'now');
+
+  return db.transaction(() => {
+    if (readActiveEpoch(db)?.bindingEpoch !== bindingEpoch) {
+      return { cancelled: 0, interrupted: 0 };
+    }
+    const command = db
+      .prepare(
+        `SELECT peer_id AS peerId, status
+         FROM wechat_inbox
+         WHERE binding_epoch = ? AND id = ?`,
+      )
+      .get(bindingEpoch, commandTaskId) as
+      { peerId: string; status: WechatInboxStatus } | undefined;
+    if (!command || command.status !== 'pending') {
+      return { cancelled: 0, interrupted: 0 };
+    }
+    if (peerId !== null && command.peerId !== peerId) {
+      throw invalidArgs('command task peer does not match peerId');
+    }
+
+    const peerClause = peerId === null ? '' : ' AND peer_id = ?';
+    const peerParams = peerId === null ? [] : [peerId];
+    const cancellable = db
+      .prepare(
+        `SELECT id FROM wechat_inbox
+         WHERE binding_epoch = ? AND id != ?
+           AND status IN ('pending', 'dispatching')${peerClause}`,
+      )
+      .all(bindingEpoch, commandTaskId, ...peerParams) as Array<{ id: string }>;
+    const cancelled = db
+      .prepare(
+        `UPDATE wechat_inbox
+         SET status = 'cancelled', lease_until = NULL, last_error_code = 'STOPPED_BY_USER'
+         WHERE binding_epoch = ? AND id != ?
+           AND status IN ('pending', 'dispatching')${peerClause}`,
+      )
+      .run(bindingEpoch, commandTaskId, ...peerParams).changes;
+    for (const row of cancellable) releaseTaskMediaRefs(db, row.id);
+
+    const interrupted = db
+      .prepare(
+        `UPDATE wechat_inbox
+         SET status = 'interrupted', lease_until = NULL, last_error_code = 'STOPPED_BY_USER'
+         WHERE binding_epoch = ? AND id != ?
+           AND status IN ('accepted_running', 'waiting_desktop')${peerClause}`,
+      )
+      .run(bindingEpoch, commandTaskId, ...peerParams).changes;
+
+    db.prepare(
+      `UPDATE wechat_sync_state
+       SET updated_at = ?
+       WHERE binding_epoch = ? AND is_active = 1`,
+    ).run(now, bindingEpoch);
+    return { cancelled, interrupted };
   })();
 }
 

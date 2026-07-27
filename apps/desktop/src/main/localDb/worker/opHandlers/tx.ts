@@ -7,14 +7,18 @@ import type { DbTxName } from '../../client/tx/types.js';
 import { normalizeWorkingDirForStorage } from '../../../../shared/workingDir.js';
 import {
   wechatActivateBindingEpoch,
+  wechatCancelForCommand,
   wechatCloseBindingEpoch,
   wechatCommitInterrupted,
+  wechatCommitPreDispatchFailure,
   wechatCommitPollBatch,
   wechatCommitTerminal,
   wechatLeaseNextTask,
   wechatMarkAccepted,
   wechatMarkOutboxDelivered,
   wechatRecordOutboxFailure,
+  wechatReleaseDispatch,
+  wechatSetWaitingDesktop,
   wechatStopAll,
   wechatUnbindCleanup,
 } from './wechatTx.js';
@@ -77,8 +81,16 @@ export function tx(db: Database.Database, args: unknown): unknown {
       return wechatCommitPollBatch(db, txArgs);
     case 'wechatLeaseNextTask':
       return wechatLeaseNextTask(db, txArgs);
+    case 'wechatReleaseDispatch':
+      return wechatReleaseDispatch(db, txArgs);
     case 'wechatMarkAccepted':
       return wechatMarkAccepted(db, txArgs);
+    case 'wechatSetWaitingDesktop':
+      return wechatSetWaitingDesktop(db, txArgs);
+    case 'wechatCommitPreDispatchFailure':
+      return wechatCommitPreDispatchFailure(db, txArgs);
+    case 'wechatCancelForCommand':
+      return wechatCancelForCommand(db, txArgs);
     case 'wechatCommitInterrupted':
       return wechatCommitInterrupted(db, txArgs);
     case 'wechatCommitTerminal':

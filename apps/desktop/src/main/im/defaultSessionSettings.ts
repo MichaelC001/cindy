@@ -86,7 +86,7 @@ export async function resolveImSessionDefaults(
     model: model.modelId,
     effort,
     providerId,
-    permissionMode: config.defaultPermissionMode,
+    permissionMode: raw.permissionMode ?? config.defaultPermissionMode,
     fastMode: false,
   };
 }

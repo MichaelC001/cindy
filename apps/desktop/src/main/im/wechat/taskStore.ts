@@ -1,6 +1,7 @@
 import type { DbClient } from '../../localDb/client/DbClient.js';
 import type {
   WechatActivateBindingEpochResult,
+  WechatCancelForCommandResult,
   WechatCommitPollBatchResult,
   WechatCommitTerminalResult,
   WechatMarkOutboxDeliveredResult,
@@ -73,6 +74,11 @@ export interface WechatOutboxRecord {
   contextToken: string;
 }
 
+export interface WechatActiveBinding {
+  bindingEpoch: string;
+  cursor: string;
+}
+
 interface WechatOutboxRow extends Omit<WechatOutboxRecord, 'contextToken'> {
   bindingEpoch: string;
   contextNonce: string;
@@ -92,6 +98,54 @@ export class WechatTaskStore {
 
   destroy(): void {
     this.#dataKey.fill(0);
+  }
+
+  async getActiveBinding(): Promise<WechatActiveBinding | null> {
+    const row = await this.#db.queryOne<{ bindingEpoch: string; cursor: string }>(
+      `SELECT binding_epoch AS bindingEpoch, sync_cursor AS cursor
+       FROM wechat_sync_state
+       WHERE is_active = 1
+       LIMIT 1`,
+    );
+    return row ?? null;
+  }
+
+  async getConversationEpoch(bindingEpoch: string, peerId: string): Promise<number> {
+    const row = await this.#db.queryOne<{ conversationEpoch: number }>(
+      `SELECT COALESCE(MAX(conversation_epoch), 0) AS conversationEpoch
+       FROM wechat_inbox
+       WHERE binding_epoch = ? AND peer_id = ?`,
+      [bindingEpoch, peerId],
+    );
+    return row?.conversationEpoch ?? 0;
+  }
+
+  async advanceConversationEpoch(
+    bindingEpoch: string,
+    taskId: string,
+    peerId: string,
+  ): Promise<number> {
+    const current = await this.getConversationEpoch(bindingEpoch, peerId);
+    const next = current + 1;
+    const result = await this.#db.exec(
+      `UPDATE wechat_inbox
+       SET conversation_epoch = ?
+       WHERE binding_epoch = ? AND id = ? AND peer_id = ?`,
+      [next, bindingEpoch, taskId, peerId],
+    );
+    if (result.changes !== 1) throw new Error('WECHAT_CONVERSATION_EPOCH_STALE');
+    return next;
+  }
+
+  async countQueuedTasks(bindingEpoch: string): Promise<number> {
+    const row = await this.#db.queryOne<{ count: number }>(
+      `SELECT COUNT(*) AS count
+       FROM wechat_inbox
+       WHERE binding_epoch = ?
+         AND status IN ('pending', 'dispatching', 'accepted_running', 'waiting_desktop')`,
+      [bindingEpoch],
+    );
+    return row?.count ?? 0;
   }
 
   activateBindingEpoch(args: {
@@ -174,6 +228,14 @@ export class WechatTaskStore {
     return this.#db.tx('wechatMarkAccepted', { bindingEpoch, taskId });
   }
 
+  releaseDispatch(bindingEpoch: string, taskId: string): Promise<boolean> {
+    return this.#db.tx('wechatReleaseDispatch', { bindingEpoch, taskId });
+  }
+
+  setWaitingDesktop(bindingEpoch: string, taskId: string, waiting: boolean): Promise<boolean> {
+    return this.#db.tx('wechatSetWaitingDesktop', { bindingEpoch, taskId, waiting });
+  }
+
   commitInterrupted(args: {
     bindingEpoch: string;
     taskId: string;
@@ -190,6 +252,25 @@ export class WechatTaskStore {
           ? undefined
           : encryptWechatContextToken(contextToken, this.#dataKey, args.bindingEpoch, args.taskId),
     });
+  }
+
+  commitPreDispatchFailure(args: {
+    bindingEpoch: string;
+    taskId: string;
+    now: number;
+    errorCode: string;
+    outbox: WechatOutboxChunkInput[];
+  }): Promise<boolean> {
+    return this.#db.tx('wechatCommitPreDispatchFailure', args);
+  }
+
+  cancelForCommand(args: {
+    bindingEpoch: string;
+    commandTaskId: string;
+    peerId?: string;
+    now: number;
+  }): Promise<WechatCancelForCommandResult> {
+    return this.#db.tx('wechatCancelForCommand', args);
   }
 
   commitTerminal(args: {
