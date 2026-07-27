@@ -545,12 +545,82 @@ export class RsbWebviewBackend implements BrowserBackend {
       });
     }
 
-    const runAction = async () => {
-      await this.tryObservePageSignals(wc, tabId);
-      const data = await this.automation.act(tabId, wc, inner);
-      return data;
-    };
     return this.withTabPin(tabId, async () => {
+      await this.tryObserveNetwork(wc, tabId);
+      await this.dialogs.observe(wc);
+      const pendingDialog = this.dialogs.pending(wc);
+      if (pendingDialog) {
+        return actionOk(req.action, {
+          tabId,
+          kind: inner.kind,
+          barrier: { kind: 'page-dialog', dialog: pendingDialog },
+        });
+      }
+
+      const opening = this.dialogs.watchOpening(wc);
+      const actionStartedAt = Date.now();
+      const runAction = async () => {
+        const dialogBeforeStart = this.dialogs.pending(wc);
+        if (dialogBeforeStart) {
+          opening.cancel();
+          return {
+            tabId,
+            kind: inner.kind,
+            barrier: { kind: 'page-dialog', dialog: dialogBeforeStart },
+          };
+        }
+        const actionPromise = this.automation.act(tabId, wc, inner);
+        const outcome = await Promise.race([
+          actionPromise.then((value) => ({ type: 'action' as const, value })),
+          opening.opened.then((dialog) => ({ type: 'dialog' as const, dialog })),
+        ]);
+        if (outcome.type === 'action') {
+          opening.cancel();
+          const closedDialog = this.dialogs.recent(
+            wc,
+            undefined,
+            actionStartedAt,
+          );
+          if (closedDialog && closedDialog.type !== 'alert') {
+            return {
+              tabId,
+              kind: inner.kind,
+              barrier: { kind: 'page-dialog', dialog: closedDialog },
+            };
+          }
+          if (closedDialog) {
+            return {
+              ...outcome.value,
+              dialogs: [{ ...closedDialog, handled: true }],
+            };
+          }
+          return outcome.value;
+        }
+        if (outcome.dialog.type === 'alert') {
+          const value = await actionPromise;
+          const closedDialog = this.dialogs.recent(wc, outcome.dialog.id);
+          return {
+            ...value,
+            dialogs: [{
+              ...(closedDialog ?? outcome.dialog),
+              handled: true,
+            }],
+          };
+        }
+        void actionPromise.catch((err) => {
+          this.opts.logger.warn('browser action failed after a page dialog opened', {
+            tabId,
+            actionKind: inner.kind,
+            err,
+          });
+        });
+        return {
+          tabId,
+          kind: inner.kind,
+          barrier: { kind: 'page-dialog', dialog: outcome.dialog },
+        };
+      };
+
       const captured = this.artifacts
         && mayStartDownload(inner.kind)
         ? await this.artifacts.capture(
@@ -616,12 +686,69 @@ export class RsbWebviewBackend implements BrowserBackend {
     const resolved = await this.resolveTabForDirectAction(req, tabId);
     if (!resolved.ok) return resolved.result;
     return this.withTabPin(tabId, async () => {
-      const dialog = await this.dialogs.respond(resolved.wc, {
-        dialogId: req.dialogId,
-        accept: req.accept,
-        promptText: req.promptText,
-        timeoutMs: req.timeoutMs,
-      });
+      let dialog;
+      try {
+        dialog = await this.dialogs.respond(resolved.wc, {
+          dialogId: req.dialogId,
+          accept: req.accept,
+          promptText: req.promptText,
+          timeoutMs: req.timeoutMs,
+        });
+      } catch (err) {
+        if (
+          !(err instanceof Error)
+          || err.message !== 'no page dialog is pending'
+          || req.accept !== true
+        ) {
+          throw err;
+        }
+        const armed = this.dialogs.armNext(resolved.wc, {
+          accept: true,
+          promptText: req.promptText,
+          timeoutMs: req.timeoutMs,
+        });
+        void armed.response.catch((responseErr) => {
+          this.opts.logger.warn('prepared page dialog response expired', {
+            tabId,
+            err: responseErr,
+          });
+        });
+        return actionOk(req.action, {
+          tabId,
+          armed: true,
+          retryRequired: true,
+        });
+      }
+      if (dialog.deferred) {
+        if (
+          dialog.closedBy === 'armed'
+          || dialog.type === 'alert'
+          || req.accept !== true
+        ) {
+          return actionOk(req.action, {
+            tabId,
+            dialog,
+            handled: true,
+          });
+        }
+        const armed = this.dialogs.armNext(resolved.wc, {
+          accept: true,
+          promptText: req.promptText,
+          timeoutMs: req.timeoutMs,
+        });
+        void armed.response.catch((err) => {
+          this.opts.logger.warn('prepared page dialog response expired', {
+            tabId,
+            err,
+          });
+        });
+        return actionOk(req.action, {
+          tabId,
+          dialog,
+          armed: true,
+          retryRequired: true,
+        });
+      }
       return actionOk(req.action, { tabId, dialog });
     });
   }

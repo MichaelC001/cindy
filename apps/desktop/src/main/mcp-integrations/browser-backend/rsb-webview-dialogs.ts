@@ -19,6 +19,15 @@ export interface BrowserPageDialog {
   message: string;
   defaultValue?: string;
   openedAt: string;
+  closedBy?: 'agent' | 'armed' | 'auto';
+}
+
+interface PreparedResponse {
+  accept: boolean;
+  promptText?: string;
+  resolve(dialog: BrowserPageDialog): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface DialogState {
@@ -26,6 +35,13 @@ interface DialogState {
   ownedAttachment: boolean;
   enabled: boolean;
   pending?: BrowserPageDialog;
+  recent?: BrowserPageDialog;
+  prepared?: PreparedResponse;
+  handledIds: Map<string, 'agent' | 'armed'>;
+  openingWaiters: Set<{
+    resolve(dialog: BrowserPageDialog): void;
+    reject(error: Error): void;
+  }>;
   messageHandler: (...args: unknown[]) => void;
   detachHandler: (...args: unknown[]) => void;
   destroyedHandler: (...args: unknown[]) => void;
@@ -33,6 +49,8 @@ interface DialogState {
 
 const DEFAULT_WAIT_MS = 10_000;
 const MAX_WAIT_MS = 60_000;
+const DEFAULT_ARM_WAIT_MS = 120_000;
+const MAX_ARM_WAIT_MS = 300_000;
 const MAX_DIALOG_TEXT = 16_000;
 const MAX_PROMPT_TEXT = 32_000;
 
@@ -50,6 +68,12 @@ function boundedWait(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
     ? Math.min(MAX_WAIT_MS, Math.floor(value))
     : DEFAULT_WAIT_MS;
+}
+
+function boundedArmWait(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.min(MAX_ARM_WAIT_MS, Math.floor(value))
+    : DEFAULT_ARM_WAIT_MS;
 }
 
 function debuggerFor(wc: WebContents): ElectronDebugger {
@@ -87,6 +111,55 @@ export class RsbWebviewDialogs {
     return dialog ? { ...dialog } : undefined;
   }
 
+  recent(
+    wc: WebContents,
+    dialogId?: string,
+    openedAfter?: number,
+  ): BrowserPageDialog | undefined {
+    const dialog = this.states.get(wc)?.recent;
+    if (!dialog || (dialogId && dialog.id !== dialogId)) return undefined;
+    if (
+      openedAfter !== undefined
+      && Date.parse(dialog.openedAt) < openedAfter
+    ) {
+      return undefined;
+    }
+    return { ...dialog };
+  }
+
+  watchOpening(wc: WebContents): {
+    opened: Promise<BrowserPageDialog>;
+    cancel(): void;
+  } {
+    const state = this.states.get(wc);
+    if (!state?.enabled) {
+      throw new Error('page dialog monitor is not active');
+    }
+    if (state.pending) {
+      return {
+        opened: Promise.resolve({ ...state.pending }),
+        cancel: () => {},
+      };
+    }
+    let active = true;
+    let waiter!: {
+      resolve(dialog: BrowserPageDialog): void;
+      reject(error: Error): void;
+    };
+    const opened = new Promise<BrowserPageDialog>((resolve, reject) => {
+      waiter = { resolve, reject };
+      state.openingWaiters.add(waiter);
+    });
+    return {
+      opened,
+      cancel: () => {
+        if (!active) return;
+        active = false;
+        state.openingWaiters.delete(waiter);
+      },
+    };
+  }
+
   async respond(
     wc: WebContents,
     options: {
@@ -95,7 +168,7 @@ export class RsbWebviewDialogs {
       promptText?: string;
       timeoutMs?: number;
     },
-  ): Promise<BrowserPageDialog & { accepted: boolean }> {
+  ): Promise<BrowserPageDialog & { accepted: boolean; deferred: boolean }> {
     if (options.dialogId && options.dialogId.length > 256) {
       throw new Error('dialogId is too long');
     }
@@ -119,11 +192,23 @@ export class RsbWebviewDialogs {
       if (current && options.dialogId && current.id !== options.dialogId) {
         throw new Error(`dialog ${options.dialogId} is no longer pending`);
       }
+      const recent = state.recent;
+      if (recent && (!options.dialogId || recent.id === options.dialogId)) {
+        return {
+          ...recent,
+          accepted: options.accept === true,
+          deferred: true,
+        };
+      }
+      if (recent && options.dialogId && recent.id !== options.dialogId) {
+        throw new Error(`dialog ${options.dialogId} is no longer pending`);
+      }
       if (Date.now() >= deadline) throw new Error('no page dialog is pending');
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
 
     const accepted = options.accept === true;
+    state.handledIds.set(dialog.id, 'agent');
     await state.debugger.sendCommand('Page.handleJavaScriptDialog', {
       accept: accepted,
       ...(accepted && typeof options.promptText === 'string'
@@ -131,7 +216,56 @@ export class RsbWebviewDialogs {
         : {}),
     });
     if (state.pending?.id === dialog.id) state.pending = undefined;
-    return { ...dialog, accepted };
+    return { ...dialog, accepted, deferred: false };
+  }
+
+  armNext(
+    wc: WebContents,
+    options: {
+      accept: boolean;
+      promptText?: string;
+      timeoutMs?: number;
+    },
+  ): { response: Promise<BrowserPageDialog>; cancel(): void } {
+    const state = this.states.get(wc);
+    if (!state?.enabled) {
+      throw new Error('page dialog monitor is not active');
+    }
+    if (state.prepared) {
+      clearTimeout(state.prepared.timer);
+      state.prepared.reject(new Error('page dialog response was replaced'));
+      state.prepared = undefined;
+    }
+    let active = true;
+    let prepared!: PreparedResponse;
+    const response = new Promise<BrowserPageDialog>((resolve, reject) => {
+      const timeout = boundedArmWait(options.timeoutMs);
+      const timer = setTimeout(() => {
+        if (!active || state.prepared !== prepared) return;
+        active = false;
+        state.prepared = undefined;
+        reject(new Error('armed page dialog response expired'));
+      }, timeout);
+      prepared = {
+        accept: options.accept === true,
+        ...(typeof options.promptText === 'string'
+          ? { promptText: options.promptText }
+          : {}),
+        resolve,
+        reject,
+        timer,
+      };
+      state.prepared = prepared;
+    });
+    return {
+      response,
+      cancel: () => {
+        if (!active || state.prepared !== prepared) return;
+        active = false;
+        clearTimeout(prepared.timer);
+        state.prepared = undefined;
+      },
+    };
   }
 
   diagnostics(): { observedTabs: number; pendingDialogs: number } {
@@ -152,6 +286,8 @@ export class RsbWebviewDialogs {
       debugger: electronDebugger,
       ownedAttachment: false,
       enabled: false,
+      openingWaiters: new Set(),
+      handledIds: new Map(),
       messageHandler: () => {},
       detachHandler: () => {},
       destroyedHandler: () => {},
@@ -164,7 +300,7 @@ export class RsbWebviewDialogs {
           : {};
         if (method === 'Page.javascriptDialogOpening') {
           dialogSequence += 1;
-          state.pending = {
+          const dialog: BrowserPageDialog = {
             id: `page-dialog-${Date.now().toString(36)}-${dialogSequence.toString(36)}`,
             type: boundedText(params.type, 64) || 'alert',
             message: boundedText(params.message),
@@ -173,7 +309,35 @@ export class RsbWebviewDialogs {
               : {}),
             openedAt: new Date().toISOString(),
           };
+          state.pending = dialog;
+          for (const waiter of state.openingWaiters) {
+            waiter.resolve({ ...dialog });
+          }
+          state.openingWaiters.clear();
+          const prepared = state.prepared;
+          if (prepared) {
+            state.prepared = undefined;
+            clearTimeout(prepared.timer);
+            state.handledIds.set(dialog.id, 'armed');
+            void state.debugger.sendCommand('Page.handleJavaScriptDialog', {
+              accept: prepared.accept,
+              ...(prepared.accept && typeof prepared.promptText === 'string'
+                ? { promptText: prepared.promptText }
+                : {}),
+            }).then(
+              () => prepared.resolve({ ...dialog, closedBy: 'armed' }),
+              (err) => prepared.reject(
+                err instanceof Error ? err : new Error(String(err)),
+              ),
+            );
+          }
         } else if (method === 'Page.javascriptDialogClosed') {
+          const dialog = state.pending;
+          if (dialog) {
+            const closedBy = state.handledIds.get(dialog.id) ?? 'auto';
+            state.handledIds.delete(dialog.id);
+            state.recent = { ...dialog, closedBy };
+          }
           state.pending = undefined;
         }
       } catch (err) {
@@ -203,6 +367,15 @@ export class RsbWebviewDialogs {
     } catch {
       // The guest may already be destroyed.
     }
+    if (state.prepared) {
+      clearTimeout(state.prepared.timer);
+      state.prepared.reject(new Error('page dialog monitor was released'));
+      state.prepared = undefined;
+    }
+    for (const waiter of state.openingWaiters) {
+      waiter.reject(new Error('page dialog monitor was released'));
+    }
+    state.openingWaiters.clear();
     if (state.ownedAttachment) {
       try {
         if (state.debugger.isAttached()) state.debugger.detach();

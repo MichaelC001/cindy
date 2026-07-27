@@ -482,6 +482,8 @@ describe('RsbWebviewBackend — act:evaluate', () => {
         attach: vi.fn(),
         detach: vi.fn(),
         sendCommand,
+        on: vi.fn(),
+        removeListener: vi.fn(),
       },
     });
     const res = await backend.call({
@@ -944,7 +946,11 @@ describe('RsbWebviewBackend — MCP session id injection', () => {
 });
 
 describe('RsbWebviewBackend — uploads and page dialogs', () => {
-  function buildPageEnv(options?: { uploadRoot?: string; resourceUrl?: string }) {
+  function buildPageEnv(options?: {
+    uploadRoot?: string;
+    resourceUrl?: string;
+    onDialogHandled?: () => void;
+  }) {
     let attached = false;
     const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
     const sessionListeners = new Map<string, Set<(...args: unknown[]) => void>>();
@@ -968,7 +974,10 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
         return { result: { value: { ok: true, multiple: true } } };
       }
       if (method === 'DOM.setFileInputFiles') return {};
-      if (method === 'Page.handleJavaScriptDialog') return {};
+      if (method === 'Page.handleJavaScriptDialog') {
+        options?.onDialogHandled?.();
+        return {};
+      }
       throw new Error(`unexpected command: ${method}`);
     });
     const wc = fakeWc();
@@ -1043,7 +1052,7 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
         listener({}, method, params);
       }
     };
-    return { backend, emit, sendCommand, downloadURL };
+    return { backend, emit, sendCommand, downloadURL, wc };
   }
 
   it('validates upload paths before assigning files to the page input', async () => {
@@ -1106,6 +1115,240 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
     );
     await env.backend.dispose();
   });
+
+  it('returns a dialog barrier when a page action is blocked by the dialog', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-browser-dialog-action-'));
+    let finishAction = () => {};
+    const env = buildPageEnv({
+      uploadRoot: root,
+      onDialogHandled: () => finishAction(),
+    });
+    const automation = (env.backend as unknown as {
+      automation: {
+        act: (
+          tabId: string,
+          wc: WebContents,
+          request: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+      };
+    }).automation;
+    const actionFinished = vi.fn();
+    const actSpy = vi.spyOn(automation, 'act').mockImplementation(
+      () => new Promise((resolve) => {
+        finishAction = () => {
+          actionFinished();
+          resolve({ tabId: 't1', kind: 'click' });
+        };
+      }),
+    );
+
+    try {
+      const action = env.backend.call({
+        action: 'act',
+        targetId: 't1',
+        request: { kind: 'click', targetId: 't1', ref: 'button-1' },
+      });
+      await vi.waitFor(() => expect(actSpy).toHaveBeenCalledTimes(1));
+      env.emit('Page.javascriptDialogOpening', {
+        type: 'confirm',
+        message: 'Continue?',
+      });
+
+      const blocked = await action;
+      expect(blocked.ok).toBe(true);
+      expect(blocked.data).toMatchObject({
+        tabId: 't1',
+        kind: 'click',
+        barrier: {
+          kind: 'page-dialog',
+          dialog: { type: 'confirm', message: 'Continue?' },
+        },
+      });
+      const dialogId = (blocked.data as {
+        barrier: { dialog: { id: string } };
+      }).barrier.dialog.id;
+
+      const handled = await env.backend.call({
+        action: 'dialog',
+        targetId: 't1',
+        dialogId,
+        accept: true,
+      });
+      expect(handled.ok).toBe(true);
+      await vi.waitFor(() => expect(actionFinished).toHaveBeenCalledTimes(1));
+    } finally {
+      await env.backend.dispose();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the host interactive after an auto-closed dialog and arms a retry', async () => {
+    const env = buildPageEnv();
+    const automation = (env.backend as unknown as {
+      automation: {
+        act: (
+          tabId: string,
+          wc: WebContents,
+          request: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+      };
+    }).automation;
+    let releaseAction = () => {};
+    const actSpy = vi.spyOn(automation, 'act').mockImplementation(
+      () => {
+        env.emit('Page.javascriptDialogOpening', {
+          type: 'confirm',
+          message: 'Continue?',
+        });
+        env.emit('Page.javascriptDialogClosed', {
+          result: false,
+          userInput: '',
+        });
+        return new Promise((resolve) => {
+          releaseAction = () => resolve({ tabId: 't1', kind: 'click' });
+        });
+      },
+    );
+
+    try {
+      const action = env.backend.call({
+        action: 'act',
+        targetId: 't1',
+        request: { kind: 'click', targetId: 't1', ref: 'button-1' },
+      });
+      await vi.waitFor(() => expect(actSpy).toHaveBeenCalledTimes(1));
+      const blocked = await action;
+      expect(blocked.data).toMatchObject({
+        barrier: {
+          kind: 'page-dialog',
+          dialog: { type: 'confirm', message: 'Continue?' },
+        },
+      });
+      const dialogId = (blocked.data as {
+        barrier: { dialog: { id: string } };
+      }).barrier.dialog.id;
+
+      const armed = await env.backend.call({
+        action: 'dialog',
+        targetId: 't1',
+        dialogId,
+        accept: true,
+      });
+      expect(armed.data).toMatchObject({
+        tabId: 't1',
+        armed: true,
+        retryRequired: true,
+      });
+    } finally {
+      releaseAction();
+      await env.backend.dispose();
+    }
+  });
+
+  it('prepares the next confirmation when no previous dialog record remains', async () => {
+    const env = buildPageEnv();
+    await env.backend.call({ action: 'snapshot', targetId: 't1' });
+
+    const dialogs = (env.backend as unknown as {
+      dialogs: {
+        respond: (...args: unknown[]) => Promise<never>;
+      };
+    }).dialogs;
+    vi.spyOn(dialogs, 'respond').mockRejectedValueOnce(
+      new Error('no page dialog is pending'),
+    );
+
+    try {
+      const armed = await env.backend.call({
+        action: 'dialog',
+        targetId: 't1',
+        accept: true,
+      });
+      expect(armed.ok).toBe(true);
+      expect(armed.data).toMatchObject({
+        tabId: 't1',
+        armed: true,
+        retryRequired: true,
+      });
+
+      env.emit('Page.javascriptDialogOpening', {
+        type: 'confirm',
+        message: 'Continue?',
+      });
+      await vi.waitFor(() => {
+        expect(env.sendCommand).toHaveBeenCalledWith(
+          'Page.handleJavaScriptDialog',
+          { accept: true },
+        );
+      });
+    } finally {
+      await env.backend.dispose();
+    }
+  });
+
+  it.each([
+    {
+      dialogType: 'alert',
+      expected: {
+        dialogs: [{
+          type: 'alert',
+          message: 'Notice',
+          closedBy: 'auto',
+          handled: true,
+        }],
+      },
+    },
+    {
+      dialogType: 'confirm',
+      expected: {
+        barrier: {
+          kind: 'page-dialog',
+          dialog: {
+            type: 'confirm',
+            message: 'Notice',
+            closedBy: 'auto',
+          },
+        },
+      },
+    },
+  ])(
+    'classifies an auto-closed $dialogType even when the action finishes immediately',
+    async ({ dialogType, expected }) => {
+      const env = buildPageEnv();
+      const automation = (env.backend as unknown as {
+        automation: {
+          act: (
+            tabId: string,
+            wc: WebContents,
+            request: Record<string, unknown>,
+          ) => Promise<Record<string, unknown>>;
+        };
+      }).automation;
+      vi.spyOn(automation, 'act').mockImplementation(async () => {
+        env.emit('Page.javascriptDialogOpening', {
+          type: dialogType,
+          message: 'Notice',
+        });
+        env.emit('Page.javascriptDialogClosed', {
+          result: false,
+          userInput: '',
+        });
+        return { tabId: 't1', kind: 'click' };
+      });
+
+      try {
+        const result = await env.backend.call({
+          action: 'act',
+          targetId: 't1',
+          request: { kind: 'click', targetId: 't1', ref: 'button-1' },
+        });
+        expect(result.ok).toBe(true);
+        expect(result.data).toMatchObject(expected);
+      } finally {
+        await env.backend.dispose();
+      }
+    },
+  );
 
   it('saves only a resource listed by the latest page snapshot', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-browser-resource-'));

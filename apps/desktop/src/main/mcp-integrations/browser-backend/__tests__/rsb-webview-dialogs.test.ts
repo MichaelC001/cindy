@@ -93,6 +93,99 @@ describe('RsbWebviewDialogs', () => {
     );
   });
 
+  it('resolves a one-shot opening watcher and allows cancellation', async () => {
+    const harness = dialogHarness();
+    const dialogs = new RsbWebviewDialogs({ warn: vi.fn() });
+    await dialogs.observe(harness.wc);
+
+    const opening = dialogs.watchOpening(harness.wc);
+    harness.emit('Page.javascriptDialogOpening', {
+      type: 'alert',
+      message: 'Saved',
+    });
+    await expect(opening.opened).resolves.toMatchObject({
+      type: 'alert',
+      message: 'Saved',
+    });
+
+    const cancelled = dialogs.watchOpening(harness.wc);
+    cancelled.cancel();
+    harness.emit('Page.javascriptDialogClosed', {});
+    expect(dialogs.pending(harness.wc)).toBeUndefined();
+  });
+
+  it('records auto-closed dialogs and arms the next response', async () => {
+    const harness = dialogHarness();
+    const dialogs = new RsbWebviewDialogs({ warn: vi.fn() });
+    await dialogs.observe(harness.wc);
+    harness.emit('Page.javascriptDialogOpening', {
+      type: 'confirm',
+      message: 'Continue?',
+    });
+    harness.emit('Page.javascriptDialogClosed', {
+      result: false,
+      userInput: '',
+    });
+    const first = dialogs.recent(harness.wc);
+    expect(first).toMatchObject({
+      type: 'confirm',
+      message: 'Continue?',
+      closedBy: 'auto',
+    });
+
+    const deferred = await dialogs.respond(harness.wc, {
+      dialogId: first?.id,
+      accept: true,
+    });
+    expect(deferred).toMatchObject({
+      id: first?.id,
+      deferred: true,
+    });
+
+    const armed = dialogs.armNext(harness.wc, { accept: true });
+    harness.emit('Page.javascriptDialogOpening', {
+      type: 'confirm',
+      message: 'Continue again?',
+    });
+    await expect(armed.response).resolves.toMatchObject({
+      type: 'confirm',
+      message: 'Continue again?',
+      closedBy: 'armed',
+    });
+    expect(harness.sendCommand).toHaveBeenCalledWith(
+      'Page.handleJavaScriptDialog',
+      { accept: true },
+    );
+  });
+
+  it('keeps a prepared response active beyond the regular action timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = dialogHarness();
+      const dialogs = new RsbWebviewDialogs({ warn: vi.fn() });
+      await dialogs.observe(harness.wc);
+
+      const armed = dialogs.armNext(harness.wc, { accept: true });
+      await vi.advanceTimersByTimeAsync(60_001);
+      harness.emit('Page.javascriptDialogOpening', {
+        type: 'confirm',
+        message: 'Continue later?',
+      });
+
+      await expect(armed.response).resolves.toMatchObject({
+        type: 'confirm',
+        message: 'Continue later?',
+        closedBy: 'armed',
+      });
+      expect(harness.sendCommand).toHaveBeenCalledWith(
+        'Page.handleJavaScriptDialog',
+        { accept: true },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('detaches only debugger sessions it owns', async () => {
     const owned = dialogHarness();
     const ownedDialogs = new RsbWebviewDialogs({ warn: vi.fn() });
