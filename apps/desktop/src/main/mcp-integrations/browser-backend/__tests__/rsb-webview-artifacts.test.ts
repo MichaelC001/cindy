@@ -230,11 +230,41 @@ describe('RsbWebviewArtifacts', () => {
       },
     );
 
-    expect(result.downloads).toHaveLength(9);
+    expect(result.downloads).toHaveLength(8);
     expect(items.slice(0, 3).every((item) => item.setSavePath.mock.calls.length === 1)).toBe(true);
     expect(items[3].cancel).toHaveBeenCalledTimes(1);
     expect(items[8].cancel).toHaveBeenCalledTimes(1);
     expect(result.downloads.slice(3).every((artifact) => artifact.state === 'cancelled')).toBe(true);
+  });
+
+  it('releases reserved bytes after a download is cancelled', async () => {
+    const harness = artifactHarness();
+    const cancelled = downloadItem('cancelled', { totalBytes: 32 * 1024 * 1024 });
+    const later = [
+      downloadItem('completed', { totalBytes: 32 * 1024 * 1024 }),
+      downloadItem('completed', { totalBytes: 32 * 1024 * 1024 }),
+    ];
+    const artifacts = new RsbWebviewArtifacts(() => root, { warn: vi.fn() });
+
+    const result = await artifacts.capture(
+      harness.wc,
+      { sessionId: 'quota-release', timeoutMs: 1000 },
+      async () => {
+        harness.emitDownload(cancelled);
+        cancelled.finish();
+        for (const item of later) harness.emitDownload(item);
+        setTimeout(() => {
+          for (const item of later) item.finish();
+        }, 0);
+      },
+    );
+
+    expect(later.every((item) => item.setSavePath.mock.calls.length === 1)).toBe(true);
+    expect(result.downloads.map((artifact) => artifact.state)).toEqual([
+      'cancelled',
+      'completed',
+      'completed',
+    ]);
   });
 
   it('removes retained artifacts when the backend is disposed', async () => {

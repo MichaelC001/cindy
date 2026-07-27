@@ -230,6 +230,58 @@ describe('RsbWebviewAutomation act', () => {
     expect(harness.executeJavaScript.mock.calls[0][0]).toContain('"type":"validate"');
   });
 
+  it('scopes snapshots to the requested frame', async () => {
+    const harness = debuggerHarness(async (method, params) => {
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'frame-object' } };
+      if (method === 'DOM.describeNode') {
+        expect(params).toMatchObject({ backendNodeId: 20, depth: 1 });
+        return {
+          node: {
+            frameId: 'frame-owner',
+            contentDocument: { frameId: 'frame-document', nodeId: 21 },
+          },
+        };
+      }
+      if (method === 'Accessibility.enable') return {};
+      if (method === 'Accessibility.getFullAXTree') {
+        expect(params).toEqual({ frameId: 'frame-document' });
+        return AX_TREE;
+      }
+      throw new Error(`unexpected command: ${method}`);
+    });
+    harness.sendCommand.mockImplementation(async (method, params) => {
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'frame-object' } };
+      if (method === 'DOM.describeNode' && params?.objectId === 'frame-object') {
+        return { node: { backendNodeId: 20 } };
+      }
+      if (method === 'DOM.describeNode' && params?.backendNodeId === 20) {
+        return {
+          node: {
+            frameId: 'frame-owner',
+            contentDocument: { frameId: 'frame-document', nodeId: 21 },
+          },
+        };
+      }
+      if (method === 'Accessibility.enable') return {};
+      if (method === 'Accessibility.getFullAXTree') {
+        expect(params).toEqual({ frameId: 'frame-document' });
+        return AX_TREE;
+      }
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    const result = await automation().snapshot('tab-1', harness.wc, {
+      action: 'snapshot',
+      frame: 'iframe#widget',
+    });
+
+    expect(result).toMatchObject({ stats: { refs: 2 } });
+    expect(harness.sendCommand).toHaveBeenCalledWith(
+      'Accessibility.getFullAXTree',
+      { frameId: 'frame-document' },
+    );
+  });
+
   it('clicks a snapshot ref at the center of its DOM box', async () => {
     const instance = automation();
     let phase: 'snapshot' | 'click' = 'snapshot';
@@ -306,6 +358,51 @@ describe('RsbWebviewAutomation act', () => {
       expect.stringMatching(/^Input\./),
       expect.anything(),
     );
+  });
+
+  it('fills browser-native date inputs', async () => {
+    const harness = debuggerHarness(async (method, params) => {
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'date-input' } };
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 6 } };
+      if (method === 'Runtime.callFunctionOn') {
+        if (String(params?.functionDeclaration).includes('requireEditable')) {
+          expect(String(params?.functionDeclaration)).toContain('"date", "datetime-local"');
+        }
+        return { result: { value: { ok: true } } };
+      }
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    const result = await automation().act('tab-1', harness.wc, {
+      kind: 'fill',
+      selector: 'input[type=date]',
+      text: '2026-07-27',
+    });
+
+    expect(result).toMatchObject({ kind: 'fill', textLength: 10 });
+    expect(harness.executeJavaScript.mock.calls[0][0]).toContain(
+      '["date", "datetime-local", "month", "time", "week"]',
+    );
+  });
+
+  it('hovers without focusing the target', async () => {
+    const harness = debuggerHarness(async (method, params) => {
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'hover-target' } };
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 9 } };
+      if (method === 'Runtime.callFunctionOn') {
+        expect(String(params?.functionDeclaration)).not.toContain('this.focus()');
+        return { result: { value: { ok: true } } };
+      }
+      if (method === 'DOM.getBoxModel') {
+        return { model: { content: [0, 0, 20, 0, 20, 10, 0, 10] } };
+      }
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    await expect(automation().act('tab-1', harness.wc, {
+      kind: 'hover',
+      selector: '#hover-target',
+    })).resolves.toMatchObject({ kind: 'hover', x: 10, y: 5 });
   });
 
   it('resolves a semantic query and waits for an actionable target', async () => {

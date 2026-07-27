@@ -85,6 +85,17 @@ function safeHeaders(value: unknown): Record<string, string> | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function safeUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.href;
+  } catch {
+    return value;
+  }
+}
+
 function urlMatches(pattern: string, url: string): boolean {
   if (!pattern.includes('*')) return url.includes(pattern);
   const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*');
@@ -162,11 +173,16 @@ export class RsbWebviewNetwork {
     const timeoutMs = boundedPositive(options.timeoutMs, DEFAULT_BODY_WAIT_MS, MAX_BODY_WAIT_MS);
     const maxChars = boundedPositive(options.maxChars, DEFAULT_BODY_CHARS, MAX_BODY_CHARS);
     const deadline = Date.now() + timeoutMs;
+    const existingResponseIds = new Set(state.responses.keys());
 
     for (;;) {
       const response = [...state.responses.values()]
         .reverse()
-        .find((entry) => entry.finished && urlMatches(pattern, entry.url));
+        .find((entry) => (
+          !existingResponseIds.has(entry.requestId)
+          && entry.finished
+          && urlMatches(pattern, entry.url)
+        ));
       if (response) {
         const raw = await state.debugger.sendCommand('Network.getResponseBody', {
           requestId: response.requestId,
@@ -272,7 +288,7 @@ export class RsbWebviewNetwork {
         id: requestId,
         timestamp: new Date().toISOString(),
         method: text(request.method) || 'GET',
-        url: text(request.url),
+        url: safeUrl(text(request.url)),
         resourceType: text(params.type).toLowerCase() || 'other',
       };
       state.requests.push(record);
@@ -300,7 +316,7 @@ export class RsbWebviewNetwork {
       }
       state.responses.set(requestId, {
         requestId,
-        url: text(response.url) || request?.url || '',
+        url: safeUrl(text(response.url) || request?.url || ''),
         status,
         headers: safeHeaders(response.headers),
         finished: false,

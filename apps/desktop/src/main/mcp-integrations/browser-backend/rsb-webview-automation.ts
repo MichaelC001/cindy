@@ -455,6 +455,52 @@ async function resolveSelector(
   return resolveElementQuery(send, { css: selector }, timeoutMs);
 }
 
+async function resolveFrameRoot(
+  send: DebuggerTransport['sendCommand'],
+  selector: string,
+): Promise<{ frameId: string; nodeId?: number }> {
+  const frame = await resolveSelector(send, selector);
+  const described = await send('DOM.describeNode', {
+    backendNodeId: frame.backendDOMNodeId,
+    depth: 1,
+  }) as {
+    node?: {
+      frameId?: string;
+      contentDocument?: { frameId?: string; nodeId?: number };
+    };
+  };
+  const frameId = described.node?.contentDocument?.frameId ?? described.node?.frameId;
+  if (!frameId) throw new Error(`frame selector did not resolve to an iframe: ${selector}`);
+  return {
+    frameId,
+    ...(described.node?.contentDocument?.nodeId
+      ? { nodeId: described.node.contentDocument.nodeId }
+      : {}),
+  };
+}
+
+async function resolveSelectorInFrame(
+  send: DebuggerTransport['sendCommand'],
+  frameNodeId: number,
+  selector: string,
+): Promise<ResolvedNode> {
+  const queried = await send('DOM.querySelector', {
+    nodeId: frameNodeId,
+    selector,
+  }) as { nodeId?: number };
+  if (!queried.nodeId) throw new Error(`selector not found in frame: ${selector}`);
+  const described = await send('DOM.describeNode', {
+    nodeId: queried.nodeId,
+  }) as { node?: { backendNodeId?: number } };
+  if (!described.node?.backendNodeId) {
+    throw new Error(`selector could not be resolved in frame: ${selector}`);
+  }
+  return {
+    objectId: '',
+    backendDOMNodeId: described.node.backendNodeId,
+  };
+}
+
 async function resolveElementQuery(
   send: DebuggerTransport['sendCommand'],
   query: BrowserElementQuery,
@@ -670,7 +716,10 @@ async function focusNode(
       }
       if (requireEditable) {
         const textInput = this instanceof HTMLInputElement
-          && !["button", "checkbox", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(this.type);
+          && [
+            "date", "datetime-local", "email", "month", "number", "password",
+            "search", "tel", "text", "time", "url", "week",
+          ].includes(this.type);
         const editable = textInput
           || this instanceof HTMLTextAreaElement
           || (this instanceof HTMLElement && this.isContentEditable);
@@ -717,7 +766,10 @@ async function waitForActionable(
         if (options.editable) {
           if ("readOnly" in this && this.readOnly) return "target is read-only";
           const textInput = this instanceof HTMLInputElement
-            && !["button", "checkbox", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(this.type);
+            && [
+              "date", "datetime-local", "email", "month", "number", "password",
+              "search", "tel", "text", "time", "url", "week",
+            ].includes(this.type);
           const editable = textInput
             || this instanceof HTMLTextAreaElement
             || (this instanceof HTMLElement && this.isContentEditable);
@@ -770,8 +822,9 @@ async function stampActionTarget(
 async function centerOfNode(
   send: DebuggerTransport['sendCommand'],
   node: ResolvedNode,
+  options: { focus?: boolean } = {},
 ): Promise<{ x: number; y: number }> {
-  await focusNode(send, node);
+  if (options.focus !== false) await focusNode(send, node);
   const box = await send('DOM.getBoxModel', {
     ...(node.backendDOMNodeId
       ? { backendNodeId: node.backendDOMNodeId }
@@ -1081,9 +1134,12 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
     return element instanceof view.HTMLInputElement
       && ['password', 'search', 'tel', 'text', 'url'].includes(element.type);
   };
+  const isStructuredValueControl = (element: Element): element is HTMLInputElement =>
+    element instanceof eventWindow(element).HTMLInputElement
+    && ['date', 'datetime-local', 'month', 'time', 'week'].includes(element.type);
   const isValueTextControl = (element: Element): element is HTMLInputElement =>
     element instanceof eventWindow(element).HTMLInputElement
-    && ['email', 'number'].includes(element.type);
+    && (['email', 'number'].includes(element.type) || isStructuredValueControl(element));
   const isContentEditable = (element: Element): element is HTMLElement =>
     element instanceof eventWindow(element).HTMLElement && element.isContentEditable;
   const editableElement = (): Element | null => {
@@ -1125,6 +1181,8 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
       const start = element.selectionStart ?? element.value.length;
       const end = element.selectionEnd ?? element.value.length;
       element.setRangeText(text, start, end, 'end');
+    } else if (isStructuredValueControl(element)) {
+      element.value = text;
     } else if (isValueTextControl(element)) {
       if (element.ownerDocument.execCommand?.('insertText', false, text)) return;
       element.value += text;
@@ -1469,14 +1527,27 @@ export class RsbWebviewAutomation {
       this.barriersByTab.delete(tabId);
       await send('Accessibility.enable');
       let response: { nodes?: RawAxNode[] };
+      const frame = typeof req.frame === 'string' && req.frame !== ''
+        ? await resolveFrameRoot(send, req.frame)
+        : undefined;
       if (typeof req.selector === 'string' && req.selector !== '') {
-        const selected = await resolveSelector(send, req.selector);
+        const selected = frame?.nodeId
+          ? await resolveSelectorInFrame(send, frame.nodeId, req.selector)
+          : frame
+            ? undefined
+            : await resolveSelector(send, req.selector);
+        if (!selected) {
+          throw new Error('frame document is unavailable for selector-scoped snapshot');
+        }
         response = await send('Accessibility.getPartialAXTree', {
           backendNodeId: selected.backendDOMNodeId,
           fetchRelatives: false,
         }) as { nodes?: RawAxNode[] };
       } else {
-        response = await send('Accessibility.getFullAXTree') as { nodes?: RawAxNode[] };
+        response = await send(
+          'Accessibility.getFullAXTree',
+          frame ? { frameId: frame.frameId } : undefined,
+        ) as { nodes?: RawAxNode[] };
       }
 
       const { tree, roots } = buildSnapshotTree(Array.isArray(response.nodes) ? response.nodes : []);
@@ -1728,7 +1799,7 @@ export class RsbWebviewAutomation {
           const target = await resolveTarget();
           await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
           const ticket = await stampActionTarget(send, target);
-          const point = await centerOfNode(send, target);
+          const point = await centerOfNode(send, target, { focus: false });
           await dispatchInput('Input.dispatchMouseEvent', {
             type: 'mouseMoved',
             x: point.x,

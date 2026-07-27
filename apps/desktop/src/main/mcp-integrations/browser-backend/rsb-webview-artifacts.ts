@@ -42,6 +42,7 @@ interface PendingDownload {
   filePath?: string;
   knownTotalBytes?: number;
   limitReason?: string;
+  reservationReleased?: boolean;
 }
 
 interface ArtifactCapture {
@@ -302,6 +303,7 @@ export class RsbWebviewArtifacts {
           : rawState === 'cancelled'
             ? 'cancelled'
             : 'interrupted';
+      if (state !== 'completed') this.releaseReservation(capture, pending);
       if (state !== 'completed' && pending.filePath) {
         try {
           fs.rmSync(pending.filePath, { force: true });
@@ -325,14 +327,17 @@ export class RsbWebviewArtifacts {
         finishedAt: new Date().toISOString(),
       });
     });
-    capture.pending.push(pending);
 
     const quotaReason = this.quotaReason(capture, totalBytes);
     if (quotaReason) {
       this.cancelForQuota(pending, quotaReason);
+      if (capture.pending.length < MAX_DOWNLOADS_PER_CAPTURE) {
+        capture.pending.push(pending);
+      }
       return;
     }
 
+    capture.pending.push(pending);
     if (totalBytes) capture.reservedBytes += totalBytes;
     pending.filePath = filePath;
     item.setSavePath(filePath);
@@ -354,7 +359,7 @@ export class RsbWebviewArtifacts {
   }
 
   private quotaReason(capture: ArtifactCapture, totalBytes: number | undefined): string | undefined {
-    if (capture.pending.length > MAX_DOWNLOADS_PER_CAPTURE) {
+    if (capture.pending.length >= MAX_DOWNLOADS_PER_CAPTURE) {
       return 'capture exceeds the download count limit';
     }
     if (totalBytes && totalBytes > MAX_DOWNLOAD_BYTES_PER_FILE) {
@@ -383,6 +388,12 @@ export class RsbWebviewArtifacts {
       if (pending.knownTotalBytes || pending.limitReason) return sum;
       return sum + (this.positiveBytes(pending.item.getReceivedBytes()) ?? 0);
     }, 0);
+  }
+
+  private releaseReservation(capture: ArtifactCapture, pending: PendingDownload): void {
+    if (!pending.knownTotalBytes || pending.reservationReleased) return;
+    pending.reservationReleased = true;
+    capture.reservedBytes = Math.max(0, capture.reservedBytes - pending.knownTotalBytes);
   }
 
   private positiveBytes(value: number): number | undefined {

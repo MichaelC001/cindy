@@ -47,6 +47,11 @@ describe('RsbWebviewNetwork', () => {
     const network = new RsbWebviewNetwork({ warn: vi.fn() });
     await network.observe(harness.wc);
 
+    const pendingBody = network.readResponseBody(harness.wc, {
+      url: '/api/items',
+      maxChars: 5,
+    });
+    await Promise.resolve();
     harness.emit('message', 'Network.requestWillBeSent', {
       requestId: 'request-1',
       type: 'XHR',
@@ -74,10 +79,7 @@ describe('RsbWebviewNetwork', () => {
         ok: true,
       }),
     ]);
-    await expect(network.readResponseBody(harness.wc, {
-      url: '/api/items',
-      maxChars: 5,
-    })).resolves.toEqual({
+    await expect(pendingBody).resolves.toEqual({
       url: 'https://example.test/api/items',
       status: 201,
       headers: { 'content-type': 'application/json' },
@@ -103,6 +105,83 @@ describe('RsbWebviewNetwork', () => {
     expect(network.readRequests(harness.wc, { filter: '/private', clear: true })).toHaveLength(1);
     expect(network.readRequests(harness.wc)).toEqual([]);
     expect(JSON.stringify(network.diagnostics())).not.toContain('secret');
+  });
+
+  it('waits for a new matching response instead of reusing response history', async () => {
+    const harness = networkHarness();
+    const network = new RsbWebviewNetwork({ warn: vi.fn() });
+    await network.observe(harness.wc);
+    harness.emit('message', 'Network.requestWillBeSent', {
+      requestId: 'request-old',
+      type: 'XHR',
+      request: { method: 'GET', url: 'https://example.test/api/state' },
+    });
+    harness.emit('message', 'Network.responseReceived', {
+      requestId: 'request-old',
+      response: { url: 'https://example.test/api/state', status: 200 },
+    });
+    harness.emit('message', 'Network.loadingFinished', { requestId: 'request-old' });
+
+    const pendingBody = network.readResponseBody(harness.wc, {
+      url: '/api/state',
+      timeoutMs: 1_000,
+    });
+    await Promise.resolve();
+    expect(harness.sendCommand).not.toHaveBeenCalledWith(
+      'Network.getResponseBody',
+      { requestId: 'request-old' },
+    );
+    harness.emit('message', 'Network.requestWillBeSent', {
+      requestId: 'request-new',
+      type: 'XHR',
+      request: { method: 'GET', url: 'https://example.test/api/state' },
+    });
+    harness.emit('message', 'Network.responseReceived', {
+      requestId: 'request-new',
+      response: { url: 'https://example.test/api/state', status: 200 },
+    });
+    harness.emit('message', 'Network.loadingFinished', { requestId: 'request-new' });
+
+    await expect(pendingBody).resolves.toMatchObject({
+      url: 'https://example.test/api/state',
+      body: '{"ok":true}',
+    });
+    expect(harness.sendCommand).toHaveBeenCalledWith(
+      'Network.getResponseBody',
+      { requestId: 'request-new' },
+    );
+  });
+
+  it('removes URL credentials from request and response output', async () => {
+    const harness = networkHarness();
+    const network = new RsbWebviewNetwork({ warn: vi.fn() });
+    await network.observe(harness.wc);
+    const pendingBody = network.readResponseBody(harness.wc, {
+      url: '/private',
+      timeoutMs: 1_000,
+    });
+    await Promise.resolve();
+    harness.emit('message', 'Network.requestWillBeSent', {
+      requestId: 'request-secret',
+      type: 'XHR',
+      request: {
+        method: 'GET',
+        url: 'https://user:password@example.test/private',
+      },
+    });
+    harness.emit('message', 'Network.responseReceived', {
+      requestId: 'request-secret',
+      response: {
+        url: 'https://user:password@example.test/private',
+        status: 200,
+      },
+    });
+    harness.emit('message', 'Network.loadingFinished', { requestId: 'request-secret' });
+
+    expect(network.readRequests(harness.wc)[0].url).toBe('https://example.test/private');
+    await expect(pendingBody).resolves.toMatchObject({
+      url: 'https://example.test/private',
+    });
   });
 
   it('waits for an actual quiet network window', async () => {

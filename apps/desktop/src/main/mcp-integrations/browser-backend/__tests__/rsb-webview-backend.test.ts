@@ -762,6 +762,27 @@ describe('RsbWebviewBackend — per-action automation pin', () => {
     }
   });
 
+  it('rejects conflicting top-level and nested act targets', async () => {
+    const wc = fakeWc();
+    const { backend, registry } = buildBackend(wc);
+
+    const result = await backend.call({
+      action: 'act',
+      targetId: 't1',
+      request: {
+        kind: 'click',
+        targetId: 't2',
+        selector: '#submit',
+      },
+    } as never);
+
+    expect(result).toMatchObject({
+      ok: false,
+      message: expect.stringContaining('targetId mismatch'),
+    });
+    expect(registry.pinHistory).toEqual([]);
+  });
+
   it('non-tab-scoped actions (tabs / status / profiles / doctor) do not touch pin', async () => {
     const wc = fakeWc();
     const { backend, registry } = buildBackend(wc);
@@ -1557,9 +1578,16 @@ describe('RsbWebviewBackend — network actions', () => {
     });
   });
 
-  it('returns the body of a completed matching response', async () => {
+  it('returns the body of the next completed matching response', async () => {
     const env = buildNetworkEnv();
     await env.backend.call({ action: 'requests', targetId: 't1' } as never);
+    const pending = env.backend.call({
+      action: 'responseBody',
+      targetId: 't1',
+      url: '/api/items',
+      maxChars: 8,
+    } as never);
+    await new Promise((resolve) => setTimeout(resolve, 10));
     env.emitNetwork('Network.requestWillBeSent', {
       requestId: 'r2',
       type: 'XHR',
@@ -1575,12 +1603,7 @@ describe('RsbWebviewBackend — network actions', () => {
     });
     env.emitNetwork('Network.loadingFinished', { requestId: 'r2' });
 
-    const res = await env.backend.call({
-      action: 'responseBody',
-      targetId: 't1',
-      url: '/api/items',
-      maxChars: 8,
-    } as never);
+    const res = await pending;
 
     expect(res.ok).toBe(true);
     expect(res.data).toMatchObject({

@@ -459,6 +459,13 @@ export class RsbWebviewBackend implements BrowserBackend {
     if (!inner || typeof inner !== 'object') {
       return actionFailed(req.action, 'request body required');
     }
+    if (
+      typeof req.targetId === 'string'
+      && typeof inner.targetId === 'string'
+      && req.targetId !== inner.targetId
+    ) {
+      return actionFailed(req.action, 'targetId mismatch between act request and nested request');
+    }
     const automationRequest = inner.timeoutMs === undefined && req.timeoutMs !== undefined
       ? { ...inner, timeoutMs: req.timeoutMs }
       : inner;
