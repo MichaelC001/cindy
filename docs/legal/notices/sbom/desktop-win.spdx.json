@@ -3,9 +3,9 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "cindy-desktop-win",
-  "documentNamespace": "https://cindy.app/spdx/desktop-win/a4ceee438b8b55f4ba8a27d4ec3b154cbe5badce74aeaeda93193b7a3499b1e7",
+  "documentNamespace": "https://cindy.app/spdx/desktop-win/dd06b094b7badb83b588021ebe31cbfcb1f7d9f04f11928c79ce25738939dec0",
   "creationInfo": {
-    "created": "2026-07-26T02:38:39Z",
+    "created": "2026-07-27T10:42:13Z",
     "creators": [
       "Tool: scripts/generate-third-party-notices.mjs"
     ]
@@ -119,6 +119,16 @@
       "filesAnalyzed": false,
       "licenseConcluded": "Apache-2.0",
       "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "name": "Tencent openclaw-weixin protocol sources (adapted)",
+      "SPDXID": "SPDXRef-Package-c675a4f80195e3e9",
+      "versionInfo": "2.4.6",
+      "downloadLocation": "https://github.com/Tencent/openclaw-weixin/tree/v2.4.6",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
       "copyrightText": "NOASSERTION"
     },
     {
@@ -17823,6 +17833,11 @@
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
       "relatedSpdxElement": "SPDXRef-Package-5db1c86634c06028"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-c675a4f80195e3e9"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
