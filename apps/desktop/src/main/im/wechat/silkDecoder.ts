@@ -34,12 +34,20 @@ export async function decodeWechatSilkToWav(
       worker.once(
         'message',
         (response: { id?: unknown; ok?: unknown; bytes?: unknown; errorCode?: unknown }) => {
+          if (response.id !== id) {
+            finish(() => reject(new Error('WECHAT_SILK_DECODE_FAILED')));
+            return;
+          }
+          if (response.ok !== true) {
+            const errorCode =
+              typeof response.errorCode === 'string' && response.errorCode.length > 0
+                ? response.errorCode
+                : 'WECHAT_SILK_DECODE_FAILED';
+            finish(() => reject(new Error(errorCode)));
+            return;
+          }
           const responseBytes = response.bytes;
-          if (
-            response.id !== id ||
-            response.ok !== true ||
-            !(responseBytes instanceof ArrayBuffer)
-          ) {
+          if (!(responseBytes instanceof ArrayBuffer)) {
             finish(() => reject(new Error('WECHAT_SILK_DECODE_FAILED')));
             return;
           }

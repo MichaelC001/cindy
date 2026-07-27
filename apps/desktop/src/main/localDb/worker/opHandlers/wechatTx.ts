@@ -26,6 +26,7 @@ const ACTIVE_QUEUE_STATUSES = [
   'accepted_running',
   'waiting_desktop',
 ] as const;
+const CONTROL_COMMANDS = new Set(['/stop', '/stop all']);
 const RUNNING_STATUSES = [
   'dispatching',
   'accepted_running',
@@ -160,8 +161,9 @@ export function wechatCommitPollBatch(
 
     for (let index = 0; index < messages.length; index += 1) {
       const message = parsePollMessage(messages[index], index);
+      const isControlCommand = isWechatControlCommand(message.payloadJson);
       const status: WechatInboxStatus =
-        queuedTasks >= maxQueuedTasks ? 'rejected_overload' : 'pending';
+        queuedTasks >= maxQueuedTasks && !isControlCommand ? 'rejected_overload' : 'pending';
       const result = insertInbox.run(
         message.id,
         bindingEpoch,
@@ -971,6 +973,17 @@ function parsePollMessage(value: unknown, index: number) {
         }
       : undefined,
   };
+}
+
+function isWechatControlCommand(payloadJson: string): boolean {
+  try {
+    const payload: unknown = JSON.parse(payloadJson);
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+    const text = (payload as { text?: unknown }).text;
+    return typeof text === 'string' && CONTROL_COMMANDS.has(text.trim());
+  } catch {
+    return false;
+  }
 }
 
 function parseEncryptedContext(value: unknown, label: string) {

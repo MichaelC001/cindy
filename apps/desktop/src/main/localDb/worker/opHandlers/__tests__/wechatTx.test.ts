@@ -144,6 +144,56 @@ describe('WeChat reliable worker transactions', () => {
     expect(count(db, 'wechat_inbox')).toBe(2);
   });
 
+  it('keeps stop commands pending when the normal inbox queue is full', () => {
+    const db = createDb();
+    activate(db, 'epoch-1', null);
+
+    expect(
+      commitBatch(db, {
+        maxQueuedTasks: 1,
+        nextCursor: 'cursor-1',
+        messages: [message('seed-task', 'platform-seed', 'session-1')],
+      }),
+    ).toMatchObject({ committed: true });
+
+    const result = commitBatch(db, {
+      expectedCursor: 'cursor-1',
+      nextCursor: 'cursor-2',
+      maxQueuedTasks: 1,
+      messages: [
+        {
+          ...message('stop-task', 'platform-stop', 'session-1'),
+          payloadJson: JSON.stringify({ text: '/stop' }),
+        },
+        {
+          ...message('stop-all-task', 'platform-stop-all', 'session-2'),
+          payloadJson: JSON.stringify({ text: '/stop all' }),
+        },
+        {
+          ...message('normal-task', 'platform-normal', 'session-2'),
+          overloadReply: {
+            outboxId: 'outbox-overload-normal',
+            clientId: 'overload-normal',
+            text: 'overloaded',
+          },
+        },
+      ],
+    });
+
+    expect(result).toEqual({
+      committed: true,
+      insertedTaskIds: ['stop-task', 'stop-all-task', 'normal-task'],
+      duplicateTaskIds: [],
+      rejectedTaskIds: ['normal-task'],
+    });
+    expect(db.prepare('SELECT id, status FROM wechat_inbox ORDER BY id').all()).toEqual([
+      { id: 'normal-task', status: 'rejected_overload' },
+      { id: 'seed-task', status: 'pending' },
+      { id: 'stop-all-task', status: 'pending' },
+      { id: 'stop-task', status: 'pending' },
+    ]);
+  });
+
   it('rolls back the whole poll batch when media accounting is invalid', () => {
     const db = createDb();
     activate(db, 'epoch-1', null);
