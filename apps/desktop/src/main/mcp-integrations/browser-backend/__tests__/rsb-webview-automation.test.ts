@@ -275,6 +275,49 @@ describe('RsbWebviewAutomation act', () => {
     expect(harness.sendCommand).toHaveBeenCalledWith('Emulation.clearDeviceMetricsOverride');
   });
 
+  it('sets validated files on a resolved file input', async () => {
+    const harness = debuggerHarness(async (method) => {
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'file-input' } };
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 12 } };
+      if (method === 'Runtime.callFunctionOn') {
+        return { result: { value: { ok: true, multiple: true } } };
+      }
+      if (method === 'DOM.setFileInputFiles') return {};
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    const result = await automation().setFiles('tab-1', harness.wc, {
+      paths: ['C:\\safe\\one.txt', 'C:\\safe\\two.txt'],
+      query: { label: 'Attachments' },
+    });
+
+    expect(result).toEqual({ tabId: 'tab-1', uploadedFiles: 2 });
+    expect(harness.sendCommand).toHaveBeenCalledWith('DOM.setFileInputFiles', {
+      files: ['C:\\safe\\one.txt', 'C:\\safe\\two.txt'],
+      objectId: 'file-input',
+    });
+  });
+
+  it('does not place multiple files into a single-file input', async () => {
+    const harness = debuggerHarness(async (method) => {
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'file-input' } };
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 12 } };
+      if (method === 'Runtime.callFunctionOn') {
+        return { result: { value: { ok: true, multiple: false } } };
+      }
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    await expect(automation().setFiles('tab-1', harness.wc, {
+      paths: ['C:\\safe\\one.txt', 'C:\\safe\\two.txt'],
+      element: 'input[type=file]',
+    })).rejects.toThrow('accepts only one file');
+    expect(harness.sendCommand).not.toHaveBeenCalledWith(
+      'DOM.setFileInputFiles',
+      expect.anything(),
+    );
+  });
+
   it('dispatches coordinate clicks without requiring a snapshot', async () => {
     const harness = debuggerHarness(async (method) => {
       throw new Error(`unexpected command: ${method}`);

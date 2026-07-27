@@ -1325,6 +1325,68 @@ export class RsbWebviewAutomation {
     });
   }
 
+  async setFiles(
+    tabId: string,
+    wc: WebContents,
+    req: Pick<
+      BrowserControlRequest,
+      'paths' | 'ref' | 'inputRef' | 'element' | 'query' | 'timeoutMs'
+    >,
+  ): Promise<{ tabId: string; uploadedFiles: number }> {
+    return withDebugger(wc, async (send) => {
+      let target: ResolvedNode;
+      if (req.query && typeof req.query === 'object') {
+        target = await resolveElementQuery(send, req.query, req.timeoutMs);
+      } else if (typeof req.element === 'string' && req.element !== '') {
+        target = await resolveSelector(send, req.element, req.timeoutMs);
+      } else {
+        const ref = req.inputRef ?? req.ref;
+        if (typeof ref !== 'string' || ref === '') {
+          throw new Error('upload requires inputRef, ref, element, or query');
+        }
+        const snapshotRef = this.refsByTab.get(tabId)?.get(ref);
+        if (!snapshotRef) {
+          throw new Error(`unknown or stale snapshot ref: ${ref}; take a new snapshot`);
+        }
+        target = await resolveRef(send, snapshotRef);
+      }
+
+      const readiness = await callOnNode<{
+        ok: boolean;
+        reason?: string;
+        multiple?: boolean;
+      }>(
+        send,
+        target.objectId,
+        `function() {
+          if (!(this instanceof HTMLInputElement) || this.type !== "file") {
+            return { ok: false, reason: "upload target is not a file input" };
+          }
+          if (!this.isConnected) return { ok: false, reason: "upload target is detached" };
+          if (this.disabled || this.getAttribute("aria-disabled") === "true") {
+            return { ok: false, reason: "upload target is disabled" };
+          }
+          return { ok: true, multiple: this.multiple };
+        }`,
+      );
+      if (!readiness?.ok) {
+        throw new Error(readiness?.reason ?? 'upload target is not ready');
+      }
+      const paths = req.paths ?? [];
+      if (paths.length > 1 && readiness.multiple !== true) {
+        throw new Error('upload target accepts only one file');
+      }
+      await send('DOM.setFileInputFiles', {
+        files: paths,
+        objectId: target.objectId,
+      });
+      return {
+        tabId,
+        uploadedFiles: paths.length,
+      };
+    });
+  }
+
   async act(
     tabId: string,
     wc: WebContents,

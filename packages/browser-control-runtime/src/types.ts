@@ -123,6 +123,7 @@ export interface BrowserControlRequest {
   level?: string;
   paths?: string[];
   inputRef?: string;
+  query?: BrowserElementQuery;
   timeoutMs?: number;
   dialogId?: string;
   accept?: boolean;

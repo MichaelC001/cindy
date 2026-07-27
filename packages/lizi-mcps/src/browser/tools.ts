@@ -202,6 +202,20 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
       level: z.string().optional(),
       paths: z.array(z.string()).optional(),
       inputRef: z.string().optional(),
+      query: z
+        .object({
+          css: z.string().optional(),
+          role: z.string().optional(),
+          name: z.string().optional(),
+          text: z.string().optional(),
+          label: z.string().optional(),
+          placeholder: z.string().optional(),
+          testId: z.string().optional(),
+          exact: z.boolean().optional(),
+          index: z.number().int().nonnegative().optional(),
+        })
+        .optional()
+        .describe('action=upload 时定位文件输入框；字段语义与 act.request.query 一致'),
       timeoutMs: z.number().int().positive().optional(),
       dialogId: z.string().optional(),
       accept: z.boolean().optional(),

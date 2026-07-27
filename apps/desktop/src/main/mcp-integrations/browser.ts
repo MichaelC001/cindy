@@ -8,7 +8,7 @@
 import './browser-runtime-env.js';
 import fs from 'node:fs';
 import nodePath from 'node:path';
-import { ipcMain } from 'electron';
+import { app, ipcMain } from 'electron';
 import {
   createBrowserControlRuntime,
   type BrowserControlRuntime,
@@ -185,6 +185,17 @@ const externalBackend = new ExternalChromeBackend(vendoredRuntime, logger);
 const rsbBackend = new RsbWebviewBackend({
   registry: getRsbBrowserBridge(),
   getActiveSessionId: () => getActiveRsbSessionId(),
+  artifactRoot: () => nodePath.join(app.getPath('temp'), 'cindy-browser-artifacts'),
+  resolveUploadRoots: async (sessionId) => {
+    try {
+      const { getMaker } = await import('../maker-host/index.js');
+      const meta = await getMaker().getSessionMeta(sessionId);
+      if (!meta?.workDir || meta.remoteHostId) return [];
+      return [meta.workDir];
+    } catch {
+      return [];
+    }
+  },
   bridge: {
     // Lazy main-window lookup. Phase 2 uses the same pattern; once the host
     // window is available the dispatch lands cleanly, before that the request

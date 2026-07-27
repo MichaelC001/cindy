@@ -35,7 +35,9 @@ import type {
   BrowserBackend,
 } from './types.js';
 import { RsbWebviewAutomation } from './rsb-webview-automation.js';
+import { RsbWebviewDialogs } from './rsb-webview-dialogs.js';
 import { RsbWebviewNetwork } from './rsb-webview-network.js';
+import { resolveUploadFiles } from './rsb-webview-upload-policy.js';
 
 interface BackendLogger {
   info(message: string, ...args: unknown[]): void;
@@ -69,6 +71,8 @@ export interface RsbWebviewBackendOptions {
   /** Bridge config — same shape `registerTabOpResultHandler` uses. */
   bridge: RendererBridgeOptions;
   logger: BackendLogger;
+  artifactRoot?: () => string;
+  resolveUploadRoots?: (sessionId: string) => Promise<string[]>;
   /**
    * Timing overrides for the detached-window tab re-registration wait (tests
    * only — production uses the defaults below).
@@ -137,11 +141,13 @@ function safeTabMeta(wc: WebContents): { url: string; title: string } {
 export class RsbWebviewBackend implements BrowserBackend {
   readonly kind = 'rsb-webview' as const;
   private readonly automation: RsbWebviewAutomation;
+  private readonly dialogs: RsbWebviewDialogs;
   private readonly network: RsbWebviewNetwork;
   private readonly activity: BrowserActivity[] = [];
 
   constructor(private readonly opts: RsbWebviewBackendOptions) {
     this.automation = new RsbWebviewAutomation(opts.logger);
+    this.dialogs = new RsbWebviewDialogs(opts.logger);
     this.network = new RsbWebviewNetwork(opts.logger);
   }
 
@@ -178,6 +184,7 @@ export class RsbWebviewBackend implements BrowserBackend {
   async dispose(): Promise<void> {
     // Switching backends never closes the user's tabs. Only the listeners and
     // debugger attachments owned by this backend are released.
+    this.dialogs.dispose();
     this.network.dispose();
   }
 
@@ -215,14 +222,15 @@ export class RsbWebviewBackend implements BrowserBackend {
         return this.handleConsole(request);
       case 'act':
         return this.handleAct(request);
+      case 'upload':
+        return this.handleUpload(request);
+      case 'dialog':
+        return this.handleDialog(request);
       case 'requests':
         return this.handleRequests(request);
       case 'responseBody':
         return this.handleResponseBody(request);
       default:
-        // upload / dialog are not wired to the
-        // embedded guest yet. Keep failure structured so callers can choose an
-        // external browser backend for those advanced capabilities.
         return actionFailed(
           request.action,
           `action '${request.action}' not yet supported in rsb-webview backend`,
@@ -250,6 +258,7 @@ export class RsbWebviewBackend implements BrowserBackend {
       activeSessionId: sessionId,
       totalRegisteredTabs: this.opts.registry.listAll().length,
       pinnedTabs: this.opts.registry.listPinned(),
+      dialogs: this.dialogs.diagnostics(),
       network: this.network.diagnostics(),
       recentActivity: this.activity.slice(-20),
     });
@@ -354,7 +363,7 @@ export class RsbWebviewBackend implements BrowserBackend {
     if (!resolved.ok) return resolved.result;
     return this.withTabPin(tabId, async () => {
       this.automation.forgetTab(tabId);
-      await this.tryObserveNetwork(resolved.wc, tabId);
+      await this.tryObservePageSignals(resolved.wc, tabId);
       await resolved.wc.loadURL(url);
       return actionOk(req.action, { tabId, url });
     });
@@ -366,7 +375,17 @@ export class RsbWebviewBackend implements BrowserBackend {
     const resolved = await this.resolveTabForDirectAction(req, tabId);
     if (!resolved.ok) return resolved.result;
     return this.withTabPin(tabId, async () => {
-      await this.tryObserveNetwork(resolved.wc, tabId);
+      await this.tryObservePageSignals(resolved.wc, tabId);
+      const dialog = this.dialogs.pending(resolved.wc);
+      if (dialog) {
+        return actionOk(req.action, {
+          format: req.snapshotFormat ?? 'ai',
+          targetId: tabId,
+          url: resolved.wc.getURL(),
+          barrier: { kind: 'page-dialog', dialog },
+          stats: { lines: 0, chars: 0, refs: 0, interactive: 0 },
+        });
+      }
       const data = await this.automation.snapshot(tabId, resolved.wc, req);
       return actionOk(req.action, data);
     });
@@ -450,7 +469,7 @@ export class RsbWebviewBackend implements BrowserBackend {
         return Promise.resolve(result);
       })()`;
       return this.withTabPin(tabId, async () => {
-        await this.tryObserveNetwork(wc, tabId);
+        await this.tryObservePageSignals(wc, tabId);
         let value: unknown;
         try {
           value = await wc.executeJavaScript(wrapped, /* userGesture */ false);
@@ -470,7 +489,7 @@ export class RsbWebviewBackend implements BrowserBackend {
     }
 
     return this.withTabPin(tabId, async () => {
-      await this.tryObserveNetwork(wc, tabId);
+      await this.tryObservePageSignals(wc, tabId);
       const data = await this.automation.act(tabId, wc, inner);
       return actionOk(req.action, data);
     });
@@ -490,6 +509,46 @@ export class RsbWebviewBackend implements BrowserBackend {
       const buffer = ensureConsoleBuffer(resolved.wc, this.opts.logger);
       const messages = buffer.drain();
       return actionOk(req.action, { tabId, messages });
+    });
+  }
+
+  private async handleUpload(req: BackendRequest): Promise<BackendResult> {
+    const sessionId = this.resolveSessionId(req);
+    if (!sessionId) return actionFailed(req.action, 'no active RSB session');
+    const tabId = await this.resolveDirectActionTarget(req);
+    if (!tabId) return actionFailed(req.action, 'targetId required');
+    const resolved = await this.resolveTabForDirectAction(req, tabId);
+    if (!resolved.ok) return resolved.result;
+    return this.withTabPin(tabId, async () => {
+      const roots = [
+        ...(this.opts.artifactRoot ? [this.opts.artifactRoot()] : []),
+        ...(this.opts.resolveUploadRoots
+          ? await this.opts.resolveUploadRoots(sessionId)
+          : []),
+      ];
+      const paths = await resolveUploadFiles(req.paths, roots);
+      await this.tryObservePageSignals(resolved.wc, tabId);
+      const data = await this.automation.setFiles(tabId, resolved.wc, {
+        ...req,
+        paths,
+      });
+      return actionOk(req.action, data);
+    });
+  }
+
+  private async handleDialog(req: BackendRequest): Promise<BackendResult> {
+    const tabId = await this.resolveDirectActionTarget(req);
+    if (!tabId) return actionFailed(req.action, 'targetId required');
+    const resolved = await this.resolveTabForDirectAction(req, tabId);
+    if (!resolved.ok) return resolved.result;
+    return this.withTabPin(tabId, async () => {
+      const dialog = await this.dialogs.respond(resolved.wc, {
+        dialogId: req.dialogId,
+        accept: req.accept,
+        promptText: req.promptText,
+        timeoutMs: req.timeoutMs,
+      });
+      return actionOk(req.action, { tabId, dialog });
     });
   }
 
@@ -554,6 +613,15 @@ export class RsbWebviewBackend implements BrowserBackend {
       // Network capture enriches normal browsing actions but must not prevent
       // the underlying page action when DevTools owns the debugger.
       this.opts.logger.warn('RSB network observation unavailable', { tabId, err });
+    }
+  }
+
+  private async tryObservePageSignals(wc: WebContents, tabId: string): Promise<void> {
+    await this.tryObserveNetwork(wc, tabId);
+    try {
+      await this.dialogs.observe(wc);
+    } catch (err) {
+      this.opts.logger.warn('RSB page dialog observation unavailable', { tabId, err });
     }
   }
 

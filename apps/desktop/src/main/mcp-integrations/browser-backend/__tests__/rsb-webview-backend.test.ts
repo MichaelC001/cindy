@@ -6,6 +6,10 @@
 //  - snapshot / non-evaluate act actions use the bounded CDP automation helper
 //  - advanced unsupported actions yield a structured error (no throw)
 
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WebContents } from 'electron';
 
@@ -938,6 +942,129 @@ describe('RsbWebviewBackend — MCP session id injection', () => {
   });
 });
 
+describe('RsbWebviewBackend — uploads and page dialogs', () => {
+  function buildPageEnv(options?: { uploadRoot?: string }) {
+    let attached = false;
+    const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+    const sendCommand = vi.fn(async (method: string) => {
+      if (method === 'Network.enable' || method === 'Page.enable') return {};
+      if (method === 'Accessibility.enable') return {};
+      if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'file-input' } };
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 11 } };
+      if (method === 'Runtime.callFunctionOn') {
+        return { result: { value: { ok: true, multiple: true } } };
+      }
+      if (method === 'DOM.setFileInputFiles') return {};
+      if (method === 'Page.handleJavaScriptDialog') return {};
+      throw new Error(`unexpected command: ${method}`);
+    });
+    const wc = fakeWc();
+    Object.assign(wc, {
+      once: vi.fn(),
+      debugger: {
+        isAttached: () => attached,
+        attach: vi.fn(() => {
+          attached = true;
+        }),
+        detach: vi.fn(() => {
+          attached = false;
+        }),
+        sendCommand,
+        on: (event: string, listener: (...args: unknown[]) => void) => {
+          const group = listeners.get(event) ?? new Set();
+          group.add(listener);
+          listeners.set(event, group);
+        },
+        removeListener: (event: string, listener: (...args: unknown[]) => void) => {
+          listeners.get(event)?.delete(listener);
+        },
+      },
+    });
+    const registry = fakeRegistry(
+      [{ sessionId: 's1', tabId: 't1', webContentsId: 101 }],
+      new Map([['t1', wc]]),
+    );
+    const backend = new RsbWebviewBackend({
+      registry,
+      getActiveSessionId: () => 's1',
+      artifactRoot: options?.uploadRoot ? () => options.uploadRoot! : undefined,
+      resolveUploadRoots: options?.uploadRoot
+        ? async () => [options.uploadRoot!]
+        : undefined,
+      bridge: { getHostWebContents: () => null, logger: logger() },
+      logger: logger(),
+    });
+    const emit = (method: string, params: Record<string, unknown>) => {
+      for (const listener of listeners.get('message') ?? []) {
+        listener({}, method, params);
+      }
+    };
+    return { backend, emit, sendCommand };
+  }
+
+  it('validates upload paths before assigning files to the page input', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-browser-backend-upload-'));
+    try {
+      const file = path.join(root, 'notes.txt');
+      await fs.writeFile(file, 'notes');
+      const env = buildPageEnv({ uploadRoot: root });
+
+      const res = await env.backend.call({
+        action: 'upload',
+        targetId: 't1',
+        paths: [file],
+        query: { label: 'Attachments' },
+      });
+
+      expect(res.ok).toBe(true);
+      expect(res.data).toMatchObject({ tabId: 't1', uploadedFiles: 1 });
+      expect(env.sendCommand).toHaveBeenCalledWith('DOM.setFileInputFiles', {
+        files: [await fs.realpath(file)],
+        objectId: 'file-input',
+      });
+      await env.backend.dispose();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('returns a dialog barrier from snapshot and handles the exact pending dialog', async () => {
+    const env = buildPageEnv();
+    await env.backend.call({ action: 'snapshot', targetId: 't1' });
+    env.emit('Page.javascriptDialogOpening', {
+      type: 'confirm',
+      message: 'Delete this item?',
+    });
+
+    const snapshot = await env.backend.call({ action: 'snapshot', targetId: 't1' });
+    expect(snapshot.ok).toBe(true);
+    expect(snapshot.data).toMatchObject({
+      targetId: 't1',
+      barrier: {
+        kind: 'page-dialog',
+        dialog: { type: 'confirm', message: 'Delete this item?' },
+      },
+    });
+    const dialogId = (snapshot.data as {
+      barrier: { dialog: { id: string } };
+    }).barrier.dialog.id;
+
+    const handled = await env.backend.call({
+      action: 'dialog',
+      targetId: 't1',
+      dialogId,
+      accept: false,
+    });
+    expect(handled.ok).toBe(true);
+    expect(env.sendCommand).toHaveBeenCalledWith(
+      'Page.handleJavaScriptDialog',
+      { accept: false },
+    );
+    await env.backend.dispose();
+  });
+});
+
 describe('RsbWebviewBackend — network actions', () => {
   function buildNetworkEnv() {
     let attached = false;
@@ -1065,14 +1192,14 @@ describe('RsbWebviewBackend — network actions', () => {
 });
 
 describe('RsbWebviewBackend — unsupported actions', () => {
-  it('upload returns BROWSER_RUNTIME_ACTION_FAILED with explanation', async () => {
+  it('unknown actions return BROWSER_RUNTIME_ACTION_FAILED with explanation', async () => {
     const backend = new RsbWebviewBackend({
       registry: fakeRegistry([], new Map()),
       getActiveSessionId: () => 's1',
       bridge: { getHostWebContents: () => null, logger: logger() },
       logger: logger(),
     });
-    const res = await backend.call({ action: 'upload' } as never);
+    const res = await backend.call({ action: 'trace' } as never);
     expect(res.ok).toBe(false);
     expect(res.errorCode).toBe('BROWSER_RUNTIME_ACTION_FAILED');
     expect(res.message).toMatch(/not yet supported/);
