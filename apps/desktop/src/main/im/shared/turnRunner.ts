@@ -59,6 +59,7 @@ import type {
   InteractionDecision,
   InteractionRequest,
   Session as MakerSession,
+  TurnPermissionPolicy,
   UserMessage,
 } from '@cindy/maker-core';
 import type { IMAttachment, InteractiveCardSpec, StreamingTextHandle } from '@cindy/im';
@@ -191,6 +192,7 @@ interface QueuedSend {
   notified: boolean;
   queueMode: 'internal' | 'external';
   beforeProviderStart?: () => Promise<void>;
+  turnPermissionPolicy?: TurnPermissionPolicy;
 }
 
 type DetachDrainOutcome = 'rewire' | 'cancelled';
@@ -284,6 +286,8 @@ export interface ImRunAgentTurnArgs {
   onTurnComplete?: () => void;
   /** Keep fire-and-forget work inside the ingress account's drain boundary. */
   trackBackgroundTask?: (operation: () => Promise<void>) => void;
+  /** Optional per-turn host policy (personal WeChat routes confirmations to Desktop). */
+  turnPermissionPolicy?: TurnPermissionPolicy;
 }
 
 export interface ImTurnTerminal {
@@ -678,6 +682,9 @@ export function createTurnRunner(
       ...(args.beforeProviderStart
         ? { beforeProviderStart: args.beforeProviderStart }
         : {}),
+      ...(args.turnPermissionPolicy
+        ? { turnPermissionPolicy: args.turnPermissionPolicy }
+        : {}),
     };
 
     // turn 进行中(本 session 的本渠道 turn 未收口 / sendQueue 已有人排队 /
@@ -781,18 +788,43 @@ export function createTurnRunner(
         : item.userMessage;
       const sendResult = await state.makerSession.send(outgoingMessage as typeof item.userMessage, {
         planMode: false,
+        ...(item.turnPermissionPolicy
+          ? { turnPermissionPolicy: item.turnPermissionPolicy }
+          : {}),
         beforeProviderStart: async () => {
-          item.turn.interactionRouteLease = beginInteractionRoute(state.makerSession, {
-            route: {
-              sessionId: rowId,
-              turnId: item.turn.turnId,
-              origin: { kind: 'im', channel },
-              interactionSurface: 'channel-card',
-            },
-            handle: handleInteractionFor(rowId, userId, state.scopeKey),
-            onCancel: (requestId) =>
-              cancelPending(requestId, 'interaction_route_released'),
-          });
+          item.turn.interactionRouteLease =
+            item.turnPermissionPolicy?.confirmationSurface === 'desktop'
+              ? beginInteractionRoute(state.makerSession, {
+                  route: {
+                    sessionId: rowId,
+                    turnId: item.turn.turnId,
+                    origin: item.turnPermissionPolicy.origin,
+                    interactionSurface: 'desktop',
+                    ...(item.turnPermissionPolicy.confirmationTimeoutMs
+                      ? {
+                          timeoutMs:
+                            item.turnPermissionPolicy.confirmationTimeoutMs,
+                        }
+                      : {}),
+                    ...(item.turnPermissionPolicy.onInteractionStateChange
+                      ? {
+                          onStateChange:
+                            item.turnPermissionPolicy.onInteractionStateChange,
+                        }
+                      : {}),
+                  },
+                })
+              : beginInteractionRoute(state.makerSession, {
+                  route: {
+                    sessionId: rowId,
+                    turnId: item.turn.turnId,
+                    origin: { kind: 'im', channel },
+                    interactionSurface: 'channel-card',
+                  },
+                  handle: handleInteractionFor(rowId, userId, state.scopeKey),
+                  onCancel: (requestId) =>
+                    cancelPending(requestId, 'interaction_route_released'),
+                });
           await item.beforeProviderStart?.();
           acceptedAt = Date.now();
         },

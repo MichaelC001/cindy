@@ -92,6 +92,69 @@ describe('session interaction router', () => {
     expect(harness.setInteractionListener).toHaveBeenCalledTimes(1);
   });
 
+  it('routes an admitted personal WeChat turn to Desktop without a channel handler', async () => {
+    const harness = makeSession();
+    const desktop = vi.fn(async (): Promise<InteractionDecision> => ({
+      kind: 'permission',
+      behavior: 'allow',
+    }));
+    installDesktopInteractionHandler(harness.session, desktop);
+
+    const lease = beginInteractionRoute(harness.session, {
+      route: {
+        sessionId: 'session-1',
+        turnId: 'wechat-task-1',
+        origin: { kind: 'im', channel: 'wechat', taskId: 'wechat-task-1' },
+        interactionSurface: 'desktop',
+      },
+    });
+
+    await expect(harness.dispatch(permission('wechat-1'))).resolves.toMatchObject({
+      behavior: 'allow',
+    });
+    expect(desktop).toHaveBeenCalledOnce();
+    lease.release();
+  });
+
+  it('fails a Desktop-routed confirmation closed when its turn timeout expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = makeSession();
+      installDesktopInteractionHandler(
+        harness.session,
+        async () => new Promise<InteractionDecision>(() => {}),
+      );
+      const states: string[] = [];
+      const lease = beginInteractionRoute(harness.session, {
+        route: {
+          sessionId: 'session-1',
+          turnId: 'wechat-task-timeout',
+          origin: {
+            kind: 'im',
+            channel: 'wechat',
+            taskId: 'wechat-task-timeout',
+          },
+          interactionSurface: 'desktop',
+          timeoutMs: 100,
+          onStateChange: (state) => states.push(state),
+        },
+      });
+
+      const decision = harness.dispatch(permission('wechat-timeout'));
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(decision).resolves.toMatchObject({
+        kind: 'permission',
+        behavior: 'deny',
+        reason: 'interaction_timeout',
+      });
+      expect(states).toEqual(['waiting', 'cancelled']);
+      lease.release();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('cancels pending requests with a kind-correct safe decision on release', async () => {
     const harness = makeSession();
     let keepPending!: () => void;

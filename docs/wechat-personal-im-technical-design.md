@@ -790,12 +790,13 @@ interface TurnPermissionPolicy {
 执行边界：
 
 - policy 随 `session.send()` 的本次 turn 传入，不写进 system prompt；
-- Claude Code 在 `canUseTool`、MCP auto-approve 和 Full Access bypass **之前**执行
+- Claude Code 在 `canUseTool` 与 MCP auto-approve **之前**执行
   `forceConfirmToolCall`；
-- Codex 在 approval policy 自动放行和 tool execution **之前**执行同一策略；
+- Codex policy turn 使用可被 host 观察的 `untrusted + read-only` turn 配置，并在
+  approval 自动放行之前执行同一策略；
 - 微信 origin 命中 destructive classifier 时强制生成 Router permission request；
-- 即使 session permission mode 为 `auto` 或 `fullAccess`，微信 origin 的高风险命中
-  仍不能绕过 Desktop 确认；
+- session permission mode 为 `auto` 时，微信 origin 的高风险命中不能绕过 Desktop
+  确认；
 - 非微信 turn 保持现有权限行为；
 - provider 若无法提供强制确认前置钩子，该 provider 的微信 Full Access 不可选，
   不能静默降级；
@@ -807,11 +808,12 @@ depth，真正保证来自 Maker/Agent 权限入口。
 
 Full Access：
 
-1. 用户在 Desktop 设置中选择；
-2. 弹第二次风险确认；
-3. 只写新会话默认；
-4. 当前 session 不热切换到 Full Access；
-5. `/new` 后才生效。
+1. 当前 Claude/Codex adapter 都无法证明 Full Access 下每一种文件删除会在执行前回调
+   host，因此个人微信首版明确禁用 Full Access；
+2. capability 对外声明不支持的 permission mode，dispatch preflight 在任何 durable
+   accepted/CAS/消息落库之前拒绝，不静默降级成 Auto；
+3. 将来只有 provider 提供覆盖所有工具执行的前置 hook 并完成回归后，才能重新开放；
+4. 届时仍需 Desktop 二次风险确认、只写新会话默认且 `/new` 后生效。
 
 ## 10. 文本与回复
 
@@ -1092,8 +1094,7 @@ Manifest 只允许停用，不允许修改 endpoint、协议参数或下载代�
 - 30 分钟超时；
 - destructive 强制 Desktop 确认；
 - Claude MCP auto-approve 前强制确认；
-- Claude/Codex Full Access 下仍执行微信 destructive policy；
-- full access 仅新 epoch 生效；
+- Claude/Codex Full Access 微信 turn 在 durable accept 前明确拒绝；
 - 当前 task 与 pending 串行；
 - `/new` epoch 边界；
 - final outbox 只生成一次。
@@ -1105,7 +1106,7 @@ Manifest 只允许停用，不允许修改 endpoint、协议参数或下载代�
 - needs reauth；
 - disabled by policy；
 - Local 和 Cloud 可见性；
-- Full Access 二次确认；
+- Full Access 不可选原因文案；
 - i18n；
 - Light/Dark。
 
@@ -1231,7 +1232,7 @@ feat(maker): enforce IM-origin desktop confirmations
 
 - Claude/Codex `TurnPermissionPolicy`；
 - MCP auto-approve 前置拦截；
-- Auto/Full Access destructive 强制确认；
+- Auto destructive 强制确认，Full Access 在 durable accept 前明确拒绝；
 - WeChat origin → Desktop InteractionRouter 路由能力，但尚不接真实微信网络；
 - waiting/timeout/abort/epoch close；
 - provider capability gate；
@@ -1398,7 +1399,8 @@ git commit -s
 - 微信不调用 card API；
 - durable pump 与 `turnRunner.sendQueue` 不形成双重队列；
 - InteractionRouter 单 listener 正确路由所有 origin；
-- Auto/Full Access 下微信高风险工具仍进 Desktop；
+- Auto 下微信高风险工具仍进 Desktop；
+- Full Access 在 provider capability gate 被明确拒绝；
 - Desktop interaction 可完成和超时；
 - `/new` 和 stop 语义稳定。
 
@@ -1448,7 +1450,8 @@ Subagent review 至少检查：
 - migration 是否可 replay、可从旧库升级；
 - commit 切分是否存在不可编译的中间 commit；
 - named worker transaction 是否覆盖全部跨表原子边界；
-- Claude/Codex Auto、MCP auto-approve、Full Access 是否都经过 origin policy；
+- Claude/Codex Auto、MCP auto-approve 是否都经过 origin policy，Full Access 是否在
+  accepted 前被 capability gate 拒绝；
 - GA gate 是否把技术完成误写为外部授权完成。
 
 ## 22. 独立 Review 记录

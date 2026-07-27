@@ -256,6 +256,7 @@ export class Session {
     let turnDispatched = false;
     let previousTurnOrigin: SendOrigin | null = null;
     try {
+      this.handle.validateSendOptions?.(handleOpts);
       if (beforeProviderStart) await beforeProviderStart();
       await onAccepted?.();
       this.ensureActive();

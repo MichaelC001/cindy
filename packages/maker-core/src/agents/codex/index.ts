@@ -28,11 +28,13 @@ import {
   BaseAgent,
   OneShotError,
   AgentNotAuthenticatedError,
+  TurnPermissionPolicyUnsupportedError,
   type AgentSessionHandle,
   type AgentDeps,
   type StartSessionOptions,
   type OneShotOptions,
   type SendOptions,
+  type TurnPermissionPolicy,
 } from '../base-agent.js';
 import type { AgentCredentialMode } from '../../interfaces/auth-adapter.js';
 import type {
@@ -685,6 +687,11 @@ const CAPABILITIES: Capabilities = {
   reasoningDisplay: ['off', 'summarized'],
   permissionModes: CODEX_PERMISSION_MODES,
   setPermissionModeMidSession: { supported: true },
+  turnPermissionPolicy: {
+    supported: { supported: true },
+    // Full access can mutate workspace files without a host approval callback.
+    unsupportedPermissionModes: ['bypassPermissions'],
+  },
   // 计划模式一级开关: app-server experimental collaborationMode ({ mode:'plan' }) +
   // plan item 捕获 → plan_review 审批 → 批准后自动发起实施 turn (对齐官方 TUI 流程)。
   planMode: { supported: true },
@@ -1997,6 +2004,23 @@ export class CodexAgent extends BaseAgent {
     let subscriptionInvalidatedByTransport = false;
     let subscription: ThreadSubscription | null = null;
     let interactionResolver: InteractionResolver | null = null;
+    // Kept across the internal plan implementation/revision turns. A later
+    // explicit Session.send replaces it before turn/start.
+    let activeTurnPermissionPolicy: TurnPermissionPolicy | null = null;
+    const forceTurnConfirmation = (toolName: string, input: unknown): boolean => {
+      const policy = activeTurnPermissionPolicy;
+      if (!policy) return false;
+      try {
+        return policy.forceConfirmToolCall(toolName, input) === true;
+      } catch (error) {
+        log.error('turn permission policy threw -> force confirmation', {
+          toolName,
+          origin: policy.origin,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return true;
+      }
+    };
     let stopRolloutPlanFallback: (() => void) | null = null;
     const seenRolloutPlanCallIds = new Set<string>();
     const latestPlanByTurn = new Map<string, TurnPlanUpdatedNotification['params']['plan']>();
@@ -2257,7 +2281,16 @@ export class CodexAgent extends BaseAgent {
       | 'permissions'
       | 'runtimeWorkspaceRoots'
     > {
-      const { approvalPolicy, approvalsReviewer, sandbox } = currentApprovalConfig();
+      // A policy turn must make execution observable to the host. Read-only +
+      // untrusted routes command/file escalations through the request handlers;
+      // those handlers auto-accept non-forced actions in Auto mode.
+      const turnApprovalConfig: CodexPermissionConfig = activeTurnPermissionPolicy
+        ? {
+            approvalPolicy: 'untrusted',
+            sandbox: 'read-only',
+          }
+        : currentApprovalConfig();
+      const { approvalPolicy, approvalsReviewer, sandbox } = turnApprovalConfig;
       const shared = {
         approvalPolicy,
         ...(approvalsReviewer ? { approvalsReviewer } : {}),
@@ -2268,7 +2301,8 @@ export class CodexAgent extends BaseAgent {
       if (
         readonlyReferenceDirsSupported &&
         mutableExtraDirs.length > 0 &&
-        mutablePermissionMode !== 'bypassPermissions'
+        mutablePermissionMode !== 'bypassPermissions' &&
+        !activeTurnPermissionPolicy
       ) {
         return {
           ...shared,
@@ -2673,7 +2707,12 @@ export class CodexAgent extends BaseAgent {
           : PLAN_IMPLEMENTATION_MESSAGE;
         log.debug('plan review ◀ approved — starting implementation turn', { turnId, edited: Boolean(edited && edited !== plan.trim()) });
         try {
-          await handle.send({ type: 'user', content: message });
+          await handle.send(
+            { type: 'user', content: message },
+            activeTurnPermissionPolicy
+              ? { turnPermissionPolicy: activeTurnPermissionPolicy }
+              : undefined,
+          );
         } catch (e) {
           emitPlanFollowUpStartFailure('implementation', e);
         }
@@ -2695,7 +2734,12 @@ export class CodexAgent extends BaseAgent {
       }
       log.debug('plan review ◀ revision requested — starting plan revision turn', { turnId });
       try {
-        await handle.send({ type: 'user', content: feedback });
+        await handle.send(
+          { type: 'user', content: feedback },
+          activeTurnPermissionPolicy
+            ? { turnPermissionPolicy: activeTurnPermissionPolicy }
+            : undefined,
+        );
       } catch (e) {
         planCycleActive = false;
         proposedPlanText = null;
@@ -2714,26 +2758,46 @@ export class CodexAgent extends BaseAgent {
       req: InteractionRequest,
       opts?: { forcePrompt?: boolean },
     ): Promise<ApprovalDecision> {
+      const forcePrompt =
+        opts?.forcePrompt === true ||
+        (req.kind === 'permission' &&
+          forceTurnConfirmation(req.toolName, req.input));
       // Full access 的普通审批不应打断用户。Auto 在已验证路由上由 app-server
       // auto_review 负责；降级路由则由 untrusted 把越界请求发回客户端。两条路径
       // 只要收到请求都走 UI，不能绕过 reviewer / 降级审批直接放行。forcePrompt 高风险 MCP inner tool
       // (如 contacts delete/merge/系统回写)在任何模式下都必须拿到用户的逐次确认。
       if (
-        !opts?.forcePrompt &&
+        !forcePrompt &&
         mutablePermissionMode === 'bypassPermissions'
       ) {
         return Promise.resolve('accept');
       }
+      // Policy turns deliberately route otherwise-unattended Auto actions back
+      // through the host. Preserve Auto semantics by accepting non-forced
+      // callbacks without opening Desktop UI.
+      if (
+        !forcePrompt &&
+        activeTurnPermissionPolicy &&
+        mutablePermissionMode === 'auto'
+      ) {
+        return Promise.resolve('accept');
+      }
+      const routedRequest =
+        forcePrompt && req.kind === 'permission'
+          ? { ...req, suggestions: undefined }
+          : req;
       return new Promise<ApprovalDecision>((resolve) => {
-        const entry: PendingEntry = { resolve, kind, settled: false, forcePrompt: opts?.forcePrompt === true };
+        const entry: PendingEntry = { resolve, kind, settled: false, forcePrompt };
         pendingApprovals.set(requestId, entry);
         const finalize = (d: ApprovalDecision) => {
           if (entry.settled) return;
           entry.settled = true;
           pendingApprovals.delete(requestId);
-          resolve(d);
+          // A stale/custom UI may still return a session grant. Forced policy
+          // confirmation applies to this call only and must never persist.
+          resolve(forcePrompt && d === 'acceptForSession' ? 'accept' : d);
         };
-        dispatchInteraction(req)
+        dispatchInteraction(routedRequest)
           .then((decision) => {
             if (decision.kind !== 'permission') {
               log.warn('unexpected non-permission decision → decline', { kind: decision.kind });
@@ -3028,7 +3092,12 @@ export class CodexAgent extends BaseAgent {
       // Host policy 可在 outer call_tool 的 metadata 中识别渐进式 server 的
       // inner action。查询继续静默，高风险 action 逐次确认且不得持久化授权。
       const approvalPolicy = mcpToolApprovalPolicy(params);
-      if (approvalPolicy === 'auto-approve') {
+      const policyPermissionInput = mcpElicitationPermissionInput(params);
+      const turnPolicyForcePrompt = forceTurnConfirmation(
+        `mcp:${params.serverName}`,
+        policyPermissionInput,
+      );
+      if (approvalPolicy === 'auto-approve' && !turnPolicyForcePrompt) {
         log.debug('mcp elicitation auto-approved by host policy', {
           serverName: params.serverName,
           mode: params.mode,
@@ -3049,7 +3118,7 @@ export class CodexAgent extends BaseAgent {
           kind: 'permission',
           requestId,
           toolName: `mcp:${params.serverName}`,
-          input: mcpElicitationPermissionInput(params),
+          input: policyPermissionInput,
           title: `Allow Codex to use ${innerToolName ?? toolTitle ?? params.serverName}?`,
           description: params.message,
           suggestions:
@@ -3059,7 +3128,10 @@ export class CodexAgent extends BaseAgent {
         },
         // prompt-each-time:Full access 也必须逐次弹 UI,否则高风险 inner tool
         // (contacts delete/merge/系统回写)会被 awaitApprovalDecision 首分支静默放行。
-        { forcePrompt: approvalPolicy === 'prompt-each-time' },
+        {
+          forcePrompt:
+            turnPolicyForcePrompt || approvalPolicy === 'prompt-each-time',
+        },
       );
 
       if (decision === 'accept') {
@@ -3985,10 +4057,24 @@ export class CodexAgent extends BaseAgent {
       get codexProxyActive() { return hostUsesCodexProxy; },
       get codexProductPromptDelivery() { return codexProductPromptDelivery; },
 
+      validateSendOptions(sendOpts: SendOptions) {
+        if (
+          sendOpts.turnPermissionPolicy &&
+          mutablePermissionMode === 'bypassPermissions'
+        ) {
+          throw new TurnPermissionPolicyUnsupportedError(
+            'codex',
+            mutablePermissionMode,
+          );
+        }
+      },
+
       async send(message: UserMessage, sendOpts?: SendOptions) {
         if (rejectClosedOrCancelledSend(sendOpts, 'before start')) {
           return;
         }
+        if (sendOpts) handle.validateSendOptions?.(sendOpts);
+        activeTurnPermissionPolicy = sendOpts?.turnPermissionPolicy ?? null;
         assertCurrentHost('turn/start');
         resubscribeAfterTransportErrorIfNeeded();
         // 新 turn 总是携带当前 (可能已收紧的) 策略, 上一轮残留的延迟中断标记

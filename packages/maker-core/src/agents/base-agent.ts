@@ -620,6 +620,42 @@ export interface SendOptions {
    * 共享 session 下区分自动任务 turn 与用户 turn。agent 子类不消费,透传无害。
    */
   origin?: SendOrigin;
+  /**
+   * Host-owned, per-turn permission policy. This is deliberately a callback
+   * rather than prompt text: providers must enforce it at their pre-execution
+   * approval boundary, before MCP auto-approval or permission-mode bypasses.
+   */
+  turnPermissionPolicy?: TurnPermissionPolicy;
+}
+
+export type TurnPermissionOrigin =
+  | { kind: 'desktop' }
+  | { kind: 'im'; channel: 'feishu' | 'discord' | 'slack' | 'wechat'; taskId?: string }
+  | { kind: 'scheduler' }
+  | { kind: 'hook'; source: string };
+
+export interface TurnPermissionPolicy {
+  readonly origin: TurnPermissionOrigin;
+  readonly confirmationSurface: 'desktop' | 'channel';
+  readonly confirmationTimeoutMs?: number;
+  readonly onInteractionStateChange?: (
+    state: 'waiting' | 'resolved' | 'cancelled',
+  ) => void;
+  forceConfirmToolCall(toolName: string, input: unknown): boolean;
+}
+
+export class TurnPermissionPolicyUnsupportedError extends Error {
+  readonly code = 'TURN_PERMISSION_POLICY_UNSUPPORTED';
+
+  constructor(
+    readonly agentKind: AgentKind,
+    readonly permissionMode: PermissionMode,
+  ) {
+    super(
+      `Turn permission policy is not supported by ${agentKind} in permission mode ${permissionMode}`,
+    );
+    this.name = 'TurnPermissionPolicyUnsupportedError';
+  }
 }
 
 /**
@@ -658,6 +694,13 @@ export interface AgentSessionHandle {
 
   /** 推送一条用户消息（流式输入） */
   send(message: UserMessage, opts?: SendOptions): Promise<void>;
+
+  /**
+   * Synchronous provider preflight called by Session after reserving the turn
+   * but before any product `beforeProviderStart` / `onAccepted` side effect.
+   * Direct handle callers are still validated again inside send().
+   */
+  validateSendOptions?(opts: SendOptions): void;
 
   /**
    * 把用户消息追加到当前 in-flight turn。

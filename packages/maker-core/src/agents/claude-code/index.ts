@@ -33,7 +33,18 @@ import {
 import type { Query, CanUseTool, McpServerConfig, PermissionUpdate, Settings } from '@anthropic-ai/claude-agent-sdk';
 import Anthropic, { APIError } from '@anthropic-ai/sdk';
 
-import { BaseAgent, OneShotError, AgentNotAuthenticatedError, type AgentSessionHandle, type AgentDeps, type StartSessionOptions, type OneShotOptions, type SendOptions } from '../base-agent.js';
+import {
+  BaseAgent,
+  OneShotError,
+  AgentNotAuthenticatedError,
+  TurnPermissionPolicyUnsupportedError,
+  type AgentSessionHandle,
+  type AgentDeps,
+  type StartSessionOptions,
+  type OneShotOptions,
+  type SendOptions,
+  type TurnPermissionPolicy,
+} from '../base-agent.js';
 import { SYSTEM_PROMPT_APPEND as MAKER_SYSTEM_PROMPT_APPEND } from './system-prompt-append.js';
 import { MAKER_MEMORY_RULES } from '../../memory/system-prompt.js';
 import { MemoryFlushController } from '../../memory/flush-controller.js';
@@ -495,6 +506,12 @@ const CAPABILITIES: Capabilities = {
   reasoningDisplay: ['off', 'summarized', 'full'],
   permissionModes: CLAUDE_PERMISSION_MODES,
   setPermissionModeMidSession: { supported: true },
+  turnPermissionPolicy: {
+    supported: { supported: true },
+    // Both modes can execute mutations without invoking canUseTool. Reject the
+    // combination instead of presenting a false forced-confirmation promise.
+    unsupportedPermissionModes: ['acceptEdits', 'bypassPermissions'],
+  },
   // 计划模式一级开关: SDK plan mode + ExitPlanMode → plan_review 审批, 批准后自动退出
   planMode: { supported: true },
   multimodal: {
@@ -936,6 +953,24 @@ export class ClaudeCodeAgent extends BaseAgent {
     let inputQueue = createAsyncQueue<SdkUserInput>();
     let abortController = new AbortController();
     let interactionResolver: InteractionResolver | null = null;
+    // Keep the policy across Claude task_notification auto-continue turns,
+    // which do not call handle.send again. The next explicit send replaces it.
+    let activeTurnPermissionPolicy: TurnPermissionPolicy | null = null;
+    const forceTurnConfirmation = (toolName: string, input: unknown): boolean => {
+      const policy = activeTurnPermissionPolicy;
+      if (!policy) return false;
+      try {
+        return policy.forceConfirmToolCall(toolName, input) === true;
+      } catch (error) {
+        // A safety classifier failure cannot become an approval bypass.
+        log.error('turn permission policy threw -> force confirmation', {
+          toolName,
+          origin: policy.origin,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return true;
+      }
+    };
     // 事件队列预先声明 —— canUseTool 路径要 push interaction_dismissed 事件
     const eventQueue = createAsyncQueue<AgentEvent>();
 
@@ -1202,11 +1237,13 @@ export class ClaudeCodeAgent extends BaseAgent {
       }
 
       // 3a. MCP 工具过 host 审批策略(本地与远端会话共用 classifyMcpApprovalPolicy)。
+      const turnPolicyForcePrompt = forceTurnConfirmation(toolName, input);
       const mcpApprovalPolicy = classifyMcpApprovalPolicy(toolName, input);
-      if (mcpApprovalPolicy === 'auto-approve') {
+      if (mcpApprovalPolicy === 'auto-approve' && !turnPolicyForcePrompt) {
         return { behavior: 'allow', updatedInput: input };
       }
-      const forcePrompt = mcpApprovalPolicy === 'prompt-each-time';
+      const forcePrompt =
+        turnPolicyForcePrompt || mcpApprovalPolicy === 'prompt-each-time';
       const decision = await dispatchInteraction({
         kind: 'permission',
         requestId: options.toolUseID,
@@ -1891,14 +1928,19 @@ export class ClaudeCodeAgent extends BaseAgent {
             }
             // 远端会话走同一份 host MCP 策略 —— 否则 SSH 会话里可信 server 又要逐次
             // 弹窗, prompt-each-time 的"禁止持久化授权"保护也整套缺失。
+            const remoteTurnPolicyForcePrompt = forceTurnConfirmation(
+              params.toolName ?? 'unknown',
+              params.input ?? {},
+            );
             const remoteMcpPolicy = classifyMcpApprovalPolicy(
               params.toolName ?? '',
               params.input ?? {},
             );
-            if (remoteMcpPolicy === 'auto-approve') {
+            if (remoteMcpPolicy === 'auto-approve' && !remoteTurnPolicyForcePrompt) {
               return { kind: 'permission', behavior: 'allow' };
             }
-            const remoteForcePrompt = remoteMcpPolicy === 'prompt-each-time';
+            const remoteForcePrompt =
+              remoteTurnPolicyForcePrompt || remoteMcpPolicy === 'prompt-each-time';
             const decision = await dispatchWithTimeout({
               kind: 'permission',
               requestId: params.requestId,
@@ -3048,6 +3090,19 @@ export class ClaudeCodeAgent extends BaseAgent {
       agentKind: 'claude-code',
       get model() { return mutableModel; },
 
+      validateSendOptions(sendOpts: SendOptions) {
+        if (
+          sendOpts.turnPermissionPolicy &&
+          (mutablePermissionMode === 'acceptEdits' ||
+            mutablePermissionMode === 'bypassPermissions')
+        ) {
+          throw new TurnPermissionPolicyUnsupportedError(
+            'claude-code',
+            mutablePermissionMode,
+          );
+        }
+      },
+
       async send(message: UserMessage, sendOpts?: SendOptions) {
         // idle resume fallback 正在重建(亚秒窗):等它完成再走正常受理。重建成功时
         // 消息透明跑在新会话上;重建失败/close 竞态时 push 撞上已 end 的队列,由下方
@@ -3058,6 +3113,8 @@ export class ClaudeCodeAgent extends BaseAgent {
         if (sendOpts?.signal?.aborted) {
           throw new Error('Claude send cancelled before acceptance');
         }
+        if (sendOpts) handle.validateSendOptions?.(sendOpts);
+        activeTurnPermissionPolicy = sendOpts?.turnPermissionPolicy ?? null;
         // 仅用于诊断日志: 调用方每次 send 都可以带 logTitle (取自 storage 的最新值);
         // 缺省时保留上一次的值 (没传不等于"清空")。
         if (sendOpts?.logTitle !== undefined) lastSendTitle = sendOpts.logTitle;

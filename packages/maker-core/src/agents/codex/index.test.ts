@@ -6,7 +6,7 @@ import { promises as fs } from 'node:fs';
 import { CodexAgent } from './index.js';
 import { Method } from './app-server/protocol.js';
 import type { ThreadEventHandlers } from './app-server/host.js';
-import type { AgentDeps } from '../base-agent.js';
+import type { AgentDeps, TurnPermissionPolicy } from '../base-agent.js';
 import type { AuthAdapter } from '../../interfaces/auth-adapter.js';
 import type { AgentEvent, InteractionDecision, InteractionRequest } from '../../types/events.js';
 import type { Logger } from '../../interfaces/logger.js';
@@ -398,6 +398,111 @@ describe('CodexAgent permissions', () => {
       'bypassPermissions',
     ]);
     expect(agent.capabilities.extraDirs).toEqual({ supported: true });
+    expect(agent.capabilities.turnPermissionPolicy).toEqual({
+      supported: { supported: true },
+      unsupportedPermissionModes: ['bypassPermissions'],
+    });
+  });
+
+  it('makes policy turns host-observable and only prompts for forced Auto actions', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) {
+        return { turn: { id: 'turn-wechat-policy' } };
+      }
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-wechat-policy',
+      model: 'gpt-5.5',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const policy: TurnPermissionPolicy = {
+      origin: { kind: 'im', channel: 'wechat', taskId: 'task-codex' },
+      confirmationSurface: 'desktop',
+      forceConfirmToolCall: (_toolName, input) =>
+        JSON.stringify(input).includes('rm -rf'),
+    };
+    const resolver = vi.fn(async () => ({
+      kind: 'permission' as const,
+      behavior: 'allow' as const,
+    }));
+    handle.setInteractionResolver(resolver);
+
+    await handle.send(
+      { type: 'user', content: 'clean old output if needed' },
+      { turnPermissionPolicy: policy },
+    );
+    const turnParams = host.request.mock.calls.find(
+      ([method]) => method === Method.TurnStart,
+    )?.[1] as Record<string, unknown>;
+    expect(turnParams).toMatchObject({
+      approvalPolicy: 'untrusted',
+      sandboxPolicy: { type: 'readOnly' },
+    });
+    expect(turnParams).not.toHaveProperty('approvalsReviewer');
+
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.commandExecutionApproval) {
+      throw new Error('expected commandExecutionApproval handler');
+    }
+    await expect(
+      handlers.commandExecutionApproval({
+        threadId: 'start-thread-id',
+        turnId: 'turn-wechat-policy',
+        itemId: 'cmd-safe',
+        command: 'pwd',
+        cwd: '/repo',
+      }),
+    ).resolves.toEqual({ decision: 'accept' });
+    expect(resolver).not.toHaveBeenCalled();
+
+    await expect(
+      handlers.commandExecutionApproval({
+        threadId: 'start-thread-id',
+        turnId: 'turn-wechat-policy',
+        itemId: 'cmd-risky',
+        command: 'rm -rf build',
+        cwd: '/repo',
+      }),
+    ).resolves.toEqual({ decision: 'accept' });
+    expect(resolver).toHaveBeenCalledOnce();
+    expect(resolver.mock.calls[0]?.[0]).toMatchObject({
+      kind: 'permission',
+      toolName: 'exec',
+      input: { command: 'rm -rf build' },
+      suggestions: undefined,
+    });
+    await handle.close();
+  });
+
+  it('rejects Full Access policy turns instead of silently downgrading them', async () => {
+    const agent = new CodexAgent(createDeps());
+    installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-wechat-full-access',
+      model: 'gpt-5.5',
+      workingDir: '/repo',
+      permissionMode: 'bypassPermissions',
+    });
+    const policy: TurnPermissionPolicy = {
+      origin: { kind: 'im', channel: 'wechat', taskId: 'task-full' },
+      confirmationSurface: 'desktop',
+      forceConfirmToolCall: () => true,
+    };
+
+    await expect(
+      handle.send(
+        { type: 'user', content: 'remove old output' },
+        { turnPermissionPolicy: policy },
+      ),
+    ).rejects.toMatchObject({
+      name: 'TurnPermissionPolicyUnsupportedError',
+      code: 'TURN_PERMISSION_POLICY_UNSUPPORTED',
+      permissionMode: 'bypassPermissions',
+    });
+    await handle.close();
   });
 });
 
@@ -3346,6 +3451,70 @@ describe('CodexAgent MCP thread context hooks', () => {
     expect(policy).toHaveBeenCalledWith({
       serverName: 'cindy_contacts',
       toolParams: { name: 'contacts_search', args: { query: 'Carol' } },
+    });
+    await handle.close();
+  });
+
+  it('runs the turn policy before trusted MCP auto-approval', async () => {
+    const agent = new CodexAgent(createDeps({}, {
+      getMcpToolApprovalPolicy: () => 'auto-approve',
+    }));
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) {
+        return { turn: { id: 'turn-wechat-mcp' } };
+      }
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-wechat-mcp',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const resolver = vi.fn(async () => ({
+      kind: 'permission' as const,
+      behavior: 'deny' as const,
+    }));
+    handle.setInteractionResolver(resolver);
+    await handle.send(
+      { type: 'user', content: 'delete duplicate contact' },
+      {
+        turnPermissionPolicy: {
+          origin: { kind: 'im', channel: 'wechat', taskId: 'task-mcp' },
+          confirmationSurface: 'desktop',
+          forceConfirmToolCall: (_toolName, input) =>
+            JSON.stringify(input).includes('contacts_delete'),
+        },
+      },
+    );
+
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.mcpServerElicitation) {
+      throw new Error('expected mcpServerElicitation handler');
+    }
+    const result = await handlers.mcpServerElicitation({
+      threadId: 'start-thread-id',
+      turnId: 'turn-wechat-mcp',
+      serverName: 'cindy_contacts',
+      mode: 'form',
+      _meta: {
+        codex_approval_kind: 'mcp_tool_call',
+        persist: ['session'],
+        tool_params: {
+          name: 'contacts_delete',
+          args: { id: 'contact-1' },
+        },
+      },
+      message: 'Allow tool call',
+      requestedSchema: {},
+    });
+
+    expect(result).toEqual({ action: 'decline', content: null, _meta: null });
+    expect(resolver).toHaveBeenCalledOnce();
+    expect(resolver.mock.calls[0]?.[0]).toMatchObject({
+      kind: 'permission',
+      toolName: 'mcp:cindy_contacts',
+      suggestions: undefined,
     });
     await handle.close();
   });

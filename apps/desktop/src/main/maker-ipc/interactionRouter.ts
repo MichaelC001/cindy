@@ -7,13 +7,13 @@
  * lifetime of a Session instance; turn producers only register an active route.
  */
 
-import type { InteractionDecision, InteractionRequest } from '@cindy/maker-core';
+import type {
+  InteractionDecision,
+  InteractionRequest,
+  TurnPermissionOrigin,
+} from '@cindy/maker-core';
 
-export type TurnOrigin =
-  | { kind: 'desktop' }
-  | { kind: 'im'; channel: 'feishu' | 'discord' | 'slack' | 'wechat'; taskId?: string }
-  | { kind: 'scheduler' }
-  | { kind: 'hook'; source: string };
+export type TurnOrigin = TurnPermissionOrigin;
 
 export type InteractionSurface = 'desktop' | 'channel-card' | 'headless';
 export type InteractionRouteState = 'waiting' | 'resolved' | 'cancelled';
@@ -23,6 +23,7 @@ export interface InteractionRoute {
   turnId: string;
   origin: TurnOrigin;
   interactionSurface: InteractionSurface;
+  timeoutMs?: number;
   onStateChange?(state: InteractionRouteState): void;
 }
 
@@ -33,19 +34,23 @@ export interface InteractionSession {
   setInteractionListener(listener: InteractionHandler | null): void;
 }
 
-interface RouteRegistration {
-  route: InteractionRoute;
-  handle: InteractionHandler;
-  /**
-   * Return true when the routed surface resolved its own handler promise.
-   * Otherwise the router resolves the request with its kind-correct fallback.
-   */
-  onCancel?: (requestId: string, decision: InteractionDecision) => boolean | void;
-}
+type RouteRegistration =
+  | {
+      route: InteractionRoute & { interactionSurface: 'desktop' };
+      handle?: never;
+      onCancel?: (requestId: string, decision: InteractionDecision) => boolean | void;
+    }
+  | {
+      route: InteractionRoute & { interactionSurface: 'channel-card' | 'headless' };
+      handle: InteractionHandler;
+      /**
+       * Return true when the routed surface resolved its own handler promise.
+       * Otherwise the router resolves the request with its kind-correct fallback.
+       */
+      onCancel?: (requestId: string, decision: InteractionDecision) => boolean | void;
+    };
 
-interface ActiveRoute extends RouteRegistration {
-  token: symbol;
-}
+type ActiveRoute = RouteRegistration & { token: symbol };
 
 interface PendingRequest {
   routeToken: symbol | null;
@@ -129,12 +134,19 @@ class SessionInteractionRouter {
     }
 
     const active = this.activeRoute;
-    const handler = active?.handle ?? this.desktopHandler;
+    const handler =
+      active?.route.interactionSurface === 'desktop'
+        ? this.desktopHandler
+        : active?.handle ?? this.desktopHandler;
     if (!handler) return safeDecision(request, 'no_interaction_route');
 
     let cancel!: (decision: InteractionDecision) => void;
+    let cancelledByRouter = false;
     const cancelled = new Promise<InteractionDecision>((resolve) => {
-      cancel = resolve;
+      cancel = (decision) => {
+        cancelledByRouter = true;
+        resolve(decision);
+      };
     });
     this.pending.set(request.requestId, {
       routeToken: active?.token ?? null,
@@ -142,17 +154,30 @@ class SessionInteractionRouter {
       cancel,
     });
     active?.route.onStateChange?.('waiting');
+    const timeoutMs = active?.route.timeoutMs;
+    const timeout =
+      timeoutMs && timeoutMs > 0
+        ? setTimeout(() => {
+            const decision = safeDecision(request, 'interaction_timeout');
+            const handledBySurface =
+              active?.onCancel?.(request.requestId, decision) === true;
+            if (!handledBySurface) cancel(decision);
+          }, timeoutMs)
+        : null;
 
     try {
       const decision = await Promise.race([handler(request), cancelled]);
       active?.route.onStateChange?.(
-        this.activeRoute?.token === active?.token ? 'resolved' : 'cancelled',
+        !cancelledByRouter && this.activeRoute?.token === active?.token
+          ? 'resolved'
+          : 'cancelled',
       );
       return decision;
     } catch {
       active?.route.onStateChange?.('cancelled');
       return safeDecision(request, 'interaction_handler_failed');
     } finally {
+      if (timeout) clearTimeout(timeout);
       this.pending.delete(request.requestId);
     }
   }
