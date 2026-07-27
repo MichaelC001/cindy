@@ -147,6 +147,7 @@ export class RsbWebviewArtifacts {
   constructor(
     private readonly rootDir: () => string,
     private readonly logger: ArtifactLogger,
+    private readonly downloadGraceMs = DOWNLOAD_GRACE_MS,
   ) {}
 
   async capture<T>(
@@ -180,7 +181,7 @@ export class RsbWebviewArtifacts {
     let value: T;
     try {
       value = await action();
-      await wait(DOWNLOAD_GRACE_MS);
+      await wait(this.downloadGraceMs);
     } catch (err) {
       capture.accepting = false;
       this.captures.delete(wc);

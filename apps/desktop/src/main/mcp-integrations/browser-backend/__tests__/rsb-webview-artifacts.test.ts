@@ -317,7 +317,7 @@ describe('RsbWebviewArtifacts', () => {
 
   it('evicts the oldest files when retained bytes exceed the global budget', async () => {
     const harness = artifactHarness();
-    const artifacts = new RsbWebviewArtifacts(() => root, { warn: vi.fn() });
+    const artifacts = new RsbWebviewArtifacts(() => root, { warn: vi.fn() }, 0);
     const savedPaths: string[] = [];
 
     for (let captureIndex = 0; captureIndex < 5; captureIndex += 1) {
