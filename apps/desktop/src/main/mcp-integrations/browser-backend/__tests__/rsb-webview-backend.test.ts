@@ -739,6 +739,51 @@ describe('RsbWebviewBackend — per-action automation pin', () => {
     ]);
   });
 
+  it.each([
+    { label: 'request timeout', timeoutMs: 25, elapsedMs: 25 },
+    { label: 'bounded default', timeoutMs: undefined, elapsedMs: 60_000 },
+  ])(
+    'navigate uses the $label, stops a stalled load, and lets dispose finish',
+    async ({ timeoutMs, elapsedMs }) => {
+      vi.useFakeTimers();
+      let finishLoad = () => {};
+      const wc = fakeWc();
+      wc.loadURLMock.mockImplementationOnce(
+        () => new Promise<void>((resolve) => {
+          finishLoad = resolve;
+        }),
+      );
+      const stop = vi.fn();
+      Object.assign(wc, { stop });
+      const { backend, registry } = buildBackend(wc);
+
+      try {
+        const navigating = backend.call({
+          action: 'navigate',
+          targetId: 't1',
+          url: 'https://stalled.test',
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        } as never);
+        const disposing = backend.dispose();
+
+        await vi.advanceTimersByTimeAsync(elapsedMs);
+        const result = await navigating;
+        await disposing;
+
+        expect(result.ok).toBe(false);
+        expect(result.message).toBe(`navigation timed out after ${elapsedMs}ms`);
+        expect(stop).toHaveBeenCalledTimes(1);
+        expect(registry.pinHistory).toEqual([
+          { op: 'pin', tabId: 't1' },
+          { op: 'unpin', tabId: 't1' },
+        ]);
+      } finally {
+        finishLoad();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('unpins even when wc operation throws (action failure path)', async () => {
     const wc = {
       getURL: () => '',

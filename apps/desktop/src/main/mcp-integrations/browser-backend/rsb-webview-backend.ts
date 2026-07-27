@@ -94,6 +94,7 @@ export interface RsbWebviewBackendOptions {
  */
 const TAB_REATTACH_TOTAL_MS = 5000;
 const TAB_REATTACH_POLL_MS = 250;
+const DEFAULT_NAVIGATION_TIMEOUT_MS = 60_000;
 
 /**
  * Standard error payload for an action we can't service. Keeps the shape
@@ -149,6 +150,31 @@ function mayStartDownload(request: BrowserActRequest): boolean {
       (request.kind === 'type' || request.kind === 'fill')
       && request.submit === true
     );
+}
+
+async function loadUrlWithTimeout(
+  wc: WebContents,
+  url: string,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      wc.loadURL(url),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          try {
+            wc.stop();
+          } catch {
+            // The guest may already be gone; the timeout must still settle.
+          }
+          reject(new Error(`navigation timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export class RsbWebviewBackend implements BrowserBackend {
@@ -397,7 +423,11 @@ export class RsbWebviewBackend implements BrowserBackend {
     return this.withTabPin(tabId, async () => {
       this.automation.forgetTab(tabId);
       await this.tryObservePageSignals(resolved.wc, tabId);
-      await resolved.wc.loadURL(url);
+      await loadUrlWithTimeout(
+        resolved.wc,
+        url,
+        req.timeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS,
+      );
       return actionOk(req.action, { tabId, url });
     });
   }
