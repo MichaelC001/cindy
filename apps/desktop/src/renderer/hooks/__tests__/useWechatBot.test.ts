@@ -91,6 +91,43 @@ describe('useWechatBot', () => {
     await waitFor(() => expect(result.current.state).toEqual(connected));
   });
 
+  it('ignores the initial load after unmounting', async () => {
+    let resolveState!: (state: WechatBotState) => void;
+    let resolveChannelSettings!: (state: WechatChannelSettingsState) => void;
+    const harness = installWechatApi();
+    harness.api.getState.mockReturnValueOnce(
+      new Promise<WechatBotState>((resolve) => {
+        resolveState = resolve;
+      }),
+    );
+    harness.api.getChannelSettings.mockReturnValueOnce(
+      new Promise<WechatChannelSettingsState>((resolve) => {
+        resolveChannelSettings = resolve;
+      }),
+    );
+    const { unmount } = renderHook(() => useWechatBot());
+
+    unmount();
+    await act(async () => {
+      resolveState({
+        phase: 'connected',
+        bound: true,
+        queuedTasks: 1,
+      });
+      resolveChannelSettings({
+        version: 1,
+        workingDir: 'D:/late-result',
+        workingDirAvailable: true,
+      });
+      await Promise.resolve();
+    });
+
+    expect(__testing.getCache()).toEqual({
+      state: null,
+      channelSettings: null,
+    });
+  });
+
   it('starts and cancels authorization through the credential-free bridge', async () => {
     const { api } = installWechatApi();
     const { result } = renderHook(() => useWechatBot());

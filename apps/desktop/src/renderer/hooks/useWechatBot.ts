@@ -40,7 +40,9 @@ export function useWechatBot(): UseWechatBotReturn {
   const pushVersionRef = useRef(0);
 
   useEffect(() => {
+    let cancelled = false;
     const unsubscribe = window.electronAPI.wechatBot.onStateChange((next) => {
+      if (cancelled) return;
       pushVersionRef.current += 1;
       cachedState = next;
       setState(next);
@@ -51,6 +53,7 @@ export function useWechatBot(): UseWechatBotReturn {
       window.electronAPI.wechatBot.getChannelSettings(),
     ])
       .then(([nextState, nextChannelSettings]) => {
+        if (cancelled) return;
         if (pushVersionRef.current === initialPushVersion) {
           cachedState = nextState;
           setState(nextState);
@@ -59,9 +62,13 @@ export function useWechatBot(): UseWechatBotReturn {
         setChannelSettings(nextChannelSettings);
       })
       .catch(() => {
+        if (cancelled) return;
         log.error('failed to load personal WeChat state');
       });
-    return unsubscribe;
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   const authorize = useCallback(async (): Promise<boolean> => {
@@ -154,5 +161,14 @@ export const __testing = {
   resetCache(): void {
     cachedState = null;
     cachedChannelSettings = null;
+  },
+  getCache(): {
+    state: WechatBotState | null;
+    channelSettings: WechatChannelSettingsState | null;
+  } {
+    return {
+      state: cachedState,
+      channelSettings: cachedChannelSettings,
+    };
   },
 };
