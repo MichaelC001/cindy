@@ -71,6 +71,7 @@ function indentSpans(ed: Editor): string[] {
 afterEach(() => {
   editor?.destroy();
   editor = null;
+  vi.useRealTimers();
 });
 
 describe('buildListIndentDecorations', () => {
@@ -350,6 +351,53 @@ describe('ComposerListIndentDecoration in a real editor', () => {
         Reflect.deleteProperty(Range.prototype, 'getBoundingClientRect');
       }
     }
+  });
+
+  it('suspends list and CJK decorations for the full IME composition', () => {
+    vi.useFakeTimers();
+    editor = new Editor({
+      element: document.createElement('div'),
+      extensions: [
+        Document,
+        Paragraph,
+        Text,
+        HardBreak,
+        CjkPunctDecoration,
+        ComposerListIndentDecoration,
+      ],
+      content: {
+        type: 'doc',
+        content: [{ type: 'paragraph', content: [{ type: 'text', text: '1. 《旧》' }] }],
+      },
+    });
+
+    expect(editor.view.dom.querySelector('.composer-list-block-indent')).not.toBeNull();
+    expect(editor.view.dom.querySelectorAll('span[style*="font-family"]').length).toBeGreaterThan(
+      0,
+    );
+
+    editor.view.dom.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    expect(editor.view.composing).toBe(true);
+    expect(editor.view.dom.querySelector('.composer-list-block-indent')).toBeNull();
+    expect(editor.view.dom.querySelector('span[style*="font-family"]')).toBeNull();
+
+    editor.view.dispatch(
+      editor.state.tr.insertText('中', editor.state.doc.content.size - 1).setMeta('composition', 1),
+    );
+    expect(editor.getText()).toBe('1. 《旧》中');
+    expect(editor.view.dom.querySelector('.composer-list-block-indent')).toBeNull();
+    expect(editor.view.dom.querySelector('span[style*="font-family"]')).toBeNull();
+
+    editor.view.dom.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    expect(editor.view.composing).toBe(false);
+    vi.runOnlyPendingTimers();
+
+    expect(editor.view.dom.querySelector('.composer-list-block-indent')?.textContent).toBe(
+      '1. 《旧》中',
+    );
+    expect(editor.view.dom.querySelectorAll('span[style*="font-family"]').length).toBeGreaterThan(
+      0,
+    );
   });
 
   it('renders the indent span into the DOM for list lines', () => {

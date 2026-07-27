@@ -19,7 +19,8 @@
  * - decoration 只是渲染层,doc JSON / 草稿存储 / 发送内容里没有任何痕迹;
  * - doc 没变直接复用 DecorationSet,变了全量重扫(chat input 文本量小,
  *   全量成本可忽略,不值得做增量映射);
- * - 只在 doc 发生变化时重算,view.update 不参与 decoration 计算;
+ * - IME composition 开始前临时移除 decoration,结束后的下一轮 task 再按
+ *   当前 doc 补算,避免微软拼音输入时改写 composition DOM;
  * - 这是纯文本编辑器的视觉缩进,不改变 doc JSON / 发送文本。
  */
 import { Extension } from '@tiptap/core';
@@ -39,8 +40,18 @@ import {
   type VoiceInputReplacementRange,
 } from './VoiceInputDraftDecoration';
 
-const PLUGIN_KEY = new PluginKey<DecorationSet>('composerListIndentDecoration');
 const TAB_SIZE = 8;
+
+type ListDecorationPluginState = {
+  decorations: DecorationSet;
+  suspendedForComposition: boolean;
+};
+
+type CompositionMeta = 'suspend' | 'resume';
+
+const PLUGIN_STATE_KEY = new PluginKey<ListDecorationPluginState>(
+  'composerListIndentDecorationState',
+);
 
 /** 行内一个非文本 inline 节点(mention chip 等)的占位符,与 applyListContinuation 一致。 */
 const ATOM_PLACEHOLDER = '\uFFFC';
@@ -380,40 +391,102 @@ export const ComposerListIndentDecoration = Extension.create({
   name: 'composerListIndentDecoration',
 
   addProseMirrorPlugins() {
+    let resumeTimer: ReturnType<typeof setTimeout> | null = null;
+
     return [
-      new Plugin<DecorationSet>({
-        key: PLUGIN_KEY,
+      new Plugin<ListDecorationPluginState>({
+        key: PLUGIN_STATE_KEY,
         state: {
           init(_config, state: EditorState) {
             const roster = getSlashCommandRoster(state);
-            return buildListIndentDecorations(
-              state.doc,
-              findSlashCommandMatches(state.doc, roster),
-            );
+            return {
+              decorations: buildListIndentDecorations(
+                state.doc,
+                findSlashCommandMatches(state.doc, roster),
+              ),
+              suspendedForComposition: false,
+            };
           },
-          apply(tr: Transaction, old: DecorationSet, oldState: EditorState) {
+          apply(tr: Transaction, old: ListDecorationPluginState, oldState: EditorState) {
+            const compositionMeta = tr.getMeta(PLUGIN_STATE_KEY) as CompositionMeta | undefined;
+            if (compositionMeta === 'suspend') {
+              return {
+                decorations: DecorationSet.empty,
+                suspendedForComposition: true,
+              };
+            }
+
             const rosterUpdate = getSlashCommandRosterUpdate(tr);
             const voiceReplacement = resolveVoiceInputReplacementRange(tr, oldState);
-            if (!tr.docChanged && rosterUpdate === undefined && !voiceReplacement.changed) {
+            if (old.suspendedForComposition && compositionMeta !== 'resume') {
+              return old;
+            }
+            if (
+              compositionMeta !== 'resume' &&
+              !tr.docChanged &&
+              rosterUpdate === undefined &&
+              !voiceReplacement.changed
+            ) {
               return old;
             }
             const roster = rosterUpdate ?? getSlashCommandRoster(oldState);
-            return buildListIndentDecorations(
-              tr.doc,
-              findSlashCommandMatches(tr.doc, roster),
-              voiceReplacement.range,
-            );
+            return {
+              decorations: buildListIndentDecorations(
+                tr.doc,
+                findSlashCommandMatches(tr.doc, roster),
+                voiceReplacement.range,
+              ),
+              suspendedForComposition: false,
+            };
           },
         },
         props: {
           decorations(state) {
-            return this.getState(state) ?? DecorationSet.empty;
+            return this.getState(state)?.decorations ?? DecorationSet.empty;
+          },
+          handleDOMEvents: {
+            compositionstart(view) {
+              if (resumeTimer !== null) {
+                clearTimeout(resumeTimer);
+                resumeTimer = null;
+              }
+              if (!PLUGIN_STATE_KEY.getState(view.state)?.suspendedForComposition) {
+                view.dispatch(
+                  view.state.tr
+                    .setMeta(PLUGIN_STATE_KEY, 'suspend' satisfies CompositionMeta)
+                    .setMeta('addToHistory', false),
+                );
+              }
+              return false;
+            },
+            compositionend(view) {
+              if (resumeTimer !== null) clearTimeout(resumeTimer);
+              // ProseMirror's own compositionend handler runs after custom
+              // handlers and flushes pending DOM records in a microtask.
+              // A timer restores decorations after that flush, never while
+              // EditorView.composing still owns the native IME DOM.
+              resumeTimer = setTimeout(() => {
+                resumeTimer = null;
+                if (view.isDestroyed || view.composing) return;
+                if (!PLUGIN_STATE_KEY.getState(view.state)?.suspendedForComposition) return;
+                view.dispatch(
+                  view.state.tr
+                    .setMeta(PLUGIN_STATE_KEY, 'resume' satisfies CompositionMeta)
+                    .setMeta('addToHistory', false),
+                );
+              }, 0);
+              return false;
+            },
           },
         },
-        // 注:曾有一个 view().update 里 `if (view.composing) return` 的"IME 保护",
-        // 但重算发生在上面的 state.apply(只看 tr.docChanged),view.update 在视图更新
-        // 之后才跑、DecorationSet 早已算好,该钩子等价 no-op(greptile P2)——已删除。
-        // 真要在 IME 期跳过重算,应在 apply 里按 composition 事务标记判断,而非此处。
+        view() {
+          return {
+            destroy() {
+              if (resumeTimer !== null) clearTimeout(resumeTimer);
+              resumeTimer = null;
+            },
+          };
+        },
       }),
     ];
   },
