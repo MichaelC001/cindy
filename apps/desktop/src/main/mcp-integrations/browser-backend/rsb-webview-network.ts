@@ -349,6 +349,9 @@ export class RsbWebviewNetwork {
     try {
       state.debugger.removeListener('message', state.messageHandler);
       state.debugger.removeListener('detach', state.detachHandler);
+      (wc as unknown as {
+        removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
+      }).removeListener?.('destroyed', state.destroyedHandler);
     } catch {
       // The guest may already be destroyed.
     }

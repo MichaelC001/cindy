@@ -129,6 +129,8 @@ const STRUCTURAL_ROLES = new Set([
 const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
 const MAX_WAIT_TIMEOUT_MS = 60_000;
 const MAX_SNAPSHOT_REFS = 2_000;
+const EFFICIENT_SNAPSHOT_MAX_CHARS = 8_000;
+const EFFICIENT_SNAPSHOT_DEPTH = 6;
 
 function axText(value: AxValue | undefined): string {
   const raw = value?.value;
@@ -507,6 +509,12 @@ async function resolveElementQuery(
   query: BrowserElementQuery,
   timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
 ): Promise<ResolvedNode> {
+  if (
+    query.index !== undefined
+    && (!Number.isInteger(query.index) || query.index < 0)
+  ) {
+    throw new Error('element query index must be a non-negative integer');
+  }
   const hasLookupField = [
     query.css,
     query.role,
@@ -1558,10 +1566,22 @@ export class RsbWebviewAutomation {
     wc: WebContents,
     req: BrowserControlRequest,
   ): Promise<RsbSnapshotResult> {
+    if (req.labels === true) {
+      throw new Error('snapshot labels are unavailable in the embedded browser backend');
+    }
+    const snapshotReq = req.mode === 'efficient'
+      ? {
+          ...req,
+          interactive: req.interactive ?? true,
+          compact: req.compact ?? true,
+          depth: req.depth ?? EFFICIENT_SNAPSHOT_DEPTH,
+          maxChars: req.maxChars ?? EFFICIENT_SNAPSHOT_MAX_CHARS,
+        }
+      : req;
     return withDebugger(wc, async (send) => {
       let inspection: PageInspection = { resources: [] };
       try {
-        inspection = await inspectPage(send, req.urls === true);
+        inspection = await inspectPage(send, snapshotReq.urls === true);
       } catch (err) {
         this.logger.warn('failed to inspect page state', { tabId, err });
       }
@@ -1573,7 +1593,7 @@ export class RsbWebviewAutomation {
         this.refsByTab.set(tabId, new Map());
         this.barriersByTab.set(tabId, inspection.barrier);
         return {
-          format: req.snapshotFormat ?? 'ai',
+          format: snapshotReq.snapshotFormat ?? 'ai',
           targetId: tabId,
           url: wc.getURL(),
           ...(inspection.resources.length > 0 ? { resources: inspection.resources } : {}),
@@ -1584,15 +1604,15 @@ export class RsbWebviewAutomation {
       this.barriersByTab.delete(tabId);
       await send('Accessibility.enable');
       let response: { nodes?: RawAxNode[] };
-      const frame = typeof req.frame === 'string' && req.frame !== ''
-        ? await resolveFrameRoot(send, req.frame)
+      const frame = typeof snapshotReq.frame === 'string' && snapshotReq.frame !== ''
+        ? await resolveFrameRoot(send, snapshotReq.frame)
         : undefined;
-      if (typeof req.selector === 'string' && req.selector !== '') {
+      if (typeof snapshotReq.selector === 'string' && snapshotReq.selector !== '') {
         const selected = frame?.nodeId
-          ? await resolveSelectorInFrame(send, frame.nodeId, req.selector)
+          ? await resolveSelectorInFrame(send, frame.nodeId, snapshotReq.selector)
           : frame
             ? undefined
-            : await resolveSelector(send, req.selector);
+            : await resolveSelector(send, snapshotReq.selector);
         if (!selected) {
           throw new Error('frame document is unavailable for selector-scoped snapshot');
         }
@@ -1623,7 +1643,7 @@ export class RsbWebviewAutomation {
         };
       }
 
-      if (req.urls === true) {
+      if (snapshotReq.urls === true) {
         await Promise.all(
           tree
             .filter((node) => node.role === 'link' && node.ref)
@@ -1637,12 +1657,12 @@ export class RsbWebviewAutomation {
         );
       }
 
-      const rawLines = renderSnapshotTree(tree, roots, req);
-      const lines = truncateSnapshotLines(rawLines, req.maxChars);
+      const rawLines = renderSnapshotTree(tree, roots, snapshotReq);
+      const lines = truncateSnapshotLines(rawLines, snapshotReq.maxChars);
       const visible = visibleRefs(refs, lines);
       this.refsByTab.set(tabId, new Map(Object.entries(visible)));
       const snapshot = lines.join('\n');
-      const format = req.snapshotFormat ?? 'ai';
+      const format = snapshotReq.snapshotFormat ?? 'ai';
       const stats = {
         lines: lines.length,
         chars: snapshot.length,
@@ -1997,6 +2017,17 @@ export class RsbWebviewAutomation {
             target.objectId,
             `function(values) {
               if (!(this instanceof HTMLSelectElement)) throw new Error("target is not a select element");
+              if (values.length > 1 && !this.multiple) {
+                throw new Error("target select does not accept multiple values");
+              }
+              const missing = values.filter((value) => (
+                !Array.from(this.options).some((option) => (
+                  option.value === value || option.label === value
+                ))
+              ));
+              if (missing.length > 0) {
+                throw new Error("select options not found: " + missing.join(", "));
+              }
               for (const option of this.options) {
                 option.selected = values.includes(option.value) || values.includes(option.label);
               }
@@ -2025,6 +2056,11 @@ export class RsbWebviewAutomation {
           return { tabId, kind: request.kind, width, height };
         }
         case 'wait': {
+          const waitDeadline = Date.now() + positiveInt(
+            request.timeoutMs,
+            DEFAULT_WAIT_TIMEOUT_MS,
+            MAX_WAIT_TIMEOUT_MS,
+          );
           const timeMs = Math.min(
             typeof request.timeMs === 'number' && request.timeMs >= 0 ? request.timeMs : 0,
             MAX_WAIT_TIMEOUT_MS,
@@ -2101,7 +2137,9 @@ export class RsbWebviewAutomation {
               );
             }
             if (request.loadState === 'networkidle') {
-              await options?.waitForNetworkIdle?.(timeoutMs);
+              const remainingMs = waitDeadline - Date.now();
+              if (remainingMs <= 0) throw new Error('wait timed out');
+              await options?.waitForNetworkIdle?.(remainingMs);
             }
             return { tabId, kind: request.kind, waitedMs: timeMs, state: result.result?.value };
           }

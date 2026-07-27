@@ -201,6 +201,18 @@ describe('RsbWebviewAutomation snapshot', () => {
 });
 
 describe('RsbWebviewAutomation act', () => {
+  it('rejects negative element query indexes before polling the page', async () => {
+    const harness = debuggerHarness(async () => {
+      throw new Error('query should fail before debugger evaluation');
+    });
+
+    await expect(automation().act('tab-1', harness.wc, {
+      kind: 'click',
+      query: { role: 'button', index: -1 },
+    })).rejects.toThrow('element query index must be a non-negative integer');
+    expect(harness.sendCommand).not.toHaveBeenCalled();
+  });
+
   it('uses native keyboard input for browser-default navigation keys', async () => {
     const harness = debuggerHarness(async () => {
       throw new Error('unexpected debugger command');
@@ -244,6 +256,26 @@ describe('RsbWebviewAutomation act', () => {
 
     expect(result.snapshot).toContain('[ref=e1]');
     expect(result.stats.lines).toBeGreaterThan(0);
+  });
+
+  it('applies efficient snapshot defaults and rejects unsupported labels', async () => {
+    const harness = debuggerHarness(async (method, params) => {
+      if (method === 'Accessibility.enable') return {};
+      if (method === 'Accessibility.getFullAXTree') return AX_TREE;
+      throw new Error(`unexpected command: ${method} ${JSON.stringify(params)}`);
+    });
+
+    const efficient = await automation().snapshot('tab-1', harness.wc, {
+      action: 'snapshot',
+      mode: 'efficient',
+    });
+    expect(efficient.snapshot).toContain('[ref=e1]');
+    expect(efficient.stats.lines).toBeGreaterThan(0);
+
+    await expect(automation().snapshot('tab-1', harness.wc, {
+      action: 'snapshot',
+      labels: true,
+    })).rejects.toThrow('snapshot labels are unavailable');
   });
 
   it('scopes snapshots to the requested frame', async () => {

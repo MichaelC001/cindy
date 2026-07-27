@@ -76,8 +76,35 @@ function safeSegment(value: string): string {
   return (cleaned || 'session').slice(0, 64);
 }
 
+function processArtifactRoot(rootDir: string): string {
+  return path.join(rootDir, `process-${process.pid}`);
+}
+
 export function artifactSessionRoot(rootDir: string, sessionId: string): string {
-  return path.join(rootDir, safeSegment(sessionId));
+  return path.join(processArtifactRoot(rootDir), safeSegment(sessionId));
+}
+
+async function reclaimStaleProcessRoots(rootDir: string): Promise<void> {
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(rootDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  await Promise.all(entries.map(async (entry) => {
+    if (!entry.isDirectory()) return;
+    const match = /^process-(\d+)$/.exec(entry.name);
+    if (!match) return;
+    const pid = Number(match[1]);
+    if (!Number.isSafeInteger(pid) || pid === process.pid) return;
+    try {
+      process.kill(pid, 0);
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EPERM') return;
+    }
+    await fs.promises.rm(path.join(rootDir, entry.name), { recursive: true, force: true });
+  }));
 }
 
 function safeFileName(raw: string): string {
@@ -146,6 +173,7 @@ export class RsbWebviewArtifacts {
   private readonly captures = new Map<WebContents, ArtifactCapture>();
   private readonly recent: BrowserArtifact[] = [];
   private readonly artifactSessions = new Map<string, string>();
+  private readonly preparedRoots = new Set<string>();
   private retainedBytes = 0;
 
   constructor(
@@ -164,7 +192,13 @@ export class RsbWebviewArtifacts {
     }
     const session = sessionFor(wc);
     this.observeSession(session);
-    const parent = artifactSessionRoot(this.rootDir(), context.sessionId);
+    const rootDir = this.rootDir();
+    if (!this.preparedRoots.has(rootDir)) {
+      await fs.promises.mkdir(rootDir, { recursive: true });
+      await reclaimStaleProcessRoots(rootDir);
+      this.preparedRoots.add(rootDir);
+    }
+    const parent = artifactSessionRoot(rootDir, context.sessionId);
     await fs.promises.mkdir(parent, { recursive: true });
     captureSequence += 1;
     const directory = await fs.promises.mkdtemp(

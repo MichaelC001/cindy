@@ -73,6 +73,22 @@ afterEach(() => {
 });
 
 describe('RsbWebviewArtifacts', () => {
+  it('reclaims artifact roots left by a dead process before reuse', async () => {
+    const staleRoot = path.join(root, 'process-99999999');
+    await fs.promises.mkdir(staleRoot, { recursive: true });
+    await fs.promises.writeFile(path.join(staleRoot, 'stale.txt'), 'stale');
+    const harness = artifactHarness();
+    const artifacts = new RsbWebviewArtifacts(() => root, { warn: vi.fn() }, 0);
+
+    await artifacts.capture(
+      harness.wc,
+      { sessionId: 'startup-cleanup', timeoutMs: 1000 },
+      async () => undefined,
+    );
+
+    expect(fs.existsSync(staleRoot)).toBe(false);
+  });
+
   it('stores a completed download in an isolated directory with a safe name', async () => {
     const harness = artifactHarness();
     const item = downloadItem('completed');

@@ -128,7 +128,22 @@ function elementQuerySchema(deps: BrowserMcpDeps) {
     testId: z.string().optional(),
     exact: z.boolean().optional(),
     index: z.number().int().nonnegative().optional(),
-  }).superRefine((_query, ctx) => {
+  }).superRefine((query, ctx) => {
+    const hasLookupField = [
+      query.css,
+      query.role,
+      query.name,
+      query.text,
+      query.label,
+      query.placeholder,
+      query.testId,
+    ].some((value) => typeof value === 'string' && value !== '');
+    if (!hasLookupField) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'element query requires at least one lookup field',
+      });
+    }
     if (deps.supportsSemanticQueries?.() === false) {
       ctx.addIssue({
         code: 'custom',
