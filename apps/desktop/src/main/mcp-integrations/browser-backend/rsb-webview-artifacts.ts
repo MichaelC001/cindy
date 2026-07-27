@@ -15,6 +15,7 @@ interface DownloadItemLike {
   getReceivedBytes(): number;
   setSavePath(filePath: string): void;
   cancel(): void;
+  on(event: string, listener: (...args: unknown[]) => void): void;
   once(event: string, listener: (...args: unknown[]) => void): void;
 }
 
@@ -38,6 +39,9 @@ export interface BrowserArtifact {
 interface PendingDownload {
   item: DownloadItemLike;
   done: Promise<BrowserArtifact>;
+  filePath?: string;
+  knownTotalBytes?: number;
+  limitReason?: string;
 }
 
 interface ArtifactCapture {
@@ -47,12 +51,17 @@ interface ArtifactCapture {
   accepting: boolean;
   pending: PendingDownload[];
   usedNames: Set<string>;
+  reservedBytes: number;
 }
 
 const DOWNLOAD_GRACE_MS = 250;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60_000;
 const MAX_DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
+const MAX_DOWNLOADS_PER_CAPTURE = 8;
+const MAX_DOWNLOAD_BYTES_PER_FILE = 32 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES_PER_CAPTURE = 64 * 1024 * 1024;
 const MAX_RECENT_ARTIFACTS = 100;
+const MAX_RETAINED_ARTIFACT_BYTES = 256 * 1024 * 1024;
 
 let captureSequence = 0;
 let artifactSequence = 0;
@@ -119,13 +128,15 @@ function wait(ms: number): Promise<void> {
 
 /**
  * Captures downloads only while an agent-owned browser action is in flight.
- * Each action gets an isolated directory; failed and cancelled files are
- * removed, while completed files remain available for later tool steps.
+ * Each action gets an isolated directory with bounded count and byte quotas.
+ * Failed, cancelled, evicted, and disposed files are removed; completed files
+ * remain available for later tool steps until the retention budget is reached.
  */
 export class RsbWebviewArtifacts {
   private readonly sessionListeners = new Map<SessionLike, (...args: unknown[]) => void>();
   private readonly captures = new Map<WebContents, ArtifactCapture>();
   private readonly recent: BrowserArtifact[] = [];
+  private retainedBytes = 0;
 
   constructor(
     private readonly rootDir: () => string,
@@ -155,6 +166,7 @@ export class RsbWebviewArtifacts {
       accepting: true,
       pending: [],
       usedNames: new Set(),
+      reservedBytes: 0,
     };
     this.captures.set(wc, capture);
 
@@ -196,11 +208,13 @@ export class RsbWebviewArtifacts {
       if (timeoutHandle) clearTimeout(timeoutHandle);
     }
     for (const artifact of downloads) {
+      if (artifact.state === 'completed' && artifact.path && artifact.bytes === undefined) {
+        artifact.bytes = await this.fileSize(artifact.path);
+      }
       this.recent.push(artifact);
+      if (artifact.path && artifact.bytes) this.retainedBytes += artifact.bytes;
     }
-    if (this.recent.length > MAX_RECENT_ARTIFACTS) {
-      this.recent.splice(0, this.recent.length - MAX_RECENT_ARTIFACTS);
-    }
+    await this.trimRecent();
     if (!downloads.some((artifact) => artifact.state === 'completed')) {
       await this.removeDirectory(directory);
     }
@@ -226,6 +240,11 @@ export class RsbWebviewArtifacts {
       for (const pending of capture.pending) pending.item.cancel();
       await this.removeDirectory(capture.directory);
     }));
+    const retained = this.recent.splice(0);
+    this.retainedBytes = 0;
+    await Promise.all(retained.map((artifact) => (
+      artifact.path ? this.removeArtifactFile(artifact.path) : Promise.resolve()
+    )));
   }
 
   private observeSession(session: SessionLike): void {
@@ -248,45 +267,158 @@ export class RsbWebviewArtifacts {
     const fileName = uniqueName(safeFileName(item.getFilename()), capture.usedNames);
     const filePath = path.join(capture.directory, fileName);
     const startedAt = new Date().toISOString();
-    item.setSavePath(filePath);
+    const totalBytes = this.positiveBytes(item.getTotalBytes());
+    let finishDownload: (artifact: BrowserArtifact) => void = () => undefined;
     const done = new Promise<BrowserArtifact>((resolve) => {
-      item.once('done', (_event: unknown, rawState: unknown) => {
-        const state = rawState === 'completed'
+      finishDownload = resolve;
+    });
+    const pending: PendingDownload = {
+      item,
+      ...(totalBytes ? { knownTotalBytes: totalBytes } : {}),
+      done,
+    };
+    item.once('done', (_event: unknown, rawState: unknown) => {
+      const receivedBytes = this.positiveBytes(item.getReceivedBytes());
+      const observedBytes = Math.max(totalBytes ?? 0, receivedBytes ?? 0);
+      const exceededFileQuota = observedBytes > MAX_DOWNLOAD_BYTES_PER_FILE;
+      const exceededCaptureQuota = this.receivedBytes(capture) > MAX_DOWNLOAD_BYTES_PER_CAPTURE;
+      const state = pending.limitReason || exceededFileQuota || exceededCaptureQuota
+        ? 'cancelled'
+        : rawState === 'completed'
           ? 'completed'
           : rawState === 'cancelled'
             ? 'cancelled'
             : 'interrupted';
-        if (state !== 'completed') {
-          try {
-            fs.rmSync(filePath, { force: true });
-          } catch (err) {
-            this.logger.warn('failed to remove incomplete browser artifact', {
-              artifactId: id,
-              err,
-            });
-          }
+      if (state !== 'completed' && pending.filePath) {
+        try {
+          fs.rmSync(pending.filePath, { force: true });
+        } catch (err) {
+          this.logger.warn('failed to remove incomplete browser artifact', {
+            artifactId: id,
+            err,
+          });
         }
-        const totalBytes = item.getTotalBytes();
-        const receivedBytes = item.getReceivedBytes();
-        const url = displayUrl(item.getURL());
-        resolve({
-          id,
-          fileName,
-          ...(state === 'completed' ? { path: filePath } : {}),
-          ...(url ? { url } : {}),
-          ...(item.getMimeType() ? { mimeType: item.getMimeType() } : {}),
-          ...(Number.isFinite(totalBytes) && totalBytes > 0
-            ? { bytes: totalBytes }
-            : Number.isFinite(receivedBytes) && receivedBytes > 0
-              ? { bytes: receivedBytes }
-              : {}),
-          state,
-          startedAt,
-          finishedAt: new Date().toISOString(),
-        });
+      }
+      const url = displayUrl(item.getURL());
+      finishDownload({
+        id,
+        fileName,
+        ...(state === 'completed' && pending.filePath ? { path: pending.filePath } : {}),
+        ...(url ? { url } : {}),
+        ...(item.getMimeType() ? { mimeType: item.getMimeType() } : {}),
+        ...(observedBytes > 0 ? { bytes: observedBytes } : {}),
+        state,
+        startedAt,
+        finishedAt: new Date().toISOString(),
       });
     });
-    capture.pending.push({ item, done });
+    capture.pending.push(pending);
+
+    const quotaReason = this.quotaReason(capture, totalBytes);
+    if (quotaReason) {
+      this.cancelForQuota(pending, quotaReason);
+      return;
+    }
+
+    if (totalBytes) capture.reservedBytes += totalBytes;
+    pending.filePath = filePath;
+    item.setSavePath(filePath);
+    item.on('updated', () => {
+      if (pending.limitReason) return;
+      const receivedBytes = this.positiveBytes(item.getReceivedBytes());
+      if (
+        (receivedBytes && receivedBytes > MAX_DOWNLOAD_BYTES_PER_FILE)
+        || this.receivedBytes(capture) > MAX_DOWNLOAD_BYTES_PER_CAPTURE
+      ) {
+        this.cancelForQuota(
+          pending,
+          receivedBytes && receivedBytes > MAX_DOWNLOAD_BYTES_PER_FILE
+            ? 'single download exceeds the size limit'
+            : 'capture exceeds the total download limit',
+        );
+      }
+    });
+  }
+
+  private quotaReason(capture: ArtifactCapture, totalBytes: number | undefined): string | undefined {
+    if (capture.pending.length > MAX_DOWNLOADS_PER_CAPTURE) {
+      return 'capture exceeds the download count limit';
+    }
+    if (totalBytes && totalBytes > MAX_DOWNLOAD_BYTES_PER_FILE) {
+      return 'single download exceeds the size limit';
+    }
+    if (
+      totalBytes
+      && capture.reservedBytes + totalBytes > MAX_DOWNLOAD_BYTES_PER_CAPTURE
+    ) {
+      return 'capture exceeds the total download limit';
+    }
+    return undefined;
+  }
+
+  private cancelForQuota(pending: PendingDownload, reason: string): void {
+    pending.limitReason = reason;
+    this.logger.warn('browser download cancelled by quota', {
+      reason,
+      fileName: pending.item.getFilename(),
+    });
+    pending.item.cancel();
+  }
+
+  private receivedBytes(capture: ArtifactCapture): number {
+    return capture.reservedBytes + capture.pending.reduce((sum, pending) => {
+      if (pending.knownTotalBytes || pending.limitReason) return sum;
+      return sum + (this.positiveBytes(pending.item.getReceivedBytes()) ?? 0);
+    }, 0);
+  }
+
+  private positiveBytes(value: number): number | undefined {
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  }
+
+  private async fileSize(filePath: string): Promise<number | undefined> {
+    try {
+      const stat = await fs.promises.stat(filePath);
+      return stat.isFile() ? stat.size : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async trimRecent(): Promise<void> {
+    const evicted: BrowserArtifact[] = [];
+    while (
+      this.recent.length > MAX_RECENT_ARTIFACTS
+      || this.retainedBytes > MAX_RETAINED_ARTIFACT_BYTES
+    ) {
+      const artifact = this.recent.shift();
+      if (!artifact) break;
+      evicted.push(artifact);
+      if (artifact.path && artifact.bytes) this.retainedBytes -= artifact.bytes;
+    }
+    await Promise.all(evicted.map((artifact) => (
+      artifact.path ? this.removeArtifactFile(artifact.path) : Promise.resolve()
+    )));
+  }
+
+  private async removeArtifactFile(filePath: string): Promise<void> {
+    try {
+      await fs.promises.rm(filePath, { force: true });
+    } catch (err) {
+      this.logger.warn('failed to remove retained browser artifact', {
+        filePath,
+        err,
+      });
+      return;
+    }
+    try {
+      await fs.promises.rmdir(path.dirname(filePath));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTEMPTY') {
+        this.logger.warn('failed to remove empty browser artifact directory', { err });
+      }
+    }
   }
 
   private async removeDirectory(directory: string): Promise<void> {

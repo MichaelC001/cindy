@@ -1001,6 +1001,7 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
         getReceivedBytes: () => 4,
         setSavePath: (filePath: string) => writeFileSync(filePath, 'data'),
         cancel: vi.fn(),
+        on: vi.fn(),
         once: (event: string, listener: (...args: unknown[]) => void) => {
           if (event === 'done') doneListener = listener;
         },
