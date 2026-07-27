@@ -6,9 +6,9 @@ import { RsbWebviewAutomation } from '../rsb-webview-automation.js';
 interface DebuggerHarness {
   wc: WebContents;
   sendCommand: ReturnType<typeof vi.fn>;
+  executeJavaScript: ReturnType<typeof vi.fn>;
   attach: ReturnType<typeof vi.fn>;
   detach: ReturnType<typeof vi.fn>;
-  focus: ReturnType<typeof vi.fn>;
 }
 
 function debuggerHarness(
@@ -22,11 +22,11 @@ function debuggerHarness(
   const detach = vi.fn(() => {
     attached = false;
   });
-  const focus = vi.fn();
   const sendCommand = vi.fn(handler);
+  const executeJavaScript = vi.fn(async () => ({ ok: true }));
   const wc = {
     getURL: () => 'https://example.test/form',
-    focus,
+    executeJavaScript,
     debugger: {
       isAttached: vi.fn(() => attached),
       attach,
@@ -34,7 +34,7 @@ function debuggerHarness(
       sendCommand,
     },
   } as unknown as WebContents;
-  return { wc, sendCommand, attach, detach, focus };
+  return { wc, sendCommand, executeJavaScript, attach, detach };
 }
 
 function automation(): RsbWebviewAutomation {
@@ -136,7 +136,6 @@ describe('RsbWebviewAutomation act', () => {
         if (method === 'DOM.getBoxModel') {
           return { model: { content: [10, 20, 30, 20, 30, 40, 10, 40] } };
         }
-        if (method === 'Input.dispatchMouseEvent') return {};
       }
       throw new Error(`unexpected command during ${phase}: ${method}`);
     });
@@ -153,14 +152,19 @@ describe('RsbWebviewAutomation act', () => {
     });
 
     expect(result).toMatchObject({ tabId: 'tab-1', kind: 'click', x: 20, y: 30 });
-    expect(harness.sendCommand).toHaveBeenCalledWith(
+    expect(harness.sendCommand).not.toHaveBeenCalledWith(
       'Input.dispatchMouseEvent',
-      expect.objectContaining({ type: 'mousePressed', x: 20, y: 30, button: 'left' }),
+      expect.anything(),
     );
-    expect(harness.sendCommand).toHaveBeenCalledWith(
-      'Input.dispatchMouseEvent',
-      expect.objectContaining({ type: 'mouseReleased', x: 20, y: 30, button: 'left' }),
+    expect(harness.executeJavaScript).toHaveBeenCalledTimes(2);
+    expect(harness.executeJavaScript.mock.calls[0][0]).toContain(
+      '"method":"Input.dispatchMouseEvent","params":{"type":"mousePressed"',
     );
+    expect(harness.executeJavaScript.mock.calls[0][1]).toBe(false);
+    expect(harness.executeJavaScript.mock.calls[1][0]).toContain(
+      '"method":"Input.dispatchMouseEvent","params":{"type":"mouseReleased"',
+    );
+    expect(harness.executeJavaScript.mock.calls[1][1]).toBe(true);
   });
 
   it('types into a selector and optionally submits', async () => {
@@ -168,7 +172,6 @@ describe('RsbWebviewAutomation act', () => {
       if (method === 'Runtime.evaluate') return { result: { objectId: 'input-object' } };
       if (method === 'DOM.describeNode') return { node: { backendNodeId: 5 } };
       if (method === 'Runtime.callFunctionOn') return { result: { value: { ok: true } } };
-      if (method === 'Input.insertText' || method === 'Input.dispatchKeyEvent') return {};
       throw new Error(`unexpected command: ${method}`);
     });
 
@@ -184,25 +187,21 @@ describe('RsbWebviewAutomation act', () => {
       kind: 'type',
       textLength: 18,
     });
-    expect(harness.sendCommand).toHaveBeenCalledWith(
-      'Input.insertText',
-      { text: 'hello@example.test' },
+    expect(harness.executeJavaScript).toHaveBeenCalledTimes(3);
+    expect(harness.executeJavaScript.mock.calls[0][0]).toContain(
+      '"method":"Input.insertText","params":{"text":"hello@example.test"}',
     );
-    expect(harness.focus).toHaveBeenCalledTimes(1);
-    expect(harness.focus.mock.invocationCallOrder[0]).toBeLessThan(
-      harness.sendCommand.mock.invocationCallOrder.find(
-        (_order, index) => harness.sendCommand.mock.calls[index]?.[0] === 'Input.insertText',
-      ) ?? Number.POSITIVE_INFINITY,
+    expect(harness.executeJavaScript.mock.calls[1][0]).toContain(
+      '"method":"Input.dispatchKeyEvent","params":{"type":"keyDown","key":"Enter"',
     );
-    expect(harness.sendCommand).toHaveBeenCalledWith(
-      'Input.dispatchKeyEvent',
-      expect.objectContaining({ type: 'keyDown', key: 'Enter' }),
+    expect(harness.sendCommand).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^Input\./),
+      expect.anything(),
     );
   });
 
   it('dispatches coordinate clicks without requiring a snapshot', async () => {
     const harness = debuggerHarness(async (method) => {
-      if (method === 'Input.dispatchMouseEvent') return {};
       throw new Error(`unexpected command: ${method}`);
     });
 
@@ -214,9 +213,11 @@ describe('RsbWebviewAutomation act', () => {
     });
 
     expect(result).toMatchObject({ kind: 'clickCoords', x: 12.5, y: 24 });
-    expect(harness.sendCommand).toHaveBeenCalledWith(
-      'Input.dispatchMouseEvent',
-      expect.objectContaining({ type: 'mousePressed', button: 'right' }),
+    expect(harness.executeJavaScript.mock.calls[0][0]).toContain(
+      '"method":"Input.dispatchMouseEvent","params":{"type":"mousePressed"',
+    );
+    expect(harness.executeJavaScript.mock.calls[0][0]).toContain(
+      '"button":"right"',
     );
   });
 

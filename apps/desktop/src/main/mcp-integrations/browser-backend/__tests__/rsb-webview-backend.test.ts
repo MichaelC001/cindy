@@ -467,12 +467,11 @@ describe('RsbWebviewBackend — act:evaluate', () => {
 
   it('non-evaluate act kinds route to the CDP automation helper', async () => {
     const { backend, wc } = buildEvalEnv(null);
-    const sendCommand = vi.fn(async (method: string) => {
-      if (method === 'Input.dispatchMouseEvent') return {};
+    wc.executeJavaScript.mockResolvedValue({ ok: true });
+    const sendCommand = vi.fn(async () => {
       return {};
     });
     Object.assign(wc, {
-      focus: vi.fn(),
       debugger: {
         isAttached: vi.fn(() => true),
         attach: vi.fn(),
@@ -486,9 +485,13 @@ describe('RsbWebviewBackend — act:evaluate', () => {
       request: { kind: 'clickCoords', x: 10, y: 20 },
     } as never);
     expect(res.ok).toBe(true);
-    expect(sendCommand).toHaveBeenCalledWith(
+    expect(sendCommand).not.toHaveBeenCalledWith(
       'Input.dispatchMouseEvent',
-      expect.objectContaining({ type: 'mousePressed', x: 10, y: 20 }),
+      expect.anything(),
+    );
+    expect(wc.executeJavaScript).toHaveBeenCalledTimes(2);
+    expect(wc.executeJavaScript.mock.calls[0][0]).toContain(
+      '"method":"Input.dispatchMouseEvent","params":{"type":"mousePressed","x":10,"y":20',
     );
   });
 

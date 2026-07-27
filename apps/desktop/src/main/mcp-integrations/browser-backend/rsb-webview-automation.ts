@@ -452,8 +452,469 @@ function modifierMask(modifiers: unknown): number {
   return mask;
 }
 
+type TranslatedInputMethod =
+  | 'Input.dispatchKeyEvent'
+  | 'Input.dispatchMouseEvent'
+  | 'Input.insertText';
+
+interface TranslatedInputCommand {
+  method: TranslatedInputMethod;
+  params: Record<string, unknown>;
+}
+
+interface TranslatedInputResult {
+  ok: boolean;
+  error?: string;
+}
+
+type InputDispatcher = (
+  method: TranslatedInputMethod,
+  params: Record<string, unknown>,
+) => Promise<void>;
+
+/**
+ * Runs inside the guest page, not in Electron Main.
+ *
+ * Chromium's CDP Input domain is tied to the focused RenderWidgetHost. For an
+ * embedded webview that can still be Cindy's composer even when the debugger
+ * session and DOM node belong to the guest. Codex Desktop solves the same
+ * in-app-browser problem by translating Input.* commands to page JavaScript
+ * "to preserve focus". Keep this function self-contained so `toString()` can
+ * safely serialize it into `webContents.executeJavaScript`.
+ */
+function translateInputCommand(command: TranslatedInputCommand): TranslatedInputResult {
+  const params = command.params;
+  const numberParam = (value: unknown, name: string): number => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error(`${name} must be a finite number`);
+    }
+    return value;
+  };
+  const stringParam = (value: unknown, name: string): string => {
+    if (typeof value !== 'string') throw new Error(`${name} must be a string`);
+    return value;
+  };
+  const eventWindow = (element: Element): Window & typeof globalThis =>
+    element.ownerDocument.defaultView ?? window;
+  const modifiers = (mask: number): Pick<
+    KeyboardEventInit,
+    'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'
+  > => {
+    const enabled = (value: number): boolean => Math.floor(mask / value) % 2 === 1;
+    return {
+      altKey: enabled(1),
+      ctrlKey: enabled(2),
+      metaKey: enabled(4),
+      shiftKey: enabled(8),
+    };
+  };
+  const mouseButton = (button: unknown): number => {
+    switch (button) {
+      case undefined:
+      case 'none':
+      case 'left':
+        return 0;
+      case 'middle':
+        return 1;
+      case 'right':
+        return 2;
+      case 'back':
+        return 3;
+      case 'forward':
+        return 4;
+      default:
+        throw new Error(`unsupported mouse button: ${String(button)}`);
+    }
+  };
+  const pointTarget = (
+    root: Document | ShadowRoot,
+    x: number,
+    y: number,
+  ): { target: Element; x: number; y: number } | null => {
+    const rootWindow = (
+      'defaultView' in root ? root.defaultView : root.ownerDocument.defaultView
+    ) ?? window;
+    const target = root.elementFromPoint(x, y);
+    if (!(target instanceof rootWindow.Element)) return null;
+    if (target.shadowRoot) {
+      const nested = target.shadowRoot.elementFromPoint(x, y);
+      if (nested instanceof rootWindow.Element) return { target: nested, x, y };
+    }
+    if (target instanceof rootWindow.HTMLIFrameElement) {
+      try {
+        const frameDocument = target.contentDocument;
+        if (frameDocument) {
+          const bounds = target.getBoundingClientRect();
+          return pointTarget(frameDocument, x - bounds.left, y - bounds.top)
+            ?? { target, x, y };
+        }
+      } catch {
+        throw new Error('cross-origin iframe input is not supported');
+      }
+    }
+    return { target, x, y };
+  };
+  const dispatchMouse = (
+    target: Element,
+    type: string,
+    init: MouseEventInit,
+  ): boolean => target.dispatchEvent(new (eventWindow(target).MouseEvent)(type, init));
+  const mouseInit = (
+    target: Element,
+    x: number,
+    y: number,
+  ): MouseEventInit => ({
+    ...modifiers(Number(params.modifiers ?? 0)),
+    bubbles: true,
+    button: mouseButton(params.button),
+    buttons: Number(params.buttons ?? 0),
+    cancelable: true,
+    clientX: x,
+    clientY: y,
+    composed: true,
+    detail: Number(params.clickCount ?? 0),
+    screenX: x,
+    screenY: y,
+    view: eventWindow(target),
+  });
+  const isFocusable = (element: Element): element is HTMLElement => {
+    if (!(element instanceof eventWindow(element).HTMLElement)) return false;
+    if (element.isContentEditable || element.tabIndex >= 0) return true;
+    if (element.tagName === 'A') return element.hasAttribute('href');
+    return ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName);
+  };
+  const focusMouseTarget = (target: Element): void => {
+    let focusTarget: HTMLElement | null = null;
+    if (target instanceof eventWindow(target).HTMLLabelElement && target.control) {
+      focusTarget = target.control;
+    } else {
+      for (let current: Element | null = target; current; current = current.parentElement) {
+        if (isFocusable(current)) {
+          focusTarget = current;
+          break;
+        }
+      }
+    }
+    if (!focusTarget) return;
+    try {
+      focusTarget.focus({ preventScroll: true });
+    } catch {
+      focusTarget.focus();
+    }
+  };
+  const stateRoot = globalThis as typeof globalThis & {
+    __cindyRsbInputTranslationState?: {
+      mousePress?: { button: unknown; moved: boolean; x: number; y: number } | null;
+    };
+  };
+  const state = stateRoot.__cindyRsbInputTranslationState ??= {};
+  const translateMouse = (): void => {
+    const type = stringParam(params.type, 'type');
+    const screenX = numberParam(params.x, 'x');
+    const screenY = numberParam(params.y, 'y');
+    const resolved = pointTarget(document, screenX, screenY);
+    if (!resolved) throw new Error(`no element found at point ${screenX},${screenY}`);
+    const { target, x, y } = resolved;
+    const init = mouseInit(target, x, y);
+    if (type === 'mouseMoved') {
+      if (Number(params.buttons ?? 0) !== 0 && state.mousePress) {
+        state.mousePress.moved = true;
+      }
+      dispatchMouse(target, 'pointermove', init);
+      dispatchMouse(target, 'mousemove', init);
+      return;
+    }
+    if (type === 'mousePressed') {
+      state.mousePress = {
+        button: params.button ?? 'left',
+        moved: false,
+        x: screenX,
+        y: screenY,
+      };
+      const pointerAllowed = dispatchMouse(target, 'pointerdown', init);
+      const mouseAllowed = dispatchMouse(target, 'mousedown', init);
+      if (pointerAllowed && mouseAllowed) focusMouseTarget(target);
+      return;
+    }
+    if (type === 'mouseReleased') {
+      dispatchMouse(target, 'pointerup', init);
+      dispatchMouse(target, 'mouseup', init);
+      const pressed = state.mousePress;
+      state.mousePress = null;
+      if (
+        !pressed
+        || pressed.moved
+        || pressed.button !== (params.button ?? 'left')
+        || Math.abs(pressed.x - screenX) > 1
+        || Math.abs(pressed.y - screenY) > 1
+      ) {
+        return;
+      }
+      if (params.button === 'right') {
+        dispatchMouse(target, 'contextmenu', init);
+        return;
+      }
+      if (params.button === 'middle') {
+        dispatchMouse(target, 'auxclick', init);
+        return;
+      }
+      dispatchMouse(target, 'click', init);
+      if (Number(params.clickCount ?? 0) >= 2) {
+        dispatchMouse(target, 'dblclick', init);
+      }
+      return;
+    }
+    throw new Error(`unsupported mouse event type: ${type}`);
+  };
+  const deepestActiveElement = (
+    root: Document | ShadowRoot,
+  ): Element | null => {
+    const active = root.activeElement;
+    if (!active) return null;
+    if (active instanceof eventWindow(active).HTMLIFrameElement) {
+      try {
+        const frameDocument = active.contentDocument;
+        if (frameDocument) return deepestActiveElement(frameDocument) ?? active;
+      } catch {
+        throw new Error('cross-origin iframe input is not supported');
+      }
+    }
+    return active.shadowRoot ? deepestActiveElement(active.shadowRoot) ?? active : active;
+  };
+  const isDirectTextControl = (
+    element: Element,
+  ): element is HTMLInputElement | HTMLTextAreaElement => {
+    const view = eventWindow(element);
+    if (element instanceof view.HTMLTextAreaElement) return true;
+    return element instanceof view.HTMLInputElement
+      && ['password', 'search', 'tel', 'text', 'url'].includes(element.type);
+  };
+  const isValueTextControl = (element: Element): element is HTMLInputElement =>
+    element instanceof eventWindow(element).HTMLInputElement
+    && ['email', 'number'].includes(element.type);
+  const isContentEditable = (element: Element): element is HTMLElement =>
+    element instanceof eventWindow(element).HTMLElement && element.isContentEditable;
+  const editableElement = (): Element | null => {
+    const active = deepestActiveElement(document);
+    return active
+      && (isDirectTextControl(active) || isValueTextControl(active) || isContentEditable(active))
+      ? active
+      : null;
+  };
+  const createInputEvent = (
+    element: Element,
+    type: string,
+    init: InputEventInit,
+  ): Event => {
+    const view = eventWindow(element);
+    return typeof view.InputEvent === 'function'
+      ? new view.InputEvent(type, init)
+      : new view.Event(type, {
+          bubbles: init.bubbles,
+          cancelable: init.cancelable,
+          composed: init.composed,
+        });
+  };
+  const insertText = (
+    element: Element | null,
+    text: string,
+    inputType = 'insertText',
+  ): void => {
+    if (!element) throw new Error('no editable element is focused');
+    const beforeInput = createInputEvent(element, 'beforeinput', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      data: text,
+      inputType,
+    });
+    if (!element.dispatchEvent(beforeInput)) return;
+    if (isDirectTextControl(element)) {
+      const start = element.selectionStart ?? element.value.length;
+      const end = element.selectionEnd ?? element.value.length;
+      element.setRangeText(text, start, end, 'end');
+    } else if (isValueTextControl(element)) {
+      if (element.ownerDocument.execCommand?.('insertText', false, text)) return;
+      element.value += text;
+    } else if (isContentEditable(element)) {
+      const selection = eventWindow(element).getSelection();
+      let range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+      if (!range || !element.contains(range.commonAncestorContainer)) {
+        range = element.ownerDocument.createRange();
+        range.selectNodeContents(element);
+        range.collapse(false);
+      }
+      range.deleteContents();
+      const node = element.ownerDocument.createTextNode(text);
+      range.insertNode(node);
+      range.setStartAfter(node);
+      range.collapse(true);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    } else {
+      throw new Error('focused element is not editable');
+    }
+    element.dispatchEvent(createInputEvent(element, 'input', {
+      bubbles: true,
+      cancelable: false,
+      composed: true,
+      data: text,
+      inputType,
+    }));
+  };
+  const deleteText = (element: Element | null, direction: 'backward' | 'forward'): void => {
+    if (!element) return;
+    const inputType = direction === 'forward'
+      ? 'deleteContentForward'
+      : 'deleteContentBackward';
+    const beforeInput = createInputEvent(element, 'beforeinput', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      data: null,
+      inputType,
+    });
+    if (!element.dispatchEvent(beforeInput)) return;
+    if (isDirectTextControl(element)) {
+      const value = element.value;
+      let start = element.selectionStart ?? value.length;
+      let end = element.selectionEnd ?? value.length;
+      if (start === end) {
+        if (direction === 'forward') end = Math.min(value.length, end + 1);
+        else start = Math.max(0, start - 1);
+      }
+      element.setRangeText('', start, end, 'end');
+    } else if (isValueTextControl(element)) {
+      if (element.ownerDocument.execCommand?.(
+        direction === 'forward' ? 'forwardDelete' : 'delete',
+      )) return;
+      if (direction === 'backward') element.value = element.value.slice(0, -1);
+    } else {
+      return;
+    }
+    element.dispatchEvent(createInputEvent(element, 'input', {
+      bubbles: true,
+      cancelable: false,
+      composed: true,
+      data: null,
+      inputType,
+    }));
+  };
+  const keyCode = (key: string): number => {
+    const known: Record<string, number> = {
+      Backspace: 8,
+      Tab: 9,
+      Enter: 13,
+      Escape: 27,
+      ArrowLeft: 37,
+      ArrowUp: 38,
+      ArrowRight: 39,
+      ArrowDown: 40,
+      Delete: 46,
+    };
+    return known[key] ?? (key.length === 1 ? key.toUpperCase().codePointAt(0) ?? 0 : 0);
+  };
+  const translateKey = (): void => {
+    const type = stringParam(params.type, 'type');
+    const key = stringParam(params.key, 'key');
+    const target = deepestActiveElement(document) ?? document.body ?? document.documentElement;
+    const code = keyCode(key);
+    const init: KeyboardEventInit & { keyCode: number; which: number } = {
+      ...modifiers(Number(params.modifiers ?? 0)),
+      bubbles: true,
+      cancelable: true,
+      code: typeof params.code === 'string' ? params.code : '',
+      composed: true,
+      key,
+      keyCode: code,
+      which: code,
+    };
+    const makeKeyboardEvent = (eventType: string): KeyboardEvent => {
+      const event = new (eventWindow(target).KeyboardEvent)(eventType, init);
+      for (const [name, value] of [
+        ['keyCode', code],
+        ['which', code],
+        ['charCode', eventType === 'keypress' ? code : 0],
+      ] as const) {
+        try {
+          Object.defineProperty(event, name, { get: () => value });
+        } catch {
+          // Older Chromium builds may expose these properties as non-configurable.
+        }
+      }
+      return event;
+    };
+    if (type === 'keyUp') {
+      target.dispatchEvent(makeKeyboardEvent('keyup'));
+      return;
+    }
+    if (type !== 'keyDown' && type !== 'rawKeyDown' && type !== 'char') {
+      throw new Error(`unsupported key event type: ${type}`);
+    }
+    if (type !== 'char' && !target.dispatchEvent(makeKeyboardEvent('keydown'))) return;
+    const text = typeof params.text === 'string' ? params.text : '';
+    if (text) {
+      if (target.dispatchEvent(makeKeyboardEvent('keypress'))) {
+        insertText(editableElement(), text);
+      }
+      return;
+    }
+    const activeEditable = editableElement();
+    if (key === 'Backspace') deleteText(activeEditable, 'backward');
+    else if (key === 'Delete') deleteText(activeEditable, 'forward');
+    else if (key === 'Enter') {
+      if (
+        activeEditable
+        && (
+          activeEditable instanceof eventWindow(activeEditable).HTMLTextAreaElement
+          || isContentEditable(activeEditable)
+        )
+      ) {
+        insertText(activeEditable, '\n', 'insertLineBreak');
+      } else if (
+        activeEditable
+        && activeEditable instanceof eventWindow(activeEditable).HTMLInputElement
+      ) {
+        activeEditable.form?.requestSubmit();
+      }
+    }
+  };
+  try {
+    switch (command.method) {
+      case 'Input.dispatchMouseEvent':
+        translateMouse();
+        break;
+      case 'Input.dispatchKeyEvent':
+        translateKey();
+        break;
+      case 'Input.insertText':
+        insertText(editableElement(), stringParam(params.text, 'text'));
+        break;
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function dispatchTranslatedInput(
+  wc: WebContents,
+  method: TranslatedInputMethod,
+  params: Record<string, unknown>,
+): Promise<void> {
+  const source = `(${translateInputCommand.toString()})(${
+    JSON.stringify({ method, params } satisfies TranslatedInputCommand)
+  });`;
+  const userGesture = method === 'Input.dispatchMouseEvent'
+    && params.type === 'mouseReleased';
+  const result = await wc.executeJavaScript(source, userGesture) as TranslatedInputResult;
+  if (result?.ok !== true) {
+    throw new Error(result?.error ?? `failed to translate ${method}`);
+  }
+}
+
 async function dispatchClick(
-  send: DebuggerTransport['sendCommand'],
+  dispatchInput: InputDispatcher,
   x: number,
   y: number,
   request: BrowserActRequest,
@@ -462,7 +923,7 @@ async function dispatchClick(
   const clickCount = request.doubleClick === true ? 2 : 1;
   const modifiers = modifierMask(request.modifiers);
   for (let count = 1; count <= clickCount; count += 1) {
-    await send('Input.dispatchMouseEvent', {
+    await dispatchInput('Input.dispatchMouseEvent', {
       type: 'mousePressed',
       x,
       y,
@@ -473,7 +934,7 @@ async function dispatchClick(
     if (typeof request.delayMs === 'number' && request.delayMs > 0) {
       await delay(Math.min(request.delayMs, 5_000));
     }
-    await send('Input.dispatchMouseEvent', {
+    await dispatchInput('Input.dispatchMouseEvent', {
       type: 'mouseReleased',
       x,
       y,
@@ -492,18 +953,18 @@ function parseKey(raw: string): { key: string; modifiers: number } {
 }
 
 async function dispatchKey(
-  send: DebuggerTransport['sendCommand'],
+  dispatchInput: InputDispatcher,
   rawKey: string,
 ): Promise<void> {
   const { key, modifiers } = parseKey(rawKey);
   const text = key.length === 1 && modifiers === 0 ? key : undefined;
-  await send('Input.dispatchKeyEvent', {
+  await dispatchInput('Input.dispatchKeyEvent', {
     type: 'keyDown',
     key,
     ...(text ? { text } : {}),
     modifiers,
   });
-  await send('Input.dispatchKeyEvent', {
+  await dispatchInput('Input.dispatchKeyEvent', {
     type: 'keyUp',
     key,
     modifiers,
@@ -612,15 +1073,8 @@ export class RsbWebviewAutomation {
     request: BrowserActRequest,
   ): Promise<RsbActResult> {
     return withDebugger(wc, async (send) => {
-      // DOM focus alone is not enough for an embedded <webview>: Chromium's
-      // Input domain routes keyboard and mouse events through the currently
-      // focused RenderWidgetHost. If Cindy's chat composer still owns the
-      // Electron focus, those events land in the composer even though
-      // Runtime.callFunctionOn focused an element inside the guest document.
-      // Activate the guest before every real input action so CDP dispatches to
-      // the WebContents that supplied the snapshot/ref.
-      const focusGuest = (): void => {
-        wc.focus();
+      const dispatchInput: InputDispatcher = async (method, params) => {
+        await dispatchTranslatedInput(wc, method, params);
       };
       const resolveTarget = async (
         ref = request.ref,
@@ -639,70 +1093,67 @@ export class RsbWebviewAutomation {
 
       switch (request.kind) {
         case 'click': {
-          focusGuest();
           const point = await centerOfNode(send, await resolveTarget());
-          await dispatchClick(send, point.x, point.y, request);
+          await dispatchClick(dispatchInput, point.x, point.y, request);
           return { tabId, kind: request.kind, ...point };
         }
         case 'clickCoords': {
-          focusGuest();
           const x = finiteNonNegative(request.x, 'clickCoords.x');
           const y = finiteNonNegative(request.y, 'clickCoords.y');
-          await dispatchClick(send, x, y, request);
+          await dispatchClick(dispatchInput, x, y, request);
           return { tabId, kind: request.kind, x, y };
         }
         case 'type':
         case 'fill': {
-          focusGuest();
           const target = await resolveTarget();
           await focusNode(send, target, true);
+          if (typeof request.text !== 'string') throw new Error(`${request.kind}.text required`);
           if (request.kind === 'fill') {
             await callOnNode(
               send,
               target.objectId,
               `function() {
                 if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
-                  this.value = "";
-                  this.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+                  this.select();
                   return true;
                 }
                 if (this instanceof HTMLElement && this.isContentEditable) {
-                  this.textContent = "";
-                  this.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+                  const selection = this.ownerDocument.getSelection();
+                  const range = this.ownerDocument.createRange();
+                  range.selectNodeContents(this);
+                  selection?.removeAllRanges();
+                  selection?.addRange(range);
                   return true;
                 }
                 throw new Error("target is not editable");
               }`,
             );
           }
-          if (typeof request.text !== 'string') throw new Error(`${request.kind}.text required`);
           if (request.slowly === true) {
             const perCharacterDelay = Math.min(request.delayMs ?? 50, 1_000);
             for (const character of Array.from(request.text)) {
-              await send('Input.insertText', { text: character });
+              await dispatchInput('Input.insertText', { text: character });
               if (perCharacterDelay > 0) await delay(perCharacterDelay);
             }
           } else {
-            await send('Input.insertText', { text: request.text });
+            await dispatchInput('Input.insertText', { text: request.text });
           }
-          if (request.submit === true) await dispatchKey(send, 'Enter');
+          if (request.submit === true) await dispatchKey(dispatchInput, 'Enter');
           return { tabId, kind: request.kind, textLength: request.text.length };
         }
         case 'press': {
-          focusGuest();
           if (request.ref || request.selector) {
             await focusNode(send, await resolveTarget());
           }
           if (typeof request.key !== 'string' || request.key === '') {
             throw new Error('press.key required');
           }
-          await dispatchKey(send, request.key);
+          await dispatchKey(dispatchInput, request.key);
           return { tabId, kind: request.kind, key: request.key };
         }
         case 'hover': {
-          focusGuest();
           const point = await centerOfNode(send, await resolveTarget());
-          await send('Input.dispatchMouseEvent', {
+          await dispatchInput('Input.dispatchMouseEvent', {
             type: 'mouseMoved',
             x: point.x,
             y: point.y,
@@ -711,7 +1162,6 @@ export class RsbWebviewAutomation {
           return { tabId, kind: request.kind, ...point };
         }
         case 'drag': {
-          focusGuest();
           const start = await centerOfNode(
             send,
             await resolveTarget(request.startRef, undefined),
@@ -720,21 +1170,21 @@ export class RsbWebviewAutomation {
             send,
             await resolveTarget(request.endRef, undefined),
           );
-          await send('Input.dispatchMouseEvent', {
+          await dispatchInput('Input.dispatchMouseEvent', {
             type: 'mousePressed',
             x: start.x,
             y: start.y,
             button: 'left',
             clickCount: 1,
           });
-          await send('Input.dispatchMouseEvent', {
+          await dispatchInput('Input.dispatchMouseEvent', {
             type: 'mouseMoved',
             x: end.x,
             y: end.y,
             button: 'left',
             buttons: 1,
           });
-          await send('Input.dispatchMouseEvent', {
+          await dispatchInput('Input.dispatchMouseEvent', {
             type: 'mouseReleased',
             x: end.x,
             y: end.y,
