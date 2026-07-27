@@ -85,6 +85,7 @@ import { handleGhostSecretsRequest } from './runtime/ghostSecretsEndpoint.js';
 import { handleGhostOauthRequest } from './runtime/ghostOauthEndpoint.js';
 import { handleGhostConnectionsRequest } from './runtime/ghostConnectionsEndpoint.js';
 import { GhostOauthAccountManager, type GhostOauthDecl } from './ghostOauthAccounts.js';
+import { mapGhostOauthConnectError } from './ghostOauthSetupError.js';
 import { reclaimLoopbackPort } from './portReclaim.js';
 import { GhostConnectionManager } from './ghostConnections.js';
 import { getResolvedMainLocale, t } from '../i18n.js';
@@ -2058,11 +2059,10 @@ export async function executeGhostSetupAction(args: {
       ? { ok: true }
       : {
           ok: false,
-          errorCode: connected.error === 'CANCELLED' ? 'AUTH_CANCELLED' : 'AUTH_FAILED',
-          message:
-            connected.error === 'CANCELLED'
-              ? t('newChat.pluginSetup.oauthCancelled')
-              : connected.detail ?? t('newChat.pluginSetup.oauthFailed').replace('{{detail}}', connected.error),
+          errorCode: mapGhostOauthConnectError(connected.error),
+          // interaction snapshot 只传稳定 errorCode；detail 可能含服务路径或
+          // 上游诊断，留在 Main，不下放 Renderer。
+          message: connected.detail ?? connected.error,
         };
   }
 

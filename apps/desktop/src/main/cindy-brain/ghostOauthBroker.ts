@@ -18,6 +18,8 @@
  *   invalidGrant:false——server JWT secret 轮换这类全员性登录层故障绝不能
  *   连带销毁所有人的第三方授权;
  * - 网络不通(statusCode 0 / NETWORK_ERROR)→ NETWORK(瞬时,可重试)。
+ * - broker 路由未部署或服务端故障(404 / 5xx)→ SERVICE_UNAVAILABLE,供宿主
+ *   显示可操作的服务不可用提示,不暴露上游响应正文。
  *
  * 依赖注入(规则 14):server 调用与登录态判断全经 deps,单测内存假体覆盖,
  * 零 Electron。
@@ -126,6 +128,15 @@ export function createGhostOauthBrokerClient(deps: GhostOauthBrokerDeps): GhostO
       if (isApiError(err)) {
         if (err.statusCode === 0 || err.code === 'NETWORK_ERROR') {
           return { ok: false, error: 'NETWORK', invalidGrant: false, detail: err.message };
+        }
+        if (err.statusCode === 404 || err.statusCode >= 500) {
+          deps.logger?.warn('ghost oauth broker 服务不可用', {
+            slug,
+            action,
+            status: err.statusCode,
+            code: err.code,
+          });
+          return { ok: false, error: 'SERVICE_UNAVAILABLE', invalidGrant: false };
         }
         const invalidGrant = err.statusCode === 401 && UPSTREAM_REJECTION_CODES.has(err.code);
         deps.logger?.warn('ghost oauth broker 调用被拒', {
