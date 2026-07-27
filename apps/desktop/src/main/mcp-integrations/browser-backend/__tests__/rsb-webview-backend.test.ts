@@ -3,7 +3,8 @@
 //  - tabs reads from TabRegistry + safeTabMeta on each WebContents
 //  - open / focus / close round-trip through dispatchTabOp (renderer bridge)
 //  - navigate / screenshot / pdf go straight to the guest WebContents
-//  - unsupported actions yield a structured error (no throw)
+//  - snapshot / non-evaluate act actions use the bounded CDP automation helper
+//  - advanced unsupported actions yield a structured error (no throw)
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WebContents } from 'electron';
@@ -464,15 +465,30 @@ describe('RsbWebviewBackend — act:evaluate', () => {
     expect(callArg.indexOf('window.__pwned')).toBeGreaterThan(callArg.indexOf(JSON.stringify(adversarial).slice(0, 10)));
   });
 
-  it('non-evaluate act kinds are rejected with a Phase 4 message', async () => {
-    const { backend } = buildEvalEnv(null);
+  it('non-evaluate act kinds route to the CDP automation helper', async () => {
+    const { backend, wc } = buildEvalEnv(null);
+    const sendCommand = vi.fn(async (method: string) => {
+      if (method === 'Input.dispatchMouseEvent') return {};
+      return {};
+    });
+    Object.assign(wc, {
+      debugger: {
+        isAttached: vi.fn(() => true),
+        attach: vi.fn(),
+        detach: vi.fn(),
+        sendCommand,
+      },
+    });
     const res = await backend.call({
       action: 'act',
       targetId: 't1',
-      request: { kind: 'click', ref: 'r-1' },
+      request: { kind: 'clickCoords', x: 10, y: 20 },
     } as never);
-    expect(res.ok).toBe(false);
-    expect(res.message).toMatch(/click not yet supported/);
+    expect(res.ok).toBe(true);
+    expect(sendCommand).toHaveBeenCalledWith(
+      'Input.dispatchMouseEvent',
+      expect.objectContaining({ type: 'mousePressed', x: 10, y: 20 }),
+    );
   });
 
   it('executeJavaScript throw propagates as actionFailed', async () => {
@@ -487,6 +503,70 @@ describe('RsbWebviewBackend — act:evaluate', () => {
     } as never);
     expect(res.ok).toBe(false);
     expect(res.message).toBe('SyntaxError');
+  });
+});
+
+describe('RsbWebviewBackend — snapshot automation', () => {
+  it('returns refs from the active tab and pins for the complete CDP action', async () => {
+    const wc = fakeWc();
+    let attached = false;
+    Object.assign(wc, {
+      debugger: {
+        isAttached: vi.fn(() => attached),
+        attach: vi.fn(() => {
+          attached = true;
+        }),
+        detach: vi.fn(() => {
+          attached = false;
+        }),
+        sendCommand: vi.fn(async (method: string) => {
+          if (method === 'Accessibility.enable') return {};
+          if (method === 'Accessibility.getFullAXTree') {
+            return {
+              nodes: [
+                {
+                  nodeId: 'button',
+                  role: { value: 'button' },
+                  name: { value: 'Continue' },
+                  backendDOMNodeId: 7,
+                  childIds: [],
+                },
+              ],
+            };
+          }
+          throw new Error(`unexpected command: ${method}`);
+        }),
+      },
+    });
+    const registry = fakeRegistry(
+      [{ sessionId: 's1', tabId: 't1', webContentsId: 101 }],
+      new Map([['t1', wc]]),
+    );
+    const backend = new RsbWebviewBackend({
+      registry,
+      getActiveSessionId: () => 's1',
+      bridge: { getHostWebContents: () => null, logger: logger() },
+      logger: logger(),
+    });
+
+    const res = await backend.call({
+      action: 'snapshot',
+      targetId: 't1',
+      interactive: true,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toMatchObject({
+      targetId: 't1',
+      snapshot: '- button "Continue" [ref=e1]',
+      refs: {
+        e1: { role: 'button', name: 'Continue', backendDOMNodeId: 7 },
+      },
+    });
+    expect(registry.pinHistory).toEqual([
+      { op: 'pin', tabId: 't1' },
+      { op: 'unpin', tabId: 't1' },
+    ]);
   });
 });
 
@@ -790,6 +870,37 @@ describe('RsbWebviewBackend — MCP session id injection', () => {
     });
   });
 
+  it('targetless direct actions select a tab from the MCP-injected session', async () => {
+    const agentWc = fakeWc();
+    const uiWc = fakeWc();
+    const registry = fakeRegistry(
+      [
+        { sessionId: 'agent-A', tabId: 'agent-tab', webContentsId: 101 },
+        { sessionId: 'ui-focus-B', tabId: 'ui-tab', webContentsId: 102 },
+      ],
+      new Map([
+        ['agent-tab', agentWc],
+        ['ui-tab', uiWc],
+      ]),
+    );
+    const backend = new RsbWebviewBackend({
+      registry,
+      getActiveSessionId: () => 'ui-focus-B',
+      bridge: { getHostWebContents: () => null, logger: logger() },
+      logger: logger(),
+    });
+
+    const res = await backend.call({
+      action: 'navigate',
+      url: 'https://agent.example',
+      __mcpSessionId: 'agent-A',
+    } as never);
+
+    expect(res.ok).toBe(true);
+    expect(agentWc.loadURLMock).toHaveBeenCalledWith('https://agent.example');
+    expect(uiWc.loadURLMock).not.toHaveBeenCalled();
+  });
+
   it('empty / non-string __mcpSessionId falls back to getActiveSessionId', async () => {
     const wc = fakeWc();
     const registry = fakeRegistry(
@@ -824,14 +935,14 @@ describe('RsbWebviewBackend — MCP session id injection', () => {
 });
 
 describe('RsbWebviewBackend — unsupported actions', () => {
-  it('snapshot returns BROWSER_RUNTIME_ACTION_FAILED with explanation', async () => {
+  it('upload returns BROWSER_RUNTIME_ACTION_FAILED with explanation', async () => {
     const backend = new RsbWebviewBackend({
       registry: fakeRegistry([], new Map()),
       getActiveSessionId: () => 's1',
       bridge: { getHostWebContents: () => null, logger: logger() },
       logger: logger(),
     });
-    const res = await backend.call({ action: 'snapshot' } as never);
+    const res = await backend.call({ action: 'upload' } as never);
     expect(res.ok).toBe(false);
     expect(res.errorCode).toBe('BROWSER_RUNTIME_ACTION_FAILED');
     expect(res.message).toMatch(/not yet supported/);

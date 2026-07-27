@@ -5,15 +5,14 @@
  * either:
  *   - Electron native API on the guest `WebContents` (navigate / screenshot /
  *     pdf / console)
+ *   - a bounded CDP session on the guest `WebContents` (snapshot / act)
  *   - the renderer's RSB store via the request/response bridge (open /
  *     focus / close)
  *   - the `TabRegistry` for status / tabs / profiles / doctor
  *
- * Scope (Phase 3): low-complexity actions only. Phase 4 layers CDP-driven
- * snapshot / act / extract / requests / responseBody / upload on top. Actions
- * not implemented in this phase respond with `BROWSER_RUNTIME_ACTION_FAILED`
- * + a clear message ("action 'X' not yet supported in rsb-webview backend")
- * so the MCP layer still surfaces a structured error.
+ * Actions outside the sidebar browser's current capability set respond with
+ * `BROWSER_RUNTIME_ACTION_FAILED` + a clear explanation, so the MCP layer still
+ * surfaces a structured error.
  *
  * Why this lives in main: the `WebContents` handles + CDP debugger access are
  * main-only; the backend has no business in the renderer. The renderer owns
@@ -21,6 +20,7 @@
  */
 
 import type {
+  BrowserActRequest,
   BrowserControlRequest,
   BrowserControlResult,
 } from '@cindy/browser-control-runtime';
@@ -34,6 +34,7 @@ import type {
   BackendResult,
   BrowserBackend,
 } from './types.js';
+import { RsbWebviewAutomation } from './rsb-webview-automation.js';
 
 interface BackendLogger {
   info(message: string, ...args: unknown[]): void;
@@ -127,8 +128,11 @@ function safeTabMeta(wc: WebContents): { url: string; title: string } {
 
 export class RsbWebviewBackend implements BrowserBackend {
   readonly kind = 'rsb-webview' as const;
+  private readonly automation: RsbWebviewAutomation;
 
-  constructor(private readonly opts: RsbWebviewBackendOptions) {}
+  constructor(private readonly opts: RsbWebviewBackendOptions) {
+    this.automation = new RsbWebviewAutomation(opts.logger);
+  }
 
   /**
    * Read the agent session id from an MCP-injected request, or fall back to
@@ -158,8 +162,8 @@ export class RsbWebviewBackend implements BrowserBackend {
 
   async dispose(): Promise<void> {
     // Nothing to tear down. Switching away from this backend doesn't kill
-    // any tabs — the user's RSB stays as-is. Pin set decays naturally as
-    // automation steps finish (in Phase 3 there are no pins).
+    // any tabs — the user's RSB stays as-is. Per-action debugger sessions and
+    // pins are released by their own finally blocks.
   }
 
   // ── dispatch ──────────────────────────────────────────────────────────────
@@ -186,6 +190,8 @@ export class RsbWebviewBackend implements BrowserBackend {
         return this.handleClose(request);
       case 'navigate':
         return this.handleNavigate(request);
+      case 'snapshot':
+        return this.handleSnapshot(request);
       case 'screenshot':
         return this.handleScreenshot(request);
       case 'pdf':
@@ -195,10 +201,9 @@ export class RsbWebviewBackend implements BrowserBackend {
       case 'act':
         return this.handleAct(request);
       default:
-        // Snapshot / extract / requests / responseBody / upload / dialog —
-        // Phase 4 CDP territory. `act` supports `evaluate` only in this phase
-        // (handled above); `act:click` / `act:type` / etc. require CDP Input
-        // domain and ARIA snapshot infrastructure that lands in a follow-up.
+        // requests / responseBody / upload / dialog are not wired to the
+        // embedded guest yet. Keep failure structured so callers can choose an
+        // external browser backend for those advanced capabilities.
         return actionFailed(
           request.action,
           `action '${request.action}' not yet supported in rsb-webview backend`,
@@ -313,6 +318,7 @@ export class RsbWebviewBackend implements BrowserBackend {
       this.opts.bridge,
     );
     if (!result.ok) return actionFailed(req.action, result.error);
+    this.automation.forgetTab(tabId);
     return actionOk(req.action, { tabId });
   }
 
@@ -326,8 +332,20 @@ export class RsbWebviewBackend implements BrowserBackend {
     const resolved = await this.resolveTabForDirectAction(req, tabId);
     if (!resolved.ok) return resolved.result;
     return this.withTabPin(tabId, async () => {
+      this.automation.forgetTab(tabId);
       await resolved.wc.loadURL(url);
       return actionOk(req.action, { tabId, url });
+    });
+  }
+
+  private async handleSnapshot(req: BackendRequest): Promise<BackendResult> {
+    const tabId = await this.resolveDirectActionTarget(req);
+    if (!tabId) return actionFailed(req.action, 'targetId required');
+    const resolved = await this.resolveTabForDirectAction(req, tabId);
+    if (!resolved.ok) return resolved.result;
+    return this.withTabPin(tabId, async () => {
+      const data = await this.automation.snapshot(tabId, resolved.wc, req);
+      return actionOk(req.action, data);
     });
   }
 
@@ -366,79 +384,70 @@ export class RsbWebviewBackend implements BrowserBackend {
     });
   }
 
-  /**
-   * Phase 4 lite — `act:evaluate` only. The CDP-driven act variants
-   * (click / type / press / hover / drag / select / fill / wait / clickCoords /
-   * resize) need an ARIA snapshot + Input domain subsystem that ships in a
-   * dedicated follow-up. evaluate is dispatch-cheap because it maps straight
-   * to `webContents.executeJavaScript` — included here so recipes that rely
-   * on evaluate (the majority of L1 / L2 site recipes) work today.
-   */
   private async handleAct(req: BackendRequest): Promise<BackendResult> {
-    const tabId = await this.resolveDirectActionTarget(req);
-    if (!tabId) return actionFailed(req.action, 'targetId required');
-    const resolved = await this.resolveTabForDirectAction(req, tabId);
-    if (!resolved.ok) return resolved.result;
-    const wc = resolved.wc;
-
-    const inner = (req as { request?: { kind?: string; fn?: string; as?: string } }).request;
+    const inner = (req as { request?: BrowserActRequest & { as?: string } }).request;
     if (!inner || typeof inner !== 'object') {
       return actionFailed(req.action, 'request body required');
     }
-    if (inner.kind !== 'evaluate') {
-      return actionFailed(
-        req.action,
-        `act:${String(inner.kind)} not yet supported in rsb-webview backend (Phase 4)`,
-      );
-    }
-    if (typeof inner.fn !== 'string' || inner.fn === '') {
-      return actionFailed(req.action, 'evaluate.fn (JS expression source) required');
+    const requestWithInnerTarget = {
+      ...req,
+      ...(typeof req.targetId === 'string'
+        ? {}
+        : typeof inner.targetId === 'string'
+          ? { targetId: inner.targetId }
+          : {}),
+    } as BackendRequest;
+    if (inner.kind === 'close') {
+      return this.handleClose(requestWithInnerTarget);
     }
 
-    // Safety / parity model:
-    //
-    // The vendored runtime's `act:evaluate` builds an in-page evaluator that
-    // does literally `eval("(" + fnSource + ")")` then calls the resulting
-    // function (see pw-tools-core.interactions.ts:1107-1131). The attack
-    // surface of "agent-provided JS runs in the guest page" is the SAME there
-    // — both forms are arbitrary JS in same-origin context. We mirror that
-    // pattern verbatim instead of a naive `(${fn})()` concat so:
-    //   (a) the architectural threat model is identical, not "subtly different
-    //       in a way only this code knows";
-    //   (b) we get the same "did not produce a function" guard for free;
-    //   (c) `JSON.stringify` ensures fn text is a JS string literal — no IIFE
-    //       escape via `})(); window.x=...;((`-style payloads.
-    // The caller's `fn` is still arbitrary JS that runs in the page; that's the
-    // designed capability (recipe authors do same-origin fetch / DOM scraping
-    // / page mutations through it). The guard only stops "smuggle multiple
-    // statements past the IIFE wrapper".
-    const wrapped = `(() => {
-      var candidate = eval("(" + ${JSON.stringify(inner.fn)} + ")");
-      if (typeof candidate !== "function") {
-        throw new Error("evaluate source did not produce a function");
+    const tabId = await this.resolveDirectActionTarget(requestWithInnerTarget);
+    if (!tabId) return actionFailed(req.action, 'targetId required');
+    const resolved = await this.resolveTabForDirectAction(requestWithInnerTarget, tabId);
+    if (!resolved.ok) return resolved.result;
+    const wc = resolved.wc;
+
+    if (inner.kind === 'evaluate') {
+      if (typeof inner.fn !== 'string' || inner.fn === '') {
+        return actionFailed(req.action, 'evaluate.fn (JS expression source) required');
       }
-      var result = candidate();
-      return Promise.resolve(result);
-    })()`;
-    return this.withTabPin(tabId, async () => {
-      let value: unknown;
-      try {
-        value = await wc.executeJavaScript(wrapped, /* userGesture */ false);
-      } catch (err) {
-        return actionFailed(
-          req.action,
-          err instanceof Error ? err.message : String(err),
-        );
-      }
-      return actionOk(req.action, {
-        tabId,
-        kind: 'evaluate',
-        // `as` is an output-variable name the recipe-runner uses to alias the
-        // returned value. Surfaced verbatim so the runner's substitution
-        // ({{var}}) works without an extra translation step.
-        ...(typeof inner.as === 'string' ? { as: inner.as } : {}),
-        result: value,
+
+      // Safety / parity model:
+      //
+      // The vendored runtime's `act:evaluate` builds an in-page evaluator that
+      // does literally `eval("(" + fnSource + ")")` then calls the resulting
+      // function. JSON.stringify keeps the complete agent-provided source in a
+      // single JS string literal, preventing it from escaping this IIFE.
+      const wrapped = `(() => {
+        var candidate = eval("(" + ${JSON.stringify(inner.fn)} + ")");
+        if (typeof candidate !== "function") {
+          throw new Error("evaluate source did not produce a function");
+        }
+        var result = candidate();
+        return Promise.resolve(result);
+      })()`;
+      return this.withTabPin(tabId, async () => {
+        let value: unknown;
+        try {
+          value = await wc.executeJavaScript(wrapped, /* userGesture */ false);
+        } catch (err) {
+          return actionFailed(
+            req.action,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+        return actionOk(req.action, {
+          tabId,
+          kind: 'evaluate',
+          ...(typeof inner.as === 'string' ? { as: inner.as } : {}),
+          result: value,
+        });
       });
+    }
+
+    return this.withTabPin(tabId, async () => {
+      const data = await this.automation.act(tabId, wc, inner);
+      return actionOk(req.action, data);
     });
   }
 
@@ -510,7 +519,7 @@ export class RsbWebviewBackend implements BrowserBackend {
   private extractTargetId(req: BackendRequest): string | null {
     const v = (req as { targetId?: unknown }).targetId;
     if (typeof v === 'string' && v !== '') return v;
-    const sessionId = this.opts.getActiveSessionId();
+    const sessionId = this.resolveSessionId(req);
     if (!sessionId) return null;
     const records = this.opts.registry.listBySession(sessionId);
     // Last reported wins — RsbBrowserBridge replaces a tab's record on every
