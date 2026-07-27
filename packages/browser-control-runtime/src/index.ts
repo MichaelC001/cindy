@@ -8,6 +8,7 @@ export type {
   BrowserControlRuntime,
   BrowserControlRuntimeFactoryOptions,
   BrowserControlTarget,
+  BrowserElementQuery,
   BrowserImageType,
   BrowserSnapshotFormat,
   BrowserSnapshotMode,

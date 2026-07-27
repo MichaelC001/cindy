@@ -191,6 +191,7 @@ describe('RsbWebviewAutomation act', () => {
     expect(harness.executeJavaScript.mock.calls[0][0]).toContain(
       '"method":"Input.insertText","params":{"text":"hello@example.test"}',
     );
+    expect(harness.executeJavaScript.mock.calls[0][0]).toContain('"targetTicket":"rsb-');
     expect(harness.executeJavaScript.mock.calls[1][0]).toContain(
       '"method":"Input.dispatchKeyEvent","params":{"type":"keyDown","key":"Enter"',
     );
@@ -198,6 +199,80 @@ describe('RsbWebviewAutomation act', () => {
       expect.stringMatching(/^Input\./),
       expect.anything(),
     );
+  });
+
+  it('resolves a semantic query and waits for an actionable target', async () => {
+    const harness = debuggerHarness(async (method, params) => {
+      if (method === 'Runtime.evaluate') {
+        expect(params?.expression).toContain('"role":"button"');
+        expect(params?.expression).toContain('"name":"Continue"');
+        return { result: { objectId: 'button-object' } };
+      }
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 7 } };
+      if (method === 'Runtime.callFunctionOn') return { result: { value: { ok: true } } };
+      if (method === 'DOM.getBoxModel') {
+        return { model: { content: [0, 0, 20, 0, 20, 10, 0, 10] } };
+      }
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    const result = await automation().act('tab-1', harness.wc, {
+      kind: 'click',
+      query: { role: 'button', name: 'Continue', exact: true },
+      timeoutMs: 750,
+    });
+
+    expect(result).toMatchObject({ kind: 'click', x: 10, y: 5 });
+    const pageCalls = harness.sendCommand.mock.calls.filter(([method]) =>
+      method === 'Runtime.callFunctionOn'
+    );
+    expect(pageCalls.some(([, params]) =>
+      String(params?.functionDeclaration).includes('target is not visible')
+    )).toBe(true);
+  });
+
+  it('surfaces page-side query failures before attempting input', async () => {
+    const harness = debuggerHarness(async (method) => {
+      if (method === 'Runtime.evaluate') {
+        return {
+          result: { subtype: 'error' },
+          exceptionDetails: {
+            exception: { description: 'Error: element query matched 2 elements; provide index' },
+          },
+        };
+      }
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    await expect(automation().act('tab-1', harness.wc, {
+      kind: 'click',
+      query: { role: 'button', name: 'Continue' },
+    })).rejects.toThrow('element query matched 2 elements; provide index');
+    expect(harness.executeJavaScript).not.toHaveBeenCalled();
+  });
+
+  it('rejects query options that do not identify an element', async () => {
+    const harness = debuggerHarness(async (method) => {
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    await expect(automation().act('tab-1', harness.wc, {
+      kind: 'click',
+      query: { exact: true, index: 0 },
+    })).rejects.toThrow('element query requires at least one field');
+    expect(harness.sendCommand).not.toHaveBeenCalled();
+  });
+
+  it('resets an overridden viewport when resize omits dimensions', async () => {
+    const harness = debuggerHarness(async (method) => {
+      if (method === 'Emulation.clearDeviceMetricsOverride') return {};
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    const result = await automation().act('tab-1', harness.wc, { kind: 'resize' });
+
+    expect(result).toMatchObject({ kind: 'resize', reset: true });
+    expect(harness.sendCommand).toHaveBeenCalledWith('Emulation.clearDeviceMetricsOverride');
   });
 
   it('dispatches coordinate clicks without requiring a snapshot', async () => {

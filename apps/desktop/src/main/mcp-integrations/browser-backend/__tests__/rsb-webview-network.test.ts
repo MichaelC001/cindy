@@ -1,0 +1,107 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { WebContents } from 'electron';
+
+import { RsbWebviewNetwork } from '../rsb-webview-network.js';
+
+function networkHarness() {
+  let attached = false;
+  const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+  const sendCommand = vi.fn(async (method: string) => {
+    if (method === 'Network.enable') return {};
+    if (method === 'Network.getResponseBody') {
+      return { body: '{"ok":true}', base64Encoded: false };
+    }
+    throw new Error(`unexpected command: ${method}`);
+  });
+  const electronDebugger = {
+    isAttached: () => attached,
+    attach: vi.fn(() => {
+      attached = true;
+    }),
+    detach: vi.fn(() => {
+      attached = false;
+    }),
+    sendCommand,
+    on: (event: string, listener: (...args: unknown[]) => void) => {
+      const group = listeners.get(event) ?? new Set();
+      group.add(listener);
+      listeners.set(event, group);
+    },
+    removeListener: (event: string, listener: (...args: unknown[]) => void) => {
+      listeners.get(event)?.delete(listener);
+    },
+  };
+  const wc = {
+    debugger: electronDebugger,
+    once: vi.fn(),
+  } as unknown as WebContents;
+  const emit = (event: string, ...args: unknown[]) => {
+    for (const listener of listeners.get(event) ?? []) listener({}, ...args);
+  };
+  return { wc, emit, electronDebugger, sendCommand };
+}
+
+describe('RsbWebviewNetwork', () => {
+  it('buffers request outcomes and returns a bounded response body', async () => {
+    const harness = networkHarness();
+    const network = new RsbWebviewNetwork({ warn: vi.fn() });
+    await network.observe(harness.wc);
+
+    harness.emit('message', 'Network.requestWillBeSent', {
+      requestId: 'request-1',
+      type: 'XHR',
+      request: { method: 'POST', url: 'https://example.test/api/items' },
+    });
+    harness.emit('message', 'Network.responseReceived', {
+      requestId: 'request-1',
+      response: {
+        url: 'https://example.test/api/items',
+        status: 201,
+        headers: {
+          'content-type': 'application/json',
+          'set-cookie': 'secret=hidden',
+        },
+      },
+    });
+    harness.emit('message', 'Network.loadingFinished', { requestId: 'request-1' });
+
+    expect(network.readRequests(harness.wc)).toEqual([
+      expect.objectContaining({
+        id: 'request-1',
+        method: 'POST',
+        resourceType: 'xhr',
+        status: 201,
+        ok: true,
+      }),
+    ]);
+    await expect(network.readResponseBody(harness.wc, {
+      url: '/api/items',
+      maxChars: 5,
+    })).resolves.toEqual({
+      url: 'https://example.test/api/items',
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+      body: '{"ok"',
+      truncated: true,
+    });
+  });
+
+  it('clears buffered metadata without leaking sensitive request headers', async () => {
+    const harness = networkHarness();
+    const network = new RsbWebviewNetwork({ warn: vi.fn() });
+    await network.observe(harness.wc);
+    harness.emit('message', 'Network.requestWillBeSent', {
+      requestId: 'request-2',
+      type: 'Fetch',
+      request: {
+        method: 'GET',
+        url: 'https://example.test/private',
+        headers: { authorization: 'Bearer secret' },
+      },
+    });
+
+    expect(network.readRequests(harness.wc, { filter: '/private', clear: true })).toHaveLength(1);
+    expect(network.readRequests(harness.wc)).toEqual([]);
+    expect(JSON.stringify(network.diagnostics())).not.toContain('secret');
+  });
+});

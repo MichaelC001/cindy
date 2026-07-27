@@ -35,10 +35,18 @@ import type {
   BrowserBackend,
 } from './types.js';
 import { RsbWebviewAutomation } from './rsb-webview-automation.js';
+import { RsbWebviewNetwork } from './rsb-webview-network.js';
 
 interface BackendLogger {
   info(message: string, ...args: unknown[]): void;
   warn(message: string, ...args: unknown[]): void;
+}
+
+interface BrowserActivity {
+  action: BrowserControlRequest['action'];
+  finishedAt: string;
+  ok: boolean;
+  targetId?: string;
 }
 
 export interface RsbWebviewBackendOptions {
@@ -129,9 +137,12 @@ function safeTabMeta(wc: WebContents): { url: string; title: string } {
 export class RsbWebviewBackend implements BrowserBackend {
   readonly kind = 'rsb-webview' as const;
   private readonly automation: RsbWebviewAutomation;
+  private readonly network: RsbWebviewNetwork;
+  private readonly activity: BrowserActivity[] = [];
 
   constructor(private readonly opts: RsbWebviewBackendOptions) {
     this.automation = new RsbWebviewAutomation(opts.logger);
+    this.network = new RsbWebviewNetwork(opts.logger);
   }
 
   /**
@@ -147,23 +158,27 @@ export class RsbWebviewBackend implements BrowserBackend {
 
   async call(request: BackendRequest): Promise<BackendResult> {
     try {
-      return await this.dispatch(request);
+      const result = await this.dispatch(request);
+      this.recordActivity(request, result.ok);
+      return result;
     } catch (err) {
       this.opts.logger.warn('rsb-webview backend.call threw', {
         action: request.action,
         err,
       });
-      return actionFailed(
+      const result = actionFailed(
         request.action,
         err instanceof Error ? err.message : String(err),
       );
+      this.recordActivity(request, false);
+      return result;
     }
   }
 
   async dispose(): Promise<void> {
-    // Nothing to tear down. Switching away from this backend doesn't kill
-    // any tabs — the user's RSB stays as-is. Per-action debugger sessions and
-    // pins are released by their own finally blocks.
+    // Switching backends never closes the user's tabs. Only the listeners and
+    // debugger attachments owned by this backend are released.
+    this.network.dispose();
   }
 
   // ── dispatch ──────────────────────────────────────────────────────────────
@@ -200,8 +215,12 @@ export class RsbWebviewBackend implements BrowserBackend {
         return this.handleConsole(request);
       case 'act':
         return this.handleAct(request);
+      case 'requests':
+        return this.handleRequests(request);
+      case 'responseBody':
+        return this.handleResponseBody(request);
       default:
-        // requests / responseBody / upload / dialog are not wired to the
+        // upload / dialog are not wired to the
         // embedded guest yet. Keep failure structured so callers can choose an
         // external browser backend for those advanced capabilities.
         return actionFailed(
@@ -231,6 +250,8 @@ export class RsbWebviewBackend implements BrowserBackend {
       activeSessionId: sessionId,
       totalRegisteredTabs: this.opts.registry.listAll().length,
       pinnedTabs: this.opts.registry.listPinned(),
+      network: this.network.diagnostics(),
+      recentActivity: this.activity.slice(-20),
     });
   }
 
@@ -333,6 +354,7 @@ export class RsbWebviewBackend implements BrowserBackend {
     if (!resolved.ok) return resolved.result;
     return this.withTabPin(tabId, async () => {
       this.automation.forgetTab(tabId);
+      await this.tryObserveNetwork(resolved.wc, tabId);
       await resolved.wc.loadURL(url);
       return actionOk(req.action, { tabId, url });
     });
@@ -344,6 +366,7 @@ export class RsbWebviewBackend implements BrowserBackend {
     const resolved = await this.resolveTabForDirectAction(req, tabId);
     if (!resolved.ok) return resolved.result;
     return this.withTabPin(tabId, async () => {
+      await this.tryObserveNetwork(resolved.wc, tabId);
       const data = await this.automation.snapshot(tabId, resolved.wc, req);
       return actionOk(req.action, data);
     });
@@ -427,6 +450,7 @@ export class RsbWebviewBackend implements BrowserBackend {
         return Promise.resolve(result);
       })()`;
       return this.withTabPin(tabId, async () => {
+        await this.tryObserveNetwork(wc, tabId);
         let value: unknown;
         try {
           value = await wc.executeJavaScript(wrapped, /* userGesture */ false);
@@ -446,6 +470,7 @@ export class RsbWebviewBackend implements BrowserBackend {
     }
 
     return this.withTabPin(tabId, async () => {
+      await this.tryObserveNetwork(wc, tabId);
       const data = await this.automation.act(tabId, wc, inner);
       return actionOk(req.action, data);
     });
@@ -468,7 +493,69 @@ export class RsbWebviewBackend implements BrowserBackend {
     });
   }
 
+  private async handleRequests(req: BackendRequest): Promise<BackendResult> {
+    const tabId = await this.resolveDirectActionTarget(req);
+    if (!tabId) return actionFailed(req.action, 'targetId required');
+    const resolved = await this.resolveTabForDirectAction(req, tabId);
+    if (!resolved.ok) return resolved.result;
+    return this.withTabPin(tabId, async () => {
+      await this.network.observe(resolved.wc);
+      const requests = this.network.readRequests(resolved.wc, {
+        filter: typeof req.filter === 'string' ? req.filter : undefined,
+        clear: req.clear === true,
+      });
+      return actionOk(req.action, { tabId, requests });
+    });
+  }
+
+  private async handleResponseBody(req: BackendRequest): Promise<BackendResult> {
+    const tabId = await this.resolveDirectActionTarget(req);
+    if (!tabId) return actionFailed(req.action, 'targetId required');
+    if (typeof req.url !== 'string' || req.url.trim() === '') {
+      return actionFailed(req.action, 'responseBody.url required');
+    }
+    const resolved = await this.resolveTabForDirectAction(req, tabId);
+    if (!resolved.ok) return resolved.result;
+    return this.withTabPin(tabId, async () => {
+      const response = await this.network.readResponseBody(resolved.wc, {
+        url: req.url!,
+        maxChars: req.maxChars,
+        timeoutMs: req.timeoutMs,
+      });
+      return actionOk(req.action, { tabId, response });
+    });
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
+
+  private recordActivity(req: BackendRequest, ok: boolean): void {
+    const directTarget = (req as { targetId?: unknown }).targetId;
+    const nestedTarget = (req as { request?: { targetId?: unknown } }).request?.targetId;
+    const targetId = typeof directTarget === 'string' && directTarget !== ''
+      ? directTarget
+      : typeof nestedTarget === 'string' && nestedTarget !== ''
+        ? nestedTarget
+        : undefined;
+    this.activity.push({
+      action: req.action,
+      finishedAt: new Date().toISOString(),
+      ok,
+      ...(targetId ? { targetId } : {}),
+    });
+    if (this.activity.length > 200) {
+      this.activity.splice(0, this.activity.length - 200);
+    }
+  }
+
+  private async tryObserveNetwork(wc: WebContents, tabId: string): Promise<void> {
+    try {
+      await this.network.observe(wc);
+    } catch (err) {
+      // Network capture enriches normal browsing actions but must not prevent
+      // the underlying page action when DevTools owns the debugger.
+      this.opts.logger.warn('RSB network observation unavailable', { tabId, err });
+    }
+  }
 
   /**
    * Per-action automation pin. Wraps an action body so the targeted tab is

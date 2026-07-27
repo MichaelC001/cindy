@@ -230,6 +230,23 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
           kind: z.enum(ACT_KINDS),
           targetId: z.string().optional(),
           ref: z.string().optional(),
+          query: z
+            .object({
+              css: z.string().optional(),
+              role: z.string().optional(),
+              name: z.string().optional(),
+              text: z.string().optional(),
+              label: z.string().optional(),
+              placeholder: z.string().optional(),
+              testId: z.string().optional(),
+              exact: z.boolean().optional(),
+              index: z.number().int().nonnegative().optional(),
+            })
+            .optional()
+            .describe(
+              '语义元素查询，可组合 role/name/text/label/placeholder/testId/css；' +
+                '默认要求唯一匹配，多项结果时用 index 明确选择。',
+            ),
           doubleClick: z.boolean().optional(),
           button: z.string().optional(),
           modifiers: z.array(z.string()).optional(),

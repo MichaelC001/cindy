@@ -1,6 +1,7 @@
 import type {
   BrowserActRequest,
   BrowserControlRequest,
+  BrowserElementQuery,
 } from '@cindy/browser-control-runtime';
 import type { WebContents } from 'electron';
 
@@ -309,14 +310,158 @@ async function resolveHref(
 async function resolveSelector(
   send: DebuggerTransport['sendCommand'],
   selector: string,
+  timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
 ): Promise<ResolvedNode> {
+  return resolveElementQuery(send, { css: selector }, timeoutMs);
+}
+
+async function resolveElementQuery(
+  send: DebuggerTransport['sendCommand'],
+  query: BrowserElementQuery,
+  timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
+): Promise<ResolvedNode> {
+  const hasLookupField = [
+    query.css,
+    query.role,
+    query.name,
+    query.text,
+    query.label,
+    query.placeholder,
+    query.testId,
+  ].some((value) => typeof value === 'string' && value !== '');
+  if (!hasLookupField) {
+    throw new Error('element query requires at least one field');
+  }
+  const boundedTimeout = positiveInt(
+    timeoutMs,
+    DEFAULT_WAIT_TIMEOUT_MS,
+    MAX_WAIT_TIMEOUT_MS,
+  );
   const evaluated = await send('Runtime.evaluate', {
-    expression: `document.querySelector(${JSON.stringify(selector)})`,
+    expression: `(() => {
+      const query = ${JSON.stringify(query)};
+      const deadline = Date.now() + ${boundedTimeout};
+      const normalize = (value) => String(value ?? "").replace(/\\s+/g, " ").trim();
+      const equals = (actual, expected) => {
+        const left = normalize(actual);
+        const right = normalize(expected);
+        return query.exact === true ? left === right : left.toLowerCase().includes(right.toLowerCase());
+      };
+      const implicitRole = (element) => {
+        const explicit = element.getAttribute("role");
+        if (explicit) return explicit.toLowerCase();
+        const tag = element.tagName.toLowerCase();
+        if (tag === "button") return "button";
+        if (tag === "a" && element.hasAttribute("href")) return "link";
+        if (tag === "select") return element.multiple ? "listbox" : "combobox";
+        if (tag === "textarea") return "textbox";
+        if (tag === "option") return "option";
+        if (tag === "input") {
+          const type = String(element.type || "text").toLowerCase();
+          if (["button", "submit", "reset", "image"].includes(type)) return "button";
+          if (type === "checkbox") return "checkbox";
+          if (type === "radio") return "radio";
+          if (type === "range") return "slider";
+          if (type === "number") return "spinbutton";
+          if (type === "search") return "searchbox";
+          if (!["hidden", "file"].includes(type)) return "textbox";
+        }
+        return "";
+      };
+      const labelText = (element) => {
+        if (element.labels?.length) {
+          return Array.from(element.labels).map((label) => label.textContent || "").join(" ");
+        }
+        const id = element.getAttribute("id");
+        if (id) {
+          const escaped = globalThis.CSS?.escape ? CSS.escape(id) : id.replace(/["\\\\]/g, "\\\\$&");
+          const label = document.querySelector('label[for="' + escaped + '"]');
+          if (label) return label.textContent || "";
+        }
+        return element.closest("label")?.textContent || "";
+      };
+      const accessibleName = (element) => {
+        const labelledBy = element.getAttribute("aria-labelledby");
+        if (labelledBy) {
+          const text = labelledBy.split(/\\s+/).map((id) => document.getElementById(id)?.textContent || "").join(" ");
+          if (normalize(text)) return text;
+        }
+        return element.getAttribute("aria-label")
+          || labelText(element)
+          || element.getAttribute("alt")
+          || element.getAttribute("title")
+          || (element instanceof HTMLInputElement ? element.value : "")
+          || element.textContent
+          || "";
+      };
+      const visible = (element) => {
+        if (!element.isConnected) return false;
+        const style = getComputedStyle(element);
+        if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const matches = (element) => {
+        if (query.role && implicitRole(element) !== String(query.role).toLowerCase()) return false;
+        if (query.name && !equals(accessibleName(element), query.name)) return false;
+        if (query.text && !equals(element.textContent, query.text)) return false;
+        if (query.label && !equals(labelText(element), query.label)) return false;
+        if (query.placeholder && !equals(element.getAttribute("placeholder"), query.placeholder)) return false;
+        if (query.testId && element.getAttribute("data-testid") !== query.testId) return false;
+        return visible(element);
+      };
+      return new Promise((resolve, reject) => {
+        const poll = () => {
+          let candidates;
+          try {
+            candidates = Array.from(document.querySelectorAll(query.css || "*")).filter(matches);
+          } catch (error) {
+            reject(error);
+            return;
+          }
+          const index = Number.isInteger(query.index) ? query.index : null;
+          if (index !== null && candidates[index]) {
+            resolve(candidates[index]);
+            return;
+          }
+          if (index === null && candidates.length === 1) {
+            resolve(candidates[0]);
+            return;
+          }
+          if (index === null && candidates.length > 1) {
+            reject(new Error("element query matched " + candidates.length + " elements; provide index"));
+            return;
+          }
+          if (Date.now() >= deadline) {
+            reject(new Error("element query timed out"));
+            return;
+          }
+          setTimeout(poll, 100);
+        };
+        poll();
+      });
+    })()`,
+    awaitPromise: true,
     returnByValue: false,
-  }) as { result?: { objectId?: string; subtype?: string } };
+    timeout: boundedTimeout + 1_000,
+  }) as {
+    result?: { objectId?: string; subtype?: string };
+    exceptionDetails?: {
+      text?: string;
+      exception?: { description?: string; value?: unknown };
+    };
+  };
+  if (evaluated.exceptionDetails) {
+    const details = evaluated.exceptionDetails;
+    const message = details.exception?.description
+      ?? (typeof details.exception?.value === 'string' ? details.exception.value : undefined)
+      ?? details.text
+      ?? 'element query failed';
+    throw new Error(message);
+  }
   const objectId = evaluated.result?.objectId;
   if (!objectId || evaluated.result?.subtype === 'null') {
-    throw new Error(`selector not found: ${selector}`);
+    throw new Error('element query did not resolve to an element');
   }
   const described = await send('DOM.describeNode', { objectId }) as {
     node?: { backendNodeId?: number };
@@ -400,6 +545,88 @@ async function focusNode(
   if (!result?.ok) throw new Error(result?.reason ?? 'unable to focus target');
 }
 
+async function waitForActionable(
+  send: DebuggerTransport['sendCommand'],
+  node: ResolvedNode,
+  options: { editable?: boolean; timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = positiveInt(
+    options.timeoutMs,
+    DEFAULT_WAIT_TIMEOUT_MS,
+    MAX_WAIT_TIMEOUT_MS,
+  );
+  const result = await callOnNode<{ ok: boolean; reason?: string }>(
+    send,
+    node.objectId,
+    `function(options) {
+      const deadline = Date.now() + options.timeoutMs;
+      const inspect = () => {
+        if (!(this instanceof Element) || !this.isConnected) return "target is detached";
+        const style = getComputedStyle(this);
+        const rect = this.getBoundingClientRect();
+        if (
+          style.display === "none"
+          || style.visibility === "hidden"
+          || style.visibility === "collapse"
+          || rect.width <= 0
+          || rect.height <= 0
+        ) return "target is not visible";
+        if (("disabled" in this && this.disabled) || this.getAttribute("aria-disabled") === "true") {
+          return "target is disabled";
+        }
+        if (options.editable) {
+          if ("readOnly" in this && this.readOnly) return "target is read-only";
+          const textInput = this instanceof HTMLInputElement
+            && !["button", "checkbox", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(this.type);
+          const editable = textInput
+            || this instanceof HTMLTextAreaElement
+            || (this instanceof HTMLElement && this.isContentEditable);
+          if (!editable) return "target is not editable";
+        }
+        return "";
+      };
+      return new Promise((resolve) => {
+        const poll = () => {
+          const reason = inspect();
+          if (!reason) {
+            this.scrollIntoView({ block: "center", inline: "center" });
+            resolve({ ok: true });
+            return;
+          }
+          if (Date.now() >= deadline) {
+            resolve({ ok: false, reason });
+            return;
+          }
+          setTimeout(poll, 100);
+        };
+        poll();
+      });
+    }`,
+    [{ editable: options.editable === true, timeoutMs }],
+  );
+  if (!result?.ok) throw new Error(result?.reason ?? 'target is not actionable');
+}
+
+let actionTicketSequence = 0;
+
+async function stampActionTarget(
+  send: DebuggerTransport['sendCommand'],
+  node: ResolvedNode,
+): Promise<string> {
+  actionTicketSequence += 1;
+  const ticket = `rsb-${Date.now().toString(36)}-${actionTicketSequence.toString(36)}`;
+  await callOnNode(
+    send,
+    node.objectId,
+    `function(ticket) {
+      Reflect.set(this, Symbol.for("cindy.rsb.action-target"), ticket);
+      return true;
+    }`,
+    [ticket],
+  );
+  return ticket;
+}
+
 async function centerOfNode(
   send: DebuggerTransport['sendCommand'],
   node: ResolvedNode,
@@ -460,6 +687,7 @@ type TranslatedInputMethod =
 interface TranslatedInputCommand {
   method: TranslatedInputMethod;
   params: Record<string, unknown>;
+  targetTicket?: string;
 }
 
 interface TranslatedInputResult {
@@ -470,17 +698,16 @@ interface TranslatedInputResult {
 type InputDispatcher = (
   method: TranslatedInputMethod,
   params: Record<string, unknown>,
+  targetTicket?: string,
 ) => Promise<void>;
 
 /**
  * Runs inside the guest page, not in Electron Main.
  *
- * Chromium's CDP Input domain is tied to the focused RenderWidgetHost. For an
- * embedded webview that can still be Cindy's composer even when the debugger
- * session and DOM node belong to the guest. Codex Desktop solves the same
- * in-app-browser problem by translating Input.* commands to page JavaScript
- * "to preserve focus". Keep this function self-contained so `toString()` can
- * safely serialize it into `webContents.executeJavaScript`.
+ * An embedded guest and Cindy's composer can disagree about which renderer
+ * owns native input focus. Dispatching equivalent DOM events inside the guest
+ * keeps browser actions scoped to the tab that supplied the element reference.
+ * Keep this function self-contained so `toString()` can safely serialize it.
  */
 function translateInputCommand(command: TranslatedInputCommand): TranslatedInputResult {
   const params = command.params;
@@ -524,6 +751,24 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
         return 4;
       default:
         throw new Error(`unsupported mouse button: ${String(button)}`);
+    }
+  };
+  const carriesTicket = (element: Element | null): boolean => {
+    if (!command.targetTicket) return true;
+    let current = element;
+    while (current) {
+      const currentWindow = current.ownerDocument.defaultView ?? window;
+      const symbol = currentWindow.Symbol.for('cindy.rsb.action-target');
+      if (Reflect.get(current, symbol) === command.targetTicket) return true;
+      const root = current.getRootNode();
+      current = current.parentElement
+        ?? (root instanceof currentWindow.ShadowRoot ? root.host : null);
+    }
+    return false;
+  };
+  const requireTicket = (element: Element | null): void => {
+    if (!carriesTicket(element)) {
+      throw new Error('page changed the action target before input was dispatched');
     }
   };
   const pointTarget = (
@@ -615,6 +860,7 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
     const resolved = pointTarget(document, screenX, screenY);
     if (!resolved) throw new Error(`no element found at point ${screenX},${screenY}`);
     const { target, x, y } = resolved;
+    requireTicket(target);
     const init = mouseInit(target, x, y);
     if (type === 'mouseMoved') {
       if (Number(params.buttons ?? 0) !== 0 && state.mousePress) {
@@ -818,6 +1064,7 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
     const type = stringParam(params.type, 'type');
     const key = stringParam(params.key, 'key');
     const target = deepestActiveElement(document) ?? document.body ?? document.documentElement;
+    requireTicket(target);
     const code = keyCode(key);
     const init: KeyboardEventInit & { keyCode: number; which: number } = {
       ...modifiers(Number(params.modifiers ?? 0)),
@@ -888,7 +1135,11 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
         translateKey();
         break;
       case 'Input.insertText':
-        insertText(editableElement(), stringParam(params.text, 'text'));
+        {
+          const target = editableElement();
+          requireTicket(target);
+          insertText(target, stringParam(params.text, 'text'));
+        }
         break;
     }
     return { ok: true };
@@ -901,9 +1152,14 @@ async function dispatchTranslatedInput(
   wc: WebContents,
   method: TranslatedInputMethod,
   params: Record<string, unknown>,
+  targetTicket?: string,
 ): Promise<void> {
   const source = `(${translateInputCommand.toString()})(${
-    JSON.stringify({ method, params } satisfies TranslatedInputCommand)
+    JSON.stringify({
+      method,
+      params,
+      ...(targetTicket ? { targetTicket } : {}),
+    } satisfies TranslatedInputCommand)
   });`;
   const userGesture = method === 'Input.dispatchMouseEvent'
     && params.type === 'mouseReleased';
@@ -918,6 +1174,7 @@ async function dispatchClick(
   x: number,
   y: number,
   request: BrowserActRequest,
+  targetTicket?: string,
 ): Promise<void> {
   const button = mouseButton(request.button);
   const clickCount = request.doubleClick === true ? 2 : 1;
@@ -930,7 +1187,7 @@ async function dispatchClick(
       button,
       clickCount: count,
       modifiers,
-    });
+    }, targetTicket);
     if (typeof request.delayMs === 'number' && request.delayMs > 0) {
       await delay(Math.min(request.delayMs, 5_000));
     }
@@ -941,7 +1198,7 @@ async function dispatchClick(
       button,
       clickCount: count,
       modifiers,
-    });
+    }, targetTicket);
   }
 }
 
@@ -955,6 +1212,7 @@ function parseKey(raw: string): { key: string; modifiers: number } {
 async function dispatchKey(
   dispatchInput: InputDispatcher,
   rawKey: string,
+  targetTicket?: string,
 ): Promise<void> {
   const { key, modifiers } = parseKey(rawKey);
   const text = key.length === 1 && modifiers === 0 ? key : undefined;
@@ -963,12 +1221,12 @@ async function dispatchKey(
     key,
     ...(text ? { text } : {}),
     modifiers,
-  });
+  }, targetTicket);
   await dispatchInput('Input.dispatchKeyEvent', {
     type: 'keyUp',
     key,
     modifiers,
-  });
+  }, targetTicket);
 }
 
 export class RsbWebviewAutomation {
@@ -1073,18 +1331,22 @@ export class RsbWebviewAutomation {
     request: BrowserActRequest,
   ): Promise<RsbActResult> {
     return withDebugger(wc, async (send) => {
-      const dispatchInput: InputDispatcher = async (method, params) => {
-        await dispatchTranslatedInput(wc, method, params);
+      const dispatchInput: InputDispatcher = async (method, params, targetTicket) => {
+        await dispatchTranslatedInput(wc, method, params, targetTicket);
       };
       const resolveTarget = async (
         ref = request.ref,
         selector = request.selector,
+        query = request.query,
       ): Promise<ResolvedNode> => {
+        if (query && typeof query === 'object') {
+          return resolveElementQuery(send, query, request.timeoutMs);
+        }
         if (typeof selector === 'string' && selector !== '') {
-          return resolveSelector(send, selector);
+          return resolveSelector(send, selector, request.timeoutMs);
         }
         if (typeof ref !== 'string' || ref === '') {
-          throw new Error(`${request.kind} requires ref or selector`);
+          throw new Error(`${request.kind} requires ref, selector, or query`);
         }
         const target = this.refsByTab.get(tabId)?.get(ref);
         if (!target) throw new Error(`unknown or stale snapshot ref: ${ref}; take a new snapshot`);
@@ -1093,8 +1355,11 @@ export class RsbWebviewAutomation {
 
       switch (request.kind) {
         case 'click': {
-          const point = await centerOfNode(send, await resolveTarget());
-          await dispatchClick(dispatchInput, point.x, point.y, request);
+          const target = await resolveTarget();
+          await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
+          const ticket = await stampActionTarget(send, target);
+          const point = await centerOfNode(send, target);
+          await dispatchClick(dispatchInput, point.x, point.y, request, ticket);
           return { tabId, kind: request.kind, ...point };
         }
         case 'clickCoords': {
@@ -1106,7 +1371,12 @@ export class RsbWebviewAutomation {
         case 'type':
         case 'fill': {
           const target = await resolveTarget();
+          await waitForActionable(send, target, {
+            editable: true,
+            timeoutMs: request.timeoutMs,
+          });
           await focusNode(send, target, true);
+          const ticket = await stampActionTarget(send, target);
           if (typeof request.text !== 'string') throw new Error(`${request.kind}.text required`);
           if (request.kind === 'fill') {
             await callOnNode(
@@ -1132,33 +1402,40 @@ export class RsbWebviewAutomation {
           if (request.slowly === true) {
             const perCharacterDelay = Math.min(request.delayMs ?? 50, 1_000);
             for (const character of Array.from(request.text)) {
-              await dispatchInput('Input.insertText', { text: character });
+              await dispatchInput('Input.insertText', { text: character }, ticket);
               if (perCharacterDelay > 0) await delay(perCharacterDelay);
             }
           } else {
-            await dispatchInput('Input.insertText', { text: request.text });
+            await dispatchInput('Input.insertText', { text: request.text }, ticket);
           }
-          if (request.submit === true) await dispatchKey(dispatchInput, 'Enter');
+          if (request.submit === true) await dispatchKey(dispatchInput, 'Enter', ticket);
           return { tabId, kind: request.kind, textLength: request.text.length };
         }
         case 'press': {
-          if (request.ref || request.selector) {
-            await focusNode(send, await resolveTarget());
+          let ticket: string | undefined;
+          if (request.ref || request.selector || request.query) {
+            const target = await resolveTarget();
+            await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
+            await focusNode(send, target);
+            ticket = await stampActionTarget(send, target);
           }
           if (typeof request.key !== 'string' || request.key === '') {
             throw new Error('press.key required');
           }
-          await dispatchKey(dispatchInput, request.key);
+          await dispatchKey(dispatchInput, request.key, ticket);
           return { tabId, kind: request.kind, key: request.key };
         }
         case 'hover': {
-          const point = await centerOfNode(send, await resolveTarget());
+          const target = await resolveTarget();
+          await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
+          const ticket = await stampActionTarget(send, target);
+          const point = await centerOfNode(send, target);
           await dispatchInput('Input.dispatchMouseEvent', {
             type: 'mouseMoved',
             x: point.x,
             y: point.y,
             modifiers: modifierMask(request.modifiers),
-          });
+          }, ticket);
           return { tabId, kind: request.kind, ...point };
         }
         case 'drag': {
@@ -1195,6 +1472,7 @@ export class RsbWebviewAutomation {
         }
         case 'select': {
           const target = await resolveTarget();
+          await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
           const values = Array.isArray(request.values)
             ? request.values.filter((value): value is string => typeof value === 'string')
             : [];
@@ -1216,6 +1494,10 @@ export class RsbWebviewAutomation {
           return { tabId, kind: request.kind, values: selected };
         }
         case 'resize': {
+          if (request.width === undefined && request.height === undefined) {
+            await send('Emulation.clearDeviceMetricsOverride');
+            return { tabId, kind: request.kind, reset: true };
+          }
           const width = positiveInt(request.width, 0, 16_384);
           const height = positiveInt(request.height, 0, 16_384);
           if (width <= 0 || height <= 0) throw new Error('resize width and height required');

@@ -938,6 +938,132 @@ describe('RsbWebviewBackend — MCP session id injection', () => {
   });
 });
 
+describe('RsbWebviewBackend — network actions', () => {
+  function buildNetworkEnv() {
+    let attached = false;
+    const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+    const sendCommand = vi.fn(async (method: string) => {
+      if (method === 'Network.enable') return {};
+      if (method === 'Network.getResponseBody') {
+        return { body: '{"items":[1,2,3]}', base64Encoded: false };
+      }
+      throw new Error(`unexpected command: ${method}`);
+    });
+    const wc = fakeWc();
+    Object.assign(wc, {
+      once: vi.fn(),
+      debugger: {
+        isAttached: () => attached,
+        attach: vi.fn(() => {
+          attached = true;
+        }),
+        detach: vi.fn(() => {
+          attached = false;
+        }),
+        sendCommand,
+        on: (event: string, listener: (...args: unknown[]) => void) => {
+          const group = listeners.get(event) ?? new Set();
+          group.add(listener);
+          listeners.set(event, group);
+        },
+        removeListener: (event: string, listener: (...args: unknown[]) => void) => {
+          listeners.get(event)?.delete(listener);
+        },
+      },
+    });
+    const registry = fakeRegistry(
+      [{ sessionId: 's1', tabId: 't1', webContentsId: 101 }],
+      new Map([['t1', wc]]),
+    );
+    const backend = new RsbWebviewBackend({
+      registry,
+      getActiveSessionId: () => 's1',
+      bridge: { getHostWebContents: () => null, logger: logger() },
+      logger: logger(),
+    });
+    const emitNetwork = (method: string, params: Record<string, unknown>) => {
+      for (const listener of listeners.get('message') ?? []) {
+        listener({}, method, params);
+      }
+    };
+    return { backend, emitNetwork, sendCommand };
+  }
+
+  it('dispatches request history through the selected tab', async () => {
+    const env = buildNetworkEnv();
+    await env.backend.call({ action: 'requests', targetId: 't1' } as never);
+    env.emitNetwork('Network.requestWillBeSent', {
+      requestId: 'r1',
+      type: 'Fetch',
+      request: { method: 'GET', url: 'https://example.test/api/items' },
+    });
+    env.emitNetwork('Network.responseReceived', {
+      requestId: 'r1',
+      response: { url: 'https://example.test/api/items', status: 200 },
+    });
+    env.emitNetwork('Network.loadingFinished', { requestId: 'r1' });
+
+    const res = await env.backend.call({
+      action: 'requests',
+      targetId: 't1',
+      filter: '/api/',
+    } as never);
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toMatchObject({
+      tabId: 't1',
+      requests: [
+        {
+          id: 'r1',
+          method: 'GET',
+          url: 'https://example.test/api/items',
+          status: 200,
+          ok: true,
+        },
+      ],
+    });
+  });
+
+  it('returns the body of a completed matching response', async () => {
+    const env = buildNetworkEnv();
+    await env.backend.call({ action: 'requests', targetId: 't1' } as never);
+    env.emitNetwork('Network.requestWillBeSent', {
+      requestId: 'r2',
+      type: 'XHR',
+      request: { method: 'GET', url: 'https://example.test/api/items' },
+    });
+    env.emitNetwork('Network.responseReceived', {
+      requestId: 'r2',
+      response: {
+        url: 'https://example.test/api/items',
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      },
+    });
+    env.emitNetwork('Network.loadingFinished', { requestId: 'r2' });
+
+    const res = await env.backend.call({
+      action: 'responseBody',
+      targetId: 't1',
+      url: '/api/items',
+      maxChars: 8,
+    } as never);
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toMatchObject({
+      tabId: 't1',
+      response: {
+        url: 'https://example.test/api/items',
+        body: '{"items"',
+        truncated: true,
+      },
+    });
+    expect(env.sendCommand).toHaveBeenCalledWith('Network.getResponseBody', {
+      requestId: 'r2',
+    });
+  });
+});
+
 describe('RsbWebviewBackend — unsupported actions', () => {
   it('upload returns BROWSER_RUNTIME_ACTION_FAILED with explanation', async () => {
     const backend = new RsbWebviewBackend({
