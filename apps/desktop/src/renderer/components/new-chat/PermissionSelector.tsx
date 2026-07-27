@@ -307,7 +307,8 @@ export function PermissionSelector({
                 // MorphPopover 打开后优先聚焦当前选中项；否则会聚焦列表首项，
                 // 触发“默认权限”的 focus tooltip，造成介绍与当前权限不一致。
                 data-morph-autofocus={isSelected ? '' : undefined}
-                disabled={Boolean(disabledReason)}
+                aria-disabled={Boolean(disabledReason)}
+                disabled={Boolean(disabledReason) && !isSelected}
                 onClick={() => {
                   if (disabledReason) return;
                   onPermissionModeChange(option.id);

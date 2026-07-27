@@ -13,7 +13,7 @@ export async function decodeWechatSilkToWav(
   if (signal.aborted) throw new Error('WECHAT_SILK_DECODE_ABORTED');
   const worker = new Worker(path.join(__dirname, 'silkWorker.js'));
   const id = randomUUID();
-  const bytes = Uint8Array.from(silk);
+  const bytes = silk.slice();
   try {
     return await new Promise<Uint8Array>((resolve, reject) => {
       let settled = false;
