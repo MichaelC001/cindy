@@ -254,6 +254,32 @@ describe('createBrowserMcpServer', () => {
     await h.cleanup();
   });
 
+  it('rejects blank element query strings before calling the runtime', async () => {
+    const h = await makeHarness();
+    for (const field of ['css', 'role', 'name', 'text', 'label', 'placeholder', 'testId']) {
+      const blocked = await h.client.callTool({
+        name: 'call_tool',
+        arguments: {
+          name: 'browser',
+          args: {
+            action: 'act',
+            targetId: 't1',
+            request: {
+              kind: 'click',
+              query: { [field]: '   ' },
+            },
+          },
+        },
+      });
+      expect(JSON.parse((blocked.content as Array<{ text: string }>)[0].text)).toMatchObject({
+        ok: false,
+        errorCode: 'INVALID_ARGS',
+      });
+    }
+    expect(h.calls).toHaveLength(0);
+    await h.cleanup();
+  });
+
   it('compiles extract into an act:evaluate call', async () => {
     const h = await makeHarness();
     await h.client.callTool({

@@ -122,14 +122,15 @@ function actKindSchema(deps: BrowserMcpDeps) {
 }
 
 function elementQuerySchema(deps: BrowserMcpDeps) {
+  const nonBlankString = z.string().trim().min(1);
   return z.object({
-    css: z.string().optional(),
-    role: z.string().optional(),
-    name: z.string().optional(),
-    text: z.string().optional(),
-    label: z.string().optional(),
-    placeholder: z.string().optional(),
-    testId: z.string().optional(),
+    css: nonBlankString.optional(),
+    role: nonBlankString.optional(),
+    name: nonBlankString.optional(),
+    text: nonBlankString.optional(),
+    label: nonBlankString.optional(),
+    placeholder: nonBlankString.optional(),
+    testId: nonBlankString.optional(),
     exact: z.boolean().optional(),
     index: z.number().int().nonnegative().optional(),
   }).superRefine((query, ctx) => {
