@@ -1,9 +1,32 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { __testing } from '../mediaStaging';
+import type { WechatTransport } from '@cindy/wechat-ilink';
+
+const mocks = vi.hoisted(() => ({
+  decodeWechatSilkToWav: vi.fn(),
+  resolveSafe: vi.fn(),
+  writeBlob: vi.fn(),
+}));
+
+vi.mock('../silkDecoder', () => ({
+  decodeWechatSilkToWav: mocks.decodeWechatSilkToWav,
+}));
+
+vi.mock('../../../cindy-media/blobStore', () => ({
+  resolveSafe: mocks.resolveSafe,
+  writeBlob: mocks.writeBlob,
+}));
+
+import { __testing, stageWechatTaskMedia } from '../mediaStaging';
 import { pcmS16leToWav } from '../silkWav';
 
 describe('WeChat media staging validation', () => {
+  beforeEach(() => {
+    mocks.decodeWechatSilkToWav.mockReset();
+    mocks.resolveSafe.mockReset();
+    mocks.writeBlob.mockReset();
+  });
+
   it('detects supported image bytes instead of trusting platform metadata', () => {
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     expect(__testing.detectWechatMedia({ kind: 'image' }, png)).toEqual({
@@ -40,4 +63,54 @@ describe('WeChat media staging validation', () => {
     expect(wav.readUInt16LE(34)).toBe(16);
     expect(wav.subarray(44)).toEqual(Buffer.from([1, 0, 2, 0]));
   });
+
+  it('distinguishes download, decode, and staging failures', async () => {
+    const downloadFailed = await stageWechatTaskMedia(
+      stageArgs({
+        media: [{ kind: 'image' }],
+        downloadMedia: vi.fn().mockRejectedValue(new Error('network unavailable')),
+      }),
+    );
+    expect(downloadFailed.unsupportedMedia).toEqual(['image:download-failed']);
+
+    mocks.decodeWechatSilkToWav.mockRejectedValueOnce(
+      new Error('WECHAT_SILK_DECODE_FAILED'),
+    );
+    const decodeFailed = await stageWechatTaskMedia(
+      stageArgs({
+        media: [{ kind: 'voice', voiceEncoding: 6 }],
+        downloadMedia: vi.fn().mockResolvedValue(Buffer.from('silk')),
+      }),
+    );
+    expect(decodeFailed.unsupportedMedia).toEqual(['voice:decode-failed']);
+
+    mocks.writeBlob.mockRejectedValueOnce(new Error('disk full'));
+    const stagingFailed = await stageWechatTaskMedia(
+      stageArgs({
+        media: [{ kind: 'image' }],
+        downloadMedia: vi
+          .fn()
+          .mockResolvedValue(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+      }),
+    );
+    expect(stagingFailed.unsupportedMedia).toEqual(['image:staging-failed']);
+  });
 });
+
+function stageArgs({
+  media,
+  downloadMedia,
+}: {
+  media: Parameters<typeof stageWechatTaskMedia>[0]['media'];
+  downloadMedia: ReturnType<typeof vi.fn>;
+}): Parameters<typeof stageWechatTaskMedia>[0] {
+  return {
+    bindingEpoch: 'binding-1',
+    taskId: 'task-1',
+    sessionId: 'session-1',
+    media,
+    transport: { downloadMedia } as unknown as WechatTransport,
+    signal: new AbortController().signal,
+    now: 100,
+  };
+}

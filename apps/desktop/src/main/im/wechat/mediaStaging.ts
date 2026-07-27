@@ -50,16 +50,29 @@ export async function stageWechatTaskMedia(args: {
   }
 
   for (const ref of selected) {
+    let bytes: Uint8Array;
     try {
-      let bytes = await args.transport.downloadMedia(ref, args.signal);
-      if (ref.kind === 'voice' && ref.voiceEncoding === 6) {
+      bytes = await args.transport.downloadMedia(ref, args.signal);
+    } catch (error) {
+      if (args.signal.aborted) throw error;
+      result.unsupportedMedia.push(`${ref.kind}:download-failed`);
+      continue;
+    }
+    if (ref.kind === 'voice' && ref.voiceEncoding === 6) {
+      try {
         bytes = await decodeWechatSilkToWav(bytes, args.signal);
-      }
-      const detected = detectWechatMedia(ref, bytes);
-      if (!detected) {
-        result.unsupportedMedia.push(`${ref.kind}:unsupported-format`);
+      } catch (error) {
+        if (args.signal.aborted) throw error;
+        result.unsupportedMedia.push(`${ref.kind}:decode-failed`);
         continue;
       }
+    }
+    const detected = detectWechatMedia(ref, bytes);
+    if (!detected) {
+      result.unsupportedMedia.push(`${ref.kind}:unsupported-format`);
+      continue;
+    }
+    try {
       if (detected.storage === 'cindy-media') {
         const written = await blobStore.writeBlob({
           buffer: bytes,
@@ -126,7 +139,7 @@ export async function stageWechatTaskMedia(args: {
       });
     } catch (error) {
       if (args.signal.aborted) throw error;
-      result.unsupportedMedia.push(`${ref.kind}:download-failed`);
+      result.unsupportedMedia.push(`${ref.kind}:staging-failed`);
     }
   }
   return result;
