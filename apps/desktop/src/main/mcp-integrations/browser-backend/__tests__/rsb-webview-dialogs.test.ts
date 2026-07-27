@@ -70,6 +70,10 @@ describe('RsbWebviewDialogs', () => {
       'Page.handleJavaScriptDialog',
       { accept: true, promptText: 'New name' },
     );
+    harness.emit('Page.javascriptDialogClosed', {
+      result: true,
+      userInput: 'New name',
+    });
     expect(dialogs.pending(harness.wc)).toBeUndefined();
   });
 

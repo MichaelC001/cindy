@@ -76,6 +76,10 @@ function safeSegment(value: string): string {
   return (cleaned || 'session').slice(0, 64);
 }
 
+export function artifactSessionRoot(rootDir: string, sessionId: string): string {
+  return path.join(rootDir, safeSegment(sessionId));
+}
+
 function safeFileName(raw: string): string {
   const base = raw.split(/[\\/]/).pop() ?? '';
   let cleaned = base
@@ -160,7 +164,7 @@ export class RsbWebviewArtifacts {
     }
     const session = sessionFor(wc);
     this.observeSession(session);
-    const parent = path.join(this.rootDir(), safeSegment(context.sessionId));
+    const parent = artifactSessionRoot(this.rootDir(), context.sessionId);
     await fs.promises.mkdir(parent, { recursive: true });
     captureSequence += 1;
     const directory = await fs.promises.mkdtemp(

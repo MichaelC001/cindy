@@ -215,7 +215,9 @@ export class RsbWebviewDialogs {
         ? { promptText: options.promptText }
         : {}),
     });
-    if (state.pending?.id === dialog.id) state.pending = undefined;
+    // Keep the pending record until Page.javascriptDialogClosed arrives. The
+    // close event is the authoritative signal that Chromium finished handling
+    // the modal and also records the recent outcome for action coordination.
     return { ...dialog, accepted, deferred: false };
   }
 

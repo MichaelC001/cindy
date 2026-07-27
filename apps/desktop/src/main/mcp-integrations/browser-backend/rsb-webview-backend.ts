@@ -35,7 +35,7 @@ import type {
   BrowserBackend,
 } from './types.js';
 import { RsbWebviewAutomation } from './rsb-webview-automation.js';
-import { RsbWebviewArtifacts } from './rsb-webview-artifacts.js';
+import { artifactSessionRoot, RsbWebviewArtifacts } from './rsb-webview-artifacts.js';
 import { RsbWebviewDialogs } from './rsb-webview-dialogs.js';
 import { RsbWebviewNetwork } from './rsb-webview-network.js';
 import { resolveUploadFiles } from './rsb-webview-upload-policy.js';
@@ -152,11 +152,15 @@ function isHttpResourceUrl(value: string): boolean {
   }
 }
 
-function mayStartDownload(kind: string): boolean {
-  return kind === 'click'
-    || kind === 'clickCoords'
-    || kind === 'press'
-    || kind === 'select';
+function mayStartDownload(request: BrowserActRequest): boolean {
+  return request.kind === 'click'
+    || request.kind === 'clickCoords'
+    || request.kind === 'press'
+    || request.kind === 'select'
+    || (
+      (request.kind === 'type' || request.kind === 'fill')
+      && request.submit === true
+    );
 }
 
 export class RsbWebviewBackend implements BrowserBackend {
@@ -645,7 +649,7 @@ export class RsbWebviewBackend implements BrowserBackend {
       };
 
       const captured = this.artifacts
-        && mayStartDownload(inner.kind)
+        && mayStartDownload(inner)
         ? await this.artifacts.capture(
           wc,
           {
@@ -688,7 +692,9 @@ export class RsbWebviewBackend implements BrowserBackend {
     if (!resolved.ok) return resolved.result;
     return this.withTabPin(tabId, async () => {
       const roots = [
-        ...(this.opts.artifactRoot ? [this.opts.artifactRoot()] : []),
+        ...(this.opts.artifactRoot
+          ? [artifactSessionRoot(this.opts.artifactRoot(), sessionId)]
+          : []),
         ...(this.opts.resolveUploadRoots
           ? await this.opts.resolveUploadRoots(sessionId)
           : []),

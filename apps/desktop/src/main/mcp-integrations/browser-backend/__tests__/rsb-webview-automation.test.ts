@@ -230,6 +230,22 @@ describe('RsbWebviewAutomation act', () => {
     expect(harness.executeJavaScript.mock.calls[0][0]).toContain('"type":"validate"');
   });
 
+  it('treats maxChars zero as unlimited', async () => {
+    const harness = debuggerHarness(async (method) => {
+      if (method === 'Accessibility.enable') return {};
+      if (method === 'Accessibility.getFullAXTree') return AX_TREE;
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    const result = await automation().snapshot('tab-1', harness.wc, {
+      action: 'snapshot',
+      maxChars: 0,
+    });
+
+    expect(result.snapshot).toContain('[ref=e1]');
+    expect(result.stats.lines).toBeGreaterThan(0);
+  });
+
   it('scopes snapshots to the requested frame', async () => {
     const harness = debuggerHarness(async (method, params) => {
       if (method === 'Runtime.evaluate') return { result: { objectId: 'frame-object' } };

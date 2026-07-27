@@ -1512,6 +1512,47 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it('captures downloads triggered by submit-enabled typing', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-browser-submit-download-'));
+    try {
+      const env = buildPageEnv({ uploadRoot: root });
+      const automation = (env.backend as unknown as {
+        automation: {
+          act: (
+            tabId: string,
+            wc: WebContents,
+            request: Record<string, unknown>,
+          ) => Promise<Record<string, unknown>>;
+        };
+      }).automation;
+      vi.spyOn(automation, 'act').mockImplementation(async () => {
+        env.downloadURL('https://example.test/submit-download');
+        return { tabId: 't1', kind: 'type', textLength: 1 };
+      });
+
+      const result = await env.backend.call({
+        action: 'act',
+        targetId: 't1',
+        request: {
+          kind: 'type',
+          targetId: 't1',
+          ref: 'input-1',
+          text: 'x',
+          submit: true,
+        },
+      } as never);
+
+      expect(result.ok).toBe(true);
+      expect(result.data).toMatchObject({
+        kind: 'type',
+        downloads: [{ state: 'completed' }],
+      });
+      await env.backend.dispose();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('RsbWebviewBackend — network actions', () => {

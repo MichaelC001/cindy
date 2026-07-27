@@ -284,7 +284,8 @@ function renderSnapshotTree(
 }
 
 function truncateSnapshotLines(lines: string[], maxChars: number | undefined): string[] {
-  if (maxChars === undefined) return lines;
+  // The shared browser contract uses zero as the explicit "no limit" value.
+  if (maxChars === undefined || maxChars === 0) return lines;
   if (maxChars <= 0) return [];
   const out: string[] = [];
   let used = 0;
