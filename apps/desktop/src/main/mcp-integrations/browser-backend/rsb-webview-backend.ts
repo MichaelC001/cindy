@@ -559,7 +559,7 @@ export class RsbWebviewBackend implements BrowserBackend {
       });
     }
 
-    return this.withTabPin(tabId, async () => {
+    return this.withTabPin(tabId, async (retainTabPin) => {
       await this.tryObserveNetwork(wc, tabId);
       const opening = await this.tryWatchPageDialog(wc, tabId);
       const pendingDialog = opening ? this.dialogs.pending(wc) : undefined;
@@ -642,6 +642,11 @@ export class RsbWebviewBackend implements BrowserBackend {
             err,
           });
         });
+        retainTabPin();
+        void actionPromise.then(
+          () => this.opts.registry.unpin(tabId),
+          () => this.opts.registry.unpin(tabId),
+        );
         return {
           tabId,
           kind: inner.kind,
@@ -882,7 +887,7 @@ export class RsbWebviewBackend implements BrowserBackend {
       for (;;) {
         const wc = this.opts.registry.getWebContentsByTabId(tabId);
         if (wc) {
-          await this.tryObserveNetwork(wc, tabId);
+          await this.tryObservePageSignals(wc, tabId);
           return;
         }
         if (Date.now() >= deadline) {
@@ -926,12 +931,18 @@ export class RsbWebviewBackend implements BrowserBackend {
    * acceptable until real concurrent use-cases emerge, then upgrade to
    * refcount.
    */
-  private async withTabPin<T>(tabId: string, body: () => Promise<T>): Promise<T> {
+  private async withTabPin<T>(
+    tabId: string,
+    body: (retainTabPin: () => void) => Promise<T>,
+  ): Promise<T> {
     this.opts.registry.pin(tabId);
+    let retained = false;
     try {
-      return await body();
+      return await body(() => {
+        retained = true;
+      });
     } finally {
-      this.opts.registry.unpin(tabId);
+      if (!retained) this.opts.registry.unpin(tabId);
     }
   }
 

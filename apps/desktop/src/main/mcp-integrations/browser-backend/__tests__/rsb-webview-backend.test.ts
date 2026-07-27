@@ -405,8 +405,9 @@ describe('RsbWebviewBackend — act:evaluate', () => {
     let attached = false;
     const sendCommand = vi.fn(async (
       method: string,
-      _params?: Record<string, unknown>,
+      params?: Record<string, unknown>,
     ): Promise<unknown> => {
+      void params;
       if (method === 'Runtime.evaluate' || method === 'Runtime.callFunctionOn') {
         return { result: { value: initialReturn } };
       }
@@ -445,7 +446,7 @@ describe('RsbWebviewBackend — act:evaluate', () => {
   }
 
   it('runs the fn in the guest and returns its result + as variable name', async () => {
-    const { backend, wc, sendCommand } = buildEvalEnv({ posts: [1, 2, 3] });
+    const { backend, sendCommand } = buildEvalEnv({ posts: [1, 2, 3] });
     const res = await backend.call({
       action: 'act',
       targetId: 't1',
@@ -1116,7 +1117,7 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
         listener({}, method, params);
       }
     };
-    return { backend, emit, sendCommand, downloadURL, wc, backendLogger };
+    return { backend, emit, sendCommand, downloadURL, wc, backendLogger, registry };
   }
 
   it('validates upload paths before assigning files to the page input', async () => {
@@ -1346,6 +1347,7 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
           dialog: { type: 'confirm', message: 'Continue?' },
         },
       });
+      expect(env.registry.pinHistory).toEqual([{ op: 'pin', tabId: 't1' }]);
       const dialogId = (blocked.data as {
         barrier: { dialog: { id: string } };
       }).barrier.dialog.id;
@@ -1360,6 +1362,15 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
         tabId: 't1',
         armed: true,
         retryRequired: true,
+      });
+      releaseAction();
+      await vi.waitFor(() => {
+        expect(env.registry.pinHistory).toEqual([
+          { op: 'pin', tabId: 't1' },
+          { op: 'pin', tabId: 't1' },
+          { op: 'unpin', tabId: 't1' },
+          { op: 'unpin', tabId: 't1' },
+        ]);
       });
     } finally {
       releaseAction();
