@@ -221,7 +221,7 @@ export class TencentIlinkTransport implements WechatTransport {
       ref: {
         kind: request.kind,
         encryptedQuery,
-        aesKeyBase64: Buffer.from(prepared.aesKeyHex).toString("base64"),
+        aesKeyBase64: prepared.aesKey.toString("base64"),
         byteLength: request.bytes.byteLength,
         encryptedByteLength: prepared.ciphertext.byteLength,
       },

@@ -317,6 +317,17 @@ describe("iLink HTTP boundary", () => {
     expect(uploaded.ref.encryptedByteLength).toBe(
       prepareWechatUpload(bytes).ciphertext.byteLength,
     );
+    const decodedAesKey = Buffer.from(
+      String(uploaded.ref.aesKeyBase64),
+      "base64",
+    );
+    expect(decodedAesKey).toHaveLength(16);
+    const uploadUrlRequest = calls.find(({ url }) =>
+      url.endsWith("/ilink/bot/getuploadurl"),
+    );
+    expect(JSON.parse(String(uploadUrlRequest?.init?.body))).toMatchObject({
+      aeskey: decodedAesKey.toString("hex"),
+    });
 
     await expect(
       transport.sendMedia(
@@ -345,6 +356,7 @@ describe("iLink HTTP boundary", () => {
               mid_size: uploaded.ref.encryptedByteLength,
               media: {
                 encrypt_query_param: "download-token",
+                aes_key: uploaded.ref.aesKeyBase64,
                 encrypt_type: 1,
               },
             },
