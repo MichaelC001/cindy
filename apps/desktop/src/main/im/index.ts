@@ -211,8 +211,17 @@ export function startImOrchestrators(): void {
         canceled: false as const,
         state: writeWechatWorkingDir(result.filePaths[0]),
       };
-    } catch {
-      log.warn('failed to save user-picked personal WeChat working directory');
+    } catch (error) {
+      log.warn('failed to save user-picked personal WeChat working directory', {
+        errorCode:
+          typeof error === 'object' &&
+          error !== null &&
+          'code' in error &&
+          typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code
+            : 'UNKNOWN',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
       throw new Error('WECHAT_WORKING_DIR_UPDATE_FAILED');
     }
   });

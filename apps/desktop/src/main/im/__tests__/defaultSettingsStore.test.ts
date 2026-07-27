@@ -225,7 +225,7 @@ describe('im default settings store', () => {
     (permissionMode) => {
       expect(() =>
         writeImDefaultSettingsPatch({ permissionMode }, 'wechat'),
-      ).toThrow('WECHAT_FULL_ACCESS_UNSUPPORTED');
+      ).toThrow('WECHAT_PERMISSION_MODE_UNSUPPORTED');
       expect(readImDefaultSettings('wechat').permissionMode).toBe('auto');
     },
   );

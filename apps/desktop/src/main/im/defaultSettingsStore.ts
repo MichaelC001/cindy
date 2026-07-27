@@ -220,7 +220,7 @@ export function writeImDefaultSettingsPatch(
   channel?: ImDefaultSettingsChannel,
 ): OverrideSettingsState<ImDefaultSettings> {
   if (channel === 'wechat' && isWechatUnsupportedPermissionMode(patch.permissionMode)) {
-    throw new Error('WECHAT_FULL_ACCESS_UNSUPPORTED');
+    throw new Error('WECHAT_PERMISSION_MODE_UNSUPPORTED');
   }
   const document = store.read();
   const current = channel ? document.channels[channel] : document.global;
