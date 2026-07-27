@@ -52,6 +52,18 @@ describe("pure protocol utilities", () => {
     ).toBe("```\n##### untouched ![x](url)\n```\n`*中文*` 中文");
   });
 
+  it("filters image syntax in linear time for adversarial incomplete input", () => {
+    const repeatedOpen = "![".repeat(50_000);
+    const repeatedDestination = "![](".repeat(50_000);
+    expect(filterWechatMarkdown(repeatedOpen)).toBe(repeatedOpen);
+    expect(filterWechatMarkdown(repeatedDestination)).toBe(
+      repeatedDestination,
+    );
+    expect(
+      filterWechatMarkdown("before ![broken] text ![ok](url) after"),
+    ).toBe("before ![broken] text  after");
+  });
+
   it("rejects incomplete inbound messages before they reach the host", () => {
     expect(decodeInboundMessage({ message_id: 1 })).toBeNull();
     expect(
