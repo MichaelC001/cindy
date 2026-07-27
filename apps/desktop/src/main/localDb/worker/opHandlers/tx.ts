@@ -5,6 +5,19 @@ import type Database from 'better-sqlite3';
 
 import type { DbTxName } from '../../client/tx/types.js';
 import { normalizeWorkingDirForStorage } from '../../../../shared/workingDir.js';
+import {
+  wechatActivateBindingEpoch,
+  wechatCloseBindingEpoch,
+  wechatCommitInterrupted,
+  wechatCommitPollBatch,
+  wechatCommitTerminal,
+  wechatLeaseNextTask,
+  wechatMarkAccepted,
+  wechatMarkOutboxDelivered,
+  wechatRecordOutboxFailure,
+  wechatStopAll,
+  wechatUnbindCleanup,
+} from './wechatTx.js';
 
 const LOCAL_DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
@@ -58,6 +71,28 @@ export function tx(db: Database.Database, args: unknown): unknown {
       return imDeleteBindings(db, txArgs);
     case 'im.replaceBinding':
       return imReplaceBinding(db, txArgs);
+    case 'wechatActivateBindingEpoch':
+      return wechatActivateBindingEpoch(db, txArgs);
+    case 'wechatCommitPollBatch':
+      return wechatCommitPollBatch(db, txArgs);
+    case 'wechatLeaseNextTask':
+      return wechatLeaseNextTask(db, txArgs);
+    case 'wechatMarkAccepted':
+      return wechatMarkAccepted(db, txArgs);
+    case 'wechatCommitInterrupted':
+      return wechatCommitInterrupted(db, txArgs);
+    case 'wechatCommitTerminal':
+      return wechatCommitTerminal(db, txArgs);
+    case 'wechatMarkOutboxDelivered':
+      return wechatMarkOutboxDelivered(db, txArgs);
+    case 'wechatRecordOutboxFailure':
+      return wechatRecordOutboxFailure(db, txArgs);
+    case 'wechatStopAll':
+      return wechatStopAll(db, txArgs);
+    case 'wechatCloseBindingEpoch':
+      return wechatCloseBindingEpoch(db, txArgs);
+    case 'wechatUnbindCleanup':
+      return wechatUnbindCleanup(db, txArgs);
     case 'session.importShare':
       return sessionImportShare(db, txArgs);
     default:

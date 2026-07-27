@@ -1,0 +1,293 @@
+import type { DbClient } from '../../localDb/client/DbClient.js';
+import type {
+  WechatActivateBindingEpochResult,
+  WechatCommitPollBatchResult,
+  WechatCommitTerminalResult,
+  WechatMarkOutboxDeliveredResult,
+  WechatOutboxChunkInput,
+  WechatOutboxKind,
+  WechatPollFileAttachmentInput,
+  WechatPollMediaBlobInput,
+  WechatPollMediaRefInput,
+  WechatRecordOutboxFailureResult,
+  WechatStopAllResult,
+  WechatUnbindCleanupResult,
+} from '../../localDb/client/tx/types.js';
+import { decryptWechatContextToken, encryptWechatContextToken } from './contextCrypto.js';
+
+const DEFAULT_TASK_TTL_MS = 30 * 60_000;
+const DEFAULT_LEASE_MS = 60_000;
+
+export interface WechatInboundTaskInput {
+  id: string;
+  platformMessageId: string;
+  platformSeq: number;
+  peerId: string;
+  receivedAt: number;
+  platformCreatedAt: number;
+  sessionId: string;
+  conversationEpoch: number;
+  payloadJson: string;
+  contextToken: string;
+  overloadReply?: {
+    outboxId: string;
+    clientId: string;
+    text: string;
+  };
+}
+
+export interface WechatCommitBatchInput {
+  bindingEpoch: string;
+  expectedCursor: string;
+  nextCursor: string;
+  now: number;
+  messages: WechatInboundTaskInput[];
+  mediaBlobs?: WechatPollMediaBlobInput[];
+  mediaRefs?: WechatPollMediaRefInput[];
+  fileAttachments?: WechatPollFileAttachmentInput[];
+  maxQueuedTasks?: number;
+}
+
+export interface WechatTask {
+  id: string;
+  bindingEpoch: string;
+  peerId: string;
+  sessionId: string;
+  conversationEpoch: number;
+  payloadJson: string;
+  contextToken: string;
+  attempts: number;
+  receivedAt: number;
+  expiresAt: number;
+}
+
+export interface WechatOutboxRecord {
+  id: string;
+  taskId: string;
+  clientId: string;
+  kind: WechatOutboxKind;
+  chunkIndex: number;
+  text: string;
+  mediaJson: string;
+  attempts: number;
+  contextToken: string;
+}
+
+interface WechatOutboxRow extends Omit<WechatOutboxRecord, 'contextToken'> {
+  bindingEpoch: string;
+  contextNonce: string;
+  contextCiphertext: string;
+  contextTag: string;
+}
+
+export class WechatTaskStore {
+  readonly #db: DbClient;
+  readonly #dataKey: Buffer;
+
+  constructor(db: DbClient, dataKey: Uint8Array) {
+    if (dataKey.byteLength !== 32) throw new Error('WeChat data key must be 32 bytes.');
+    this.#db = db;
+    this.#dataKey = Buffer.from(dataKey);
+  }
+
+  destroy(): void {
+    this.#dataKey.fill(0);
+  }
+
+  activateBindingEpoch(args: {
+    bindingEpoch: string;
+    expectedActiveEpoch: string | null;
+    initialCursor?: string;
+    now: number;
+  }): Promise<WechatActivateBindingEpochResult> {
+    return this.#db.tx('wechatActivateBindingEpoch', {
+      bindingEpoch: args.bindingEpoch,
+      expectedActiveEpoch: args.expectedActiveEpoch,
+      initialCursor: args.initialCursor ?? '',
+      now: args.now,
+    });
+  }
+
+  commitPollBatch(input: WechatCommitBatchInput): Promise<WechatCommitPollBatchResult> {
+    return this.#db.tx('wechatCommitPollBatch', {
+      bindingEpoch: input.bindingEpoch,
+      expectedCursor: input.expectedCursor,
+      nextCursor: input.nextCursor,
+      now: input.now,
+      messages: input.messages.map((message) => ({
+        id: message.id,
+        platformMessageId: message.platformMessageId,
+        platformSeq: message.platformSeq,
+        peerId: message.peerId,
+        receivedAt: message.receivedAt,
+        platformCreatedAt: message.platformCreatedAt,
+        expiresAt: message.receivedAt + DEFAULT_TASK_TTL_MS,
+        sessionId: message.sessionId,
+        conversationEpoch: message.conversationEpoch,
+        payloadJson: message.payloadJson,
+        context: encryptWechatContextToken(
+          message.contextToken,
+          this.#dataKey,
+          input.bindingEpoch,
+          message.id,
+        ),
+        overloadReply: message.overloadReply,
+      })),
+      mediaBlobs: input.mediaBlobs ?? [],
+      mediaRefs: input.mediaRefs ?? [],
+      fileAttachments: input.fileAttachments ?? [],
+      maxQueuedTasks: input.maxQueuedTasks,
+    });
+  }
+
+  async leaseNextTask(args: {
+    bindingEpoch: string;
+    now: number;
+    leaseMs?: number;
+  }): Promise<WechatTask | null> {
+    const leased = await this.#db.tx('wechatLeaseNextTask', {
+      bindingEpoch: args.bindingEpoch,
+      now: args.now,
+      leaseUntil: args.now + (args.leaseMs ?? DEFAULT_LEASE_MS),
+    });
+    if (!leased) return null;
+    return {
+      id: leased.id,
+      bindingEpoch: leased.bindingEpoch,
+      peerId: leased.peerId,
+      sessionId: leased.sessionId,
+      conversationEpoch: leased.conversationEpoch,
+      payloadJson: leased.payloadJson,
+      contextToken: decryptWechatContextToken(
+        leased.context,
+        this.#dataKey,
+        leased.bindingEpoch,
+        leased.id,
+      ),
+      attempts: leased.attempts,
+      receivedAt: leased.receivedAt,
+      expiresAt: leased.expiresAt,
+    };
+  }
+
+  markAccepted(bindingEpoch: string, taskId: string): Promise<boolean> {
+    return this.#db.tx('wechatMarkAccepted', { bindingEpoch, taskId });
+  }
+
+  commitInterrupted(args: {
+    bindingEpoch: string;
+    taskId: string;
+    now: number;
+    errorCode: string;
+    outbox?: WechatOutboxChunkInput[];
+    contextToken?: string;
+  }): Promise<boolean> {
+    const { contextToken, ...txArgs } = args;
+    return this.#db.tx('wechatCommitInterrupted', {
+      ...txArgs,
+      context:
+        contextToken === undefined
+          ? undefined
+          : encryptWechatContextToken(contextToken, this.#dataKey, args.bindingEpoch, args.taskId),
+    });
+  }
+
+  commitTerminal(args: {
+    bindingEpoch: string;
+    taskId: string;
+    now: number;
+    outbox: WechatOutboxChunkInput[];
+  }): Promise<WechatCommitTerminalResult> {
+    return this.#db.tx('wechatCommitTerminal', args);
+  }
+
+  async listDueOutbox(
+    bindingEpoch: string,
+    now: number,
+    limit = 20,
+  ): Promise<WechatOutboxRecord[]> {
+    const rows = await this.#db.query<WechatOutboxRow>(
+      `SELECT
+         o.id,
+         o.binding_epoch AS bindingEpoch,
+         o.task_id AS taskId,
+         o.client_id AS clientId,
+         o.kind,
+         o.chunk_index AS chunkIndex,
+         o.text,
+         o.media_json AS mediaJson,
+         o.attempts,
+         i.context_nonce AS contextNonce,
+         i.context_ciphertext AS contextCiphertext,
+         i.context_tag AS contextTag
+       FROM wechat_outbox o
+       INNER JOIN wechat_inbox i
+         ON i.binding_epoch = o.binding_epoch AND i.id = o.task_id
+       WHERE o.binding_epoch = ? AND o.status = 'pending' AND o.next_retry_at <= ?
+       ORDER BY o.created_at ASC, o.chunk_index ASC
+       LIMIT ?`,
+      [bindingEpoch, now, Math.max(1, Math.min(100, Math.floor(limit)))],
+    );
+    return rows.map(({ contextNonce, contextCiphertext, contextTag, ...row }) => ({
+      ...row,
+      contextToken: decryptWechatContextToken(
+        {
+          nonce: contextNonce,
+          ciphertext: contextCiphertext,
+          tag: contextTag,
+        },
+        this.#dataKey,
+        row.bindingEpoch,
+        row.taskId,
+      ),
+    }));
+  }
+
+  async claimOutbox(bindingEpoch: string, outboxId: string): Promise<boolean> {
+    const result = await this.#db.exec(
+      `UPDATE wechat_outbox
+       SET status = 'sending', attempts = attempts + 1
+       WHERE binding_epoch = ? AND id = ? AND status = 'pending'`,
+      [bindingEpoch, outboxId],
+    );
+    return result.changes === 1;
+  }
+
+  markOutboxDelivered(
+    bindingEpoch: string,
+    outboxId: string,
+    deliveredAt: number,
+  ): Promise<WechatMarkOutboxDeliveredResult> {
+    return this.#db.tx('wechatMarkOutboxDelivered', {
+      bindingEpoch,
+      outboxId,
+      deliveredAt,
+    });
+  }
+
+  recordOutboxFailure(args: {
+    bindingEpoch: string;
+    outboxId: string;
+    nextRetryAt: number;
+    terminal: boolean;
+    errorCode: string;
+  }): Promise<WechatRecordOutboxFailureResult> {
+    return this.#db.tx('wechatRecordOutboxFailure', args);
+  }
+
+  stopAll(args: {
+    bindingEpoch: string;
+    now: number;
+    errorCode: string;
+  }): Promise<WechatStopAllResult> {
+    return this.#db.tx('wechatStopAll', args);
+  }
+
+  closeBindingEpoch(bindingEpoch: string, now: number): Promise<{ closed: boolean }> {
+    return this.#db.tx('wechatCloseBindingEpoch', { bindingEpoch, now });
+  }
+
+  unbindCleanup(bindingEpoch: string): Promise<WechatUnbindCleanupResult> {
+    return this.#db.tx('wechatUnbindCleanup', { bindingEpoch });
+  }
+}

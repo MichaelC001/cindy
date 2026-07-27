@@ -311,6 +311,7 @@ wechatMarkAccepted
 wechatCommitInterrupted
 wechatCommitTerminal
 wechatMarkOutboxDelivered
+wechatRecordOutboxFailure
 wechatStopAll
 wechatCloseBindingEpoch
 wechatUnbindCleanup
