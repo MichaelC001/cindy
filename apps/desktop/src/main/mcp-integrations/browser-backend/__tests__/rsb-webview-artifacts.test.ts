@@ -212,6 +212,34 @@ describe('RsbWebviewArtifacts', () => {
     expect(fs.existsSync(item.savedPath())).toBe(false);
   });
 
+  it('counts streaming bytes beyond a declared total toward the capture quota', async () => {
+    const harness = artifactHarness();
+    const items = Array.from({ length: 4 }, () => (
+      downloadItem('completed', { totalBytes: 16 * 1024 * 1024 })
+    ));
+    const artifacts = new RsbWebviewArtifacts(() => root, { warn: vi.fn() });
+
+    const result = await artifacts.capture(
+      harness.wc,
+      { sessionId: 'quota-known-total-overrun', timeoutMs: 1000 },
+      async () => {
+        for (const item of items) harness.emitDownload(item);
+        items[3].update(17 * 1024 * 1024);
+        setTimeout(() => {
+          for (const item of items) item.finish();
+        }, 0);
+      },
+    );
+
+    expect(items[3].cancel).toHaveBeenCalledTimes(1);
+    expect(result.downloads.map((artifact) => artifact.state)).toEqual([
+      'completed',
+      'completed',
+      'completed',
+      'cancelled',
+    ]);
+  });
+
   it('bounds both download count and total bytes for one action', async () => {
     const harness = artifactHarness();
     const items = Array.from({ length: 9 }, () => (

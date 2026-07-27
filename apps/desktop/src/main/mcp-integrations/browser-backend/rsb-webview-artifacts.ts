@@ -385,8 +385,12 @@ export class RsbWebviewArtifacts {
 
   private receivedBytes(capture: ArtifactCapture): number {
     return capture.reservedBytes + capture.pending.reduce((sum, pending) => {
-      if (pending.knownTotalBytes || pending.limitReason) return sum;
-      return sum + (this.positiveBytes(pending.item.getReceivedBytes()) ?? 0);
+      if (pending.limitReason) return sum;
+      const received = this.positiveBytes(pending.item.getReceivedBytes()) ?? 0;
+      if (pending.knownTotalBytes) {
+        return sum + Math.max(0, received - pending.knownTotalBytes);
+      }
+      return sum + received;
     }, 0);
   }
 

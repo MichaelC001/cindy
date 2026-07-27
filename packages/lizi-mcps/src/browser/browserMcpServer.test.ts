@@ -190,6 +190,40 @@ describe('createBrowserMcpServer', () => {
     await h.cleanup();
   });
 
+  it('re-evaluates resource download support when the backend changes', async () => {
+    let downloadsSupported = true;
+    const h = await makeHarness({
+      supportsResourceDownloads: () => downloadsSupported,
+    });
+    const request = {
+      name: 'browser',
+      args: {
+        action: 'act',
+        targetId: 't1',
+        request: {
+          kind: 'saveResource',
+          url: 'https://cdn.example.test/archive.zip',
+        },
+      },
+    };
+
+    await h.client.callTool({ name: 'call_tool', arguments: request });
+    expect(h.calls).toHaveLength(1);
+
+    downloadsSupported = false;
+    const blocked = await h.client.callTool({ name: 'call_tool', arguments: request });
+    expect(h.calls).toHaveLength(1);
+    expect(JSON.parse((blocked.content as Array<{ text: string }>)[0].text)).toMatchObject({
+      ok: false,
+      errorCode: 'INVALID_ARGS',
+    });
+
+    downloadsSupported = true;
+    await h.client.callTool({ name: 'call_tool', arguments: request });
+    expect(h.calls).toHaveLength(2);
+    await h.cleanup();
+  });
+
   it('compiles extract into an act:evaluate call', async () => {
     const h = await makeHarness();
     await h.client.callTool({

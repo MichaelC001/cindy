@@ -107,10 +107,14 @@ function getRuntime(deps: BrowserMcpDeps): BrowserControlRuntime {
 }
 
 function actKindSchema(deps: BrowserMcpDeps) {
-  const kinds = deps.supportsResourceDownloads?.() === false
-    ? ACT_KINDS.filter((kind) => kind !== 'saveResource')
-    : [...ACT_KINDS];
-  return z.enum(kinds as [typeof ACT_KINDS[number], ...typeof ACT_KINDS[number][]]);
+  return z.enum(ACT_KINDS).superRefine((kind, ctx) => {
+    if (kind === 'saveResource' && deps.supportsResourceDownloads?.() === false) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '当前浏览器后端不支持 saveResource',
+      });
+    }
+  });
 }
 
 function isSafeResourceUrl(value: string): boolean {
