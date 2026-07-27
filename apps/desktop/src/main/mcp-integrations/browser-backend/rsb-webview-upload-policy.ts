@@ -25,9 +25,13 @@ function isInside(parent: string, child: string): boolean {
 
 function isBlockedFile(filePath: string): boolean {
   const name = path.basename(filePath).toLowerCase();
+  const sensitiveDirectory = filePath
+    .split(/[\\/]+/)
+    .some((segment) => ['.git', '.ssh'].includes(segment.toLowerCase()));
   return BLOCKED_FILE_NAMES.has(name)
     || name.startsWith('.env.')
-    || name.endsWith('.key');
+    || name.endsWith('.key')
+    || sensitiveDirectory;
 }
 
 /**
@@ -40,10 +44,10 @@ export async function resolveUploadFiles(
   allowedRoots: string[],
 ): Promise<string[]> {
   if (!Array.isArray(candidates) || candidates.length === 0) {
-    throw new Error('upload.paths must contain at least one file');
+    throw new Error('paths must contain at least one file');
   }
   if (candidates.length > MAX_FILE_COUNT) {
-    throw new Error(`upload accepts at most ${MAX_FILE_COUNT} files`);
+    throw new Error(`paths accepts at most ${MAX_FILE_COUNT} files`);
   }
 
   const roots: string[] = [];

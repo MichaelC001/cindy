@@ -59,7 +59,7 @@ interface ArtifactCapture {
 // A click can schedule a download after the event handler returns (for
 // example, a page may first fetch a signed URL). Keep this wait bounded while
 // allowing normal deferred download starts to be observed.
-const DOWNLOAD_GRACE_MS = 1_000;
+const DOWNLOAD_GRACE_MS = 2_000;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60_000;
 const MAX_DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const MAX_DOWNLOADS_PER_CAPTURE = 8;

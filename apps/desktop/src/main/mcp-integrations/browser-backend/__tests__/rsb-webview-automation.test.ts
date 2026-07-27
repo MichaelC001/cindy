@@ -117,7 +117,7 @@ describe('RsbWebviewAutomation snapshot', () => {
     expect(result.nodes).toHaveLength(1);
     expect(harness.sendCommand).toHaveBeenCalledWith(
       'Accessibility.getPartialAXTree',
-      { backendNodeId: 2, fetchRelatives: false },
+      { backendNodeId: 2, fetchRelatives: true },
     );
   });
 
@@ -375,10 +375,21 @@ describe('RsbWebviewAutomation act', () => {
   });
 
   it('types into a selector and optionally submits', async () => {
-    const harness = debuggerHarness(async (method) => {
+    const harness = debuggerHarness(async (method, params) => {
       if (method === 'Runtime.evaluate') return { result: { objectId: 'input-object' } };
       if (method === 'DOM.describeNode') return { node: { backendNodeId: 5 } };
-      if (method === 'Runtime.callFunctionOn') return { result: { value: { ok: true } } };
+      if (method === 'Runtime.callFunctionOn') {
+        const declaration = String(params?.functionDeclaration ?? '');
+        return {
+          result: {
+            value:
+              declaration.includes('options.editable')
+              || declaration.includes('function(requireEditable)')
+                ? { ok: true }
+                : false,
+          },
+        };
+      }
       throw new Error(`unexpected command: ${method}`);
     });
 
@@ -395,13 +406,18 @@ describe('RsbWebviewAutomation act', () => {
       textLength: 18,
     });
     expect(harness.executeJavaScript).toHaveBeenCalledTimes(3);
-    expect(harness.executeJavaScript.mock.calls[0][0]).toContain(
-      '"method":"Input.insertText","params":{"text":"hello@example.test"}',
+    const insertTextCall = harness.executeJavaScript.mock.calls.find(([script]) =>
+      String(script).includes(
+        '"method":"Input.insertText","params":{"text":"hello@example.test"}',
+      ),
     );
-    expect(harness.executeJavaScript.mock.calls[0][0]).toContain('"targetTicket":"rsb-');
-    expect(harness.executeJavaScript.mock.calls[1][0]).toContain(
-      '"method":"Input.dispatchKeyEvent","params":{"type":"keyDown","key":"Enter"',
+    expect(insertTextCall?.[0]).toContain('"targetTicket":"rsb-');
+    const enterKeyDownCall = harness.executeJavaScript.mock.calls.find(([script]) =>
+      String(script).includes(
+        '"method":"Input.dispatchKeyEvent","params":{"type":"keyDown","key":"Enter"',
+      ),
     );
+    expect(enterKeyDownCall).toBeDefined();
     expect(harness.sendCommand).not.toHaveBeenCalledWith(
       expect.stringMatching(/^Input\./),
       expect.anything(),

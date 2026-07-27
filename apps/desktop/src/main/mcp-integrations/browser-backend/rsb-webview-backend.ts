@@ -24,6 +24,7 @@ import type {
   BrowserControlRequest,
   BrowserControlResult,
 } from '@cindy/browser-control-runtime';
+import { isPublicHttpResourceUrl } from '@cindy/browser-control-runtime';
 import type { WebContents } from 'electron';
 
 import type { TabRegistry } from '../../rsb-browser-bridge/registry.js';
@@ -139,19 +140,6 @@ function safeTabMeta(wc: WebContents): { url: string; title: string } {
   return { url, title };
 }
 
-function isHttpResourceUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return (
-      (parsed.protocol === 'http:' || parsed.protocol === 'https:')
-      && !parsed.username
-      && !parsed.password
-    );
-  } catch {
-    return false;
-  }
-}
-
 function mayStartDownload(request: BrowserActRequest): boolean {
   return request.kind === 'click'
     || request.kind === 'clickCoords'
@@ -170,6 +158,8 @@ export class RsbWebviewBackend implements BrowserBackend {
   private readonly dialogs: RsbWebviewDialogs;
   private readonly network: RsbWebviewNetwork;
   private readonly activity: BrowserActivity[] = [];
+  private readonly activeCalls = new Set<Promise<BackendResult>>();
+  private disposing = false;
 
   constructor(private readonly opts: RsbWebviewBackendOptions) {
     this.automation = new RsbWebviewAutomation(opts.logger);
@@ -192,25 +182,36 @@ export class RsbWebviewBackend implements BrowserBackend {
   }
 
   async call(request: BackendRequest): Promise<BackendResult> {
+    if (this.disposing) return actionFailed(request.action, 'browser backend is disposing');
+    const operation = (async (): Promise<BackendResult> => {
+      try {
+        const result = await this.dispatch(request);
+        this.recordActivity(request, result.ok);
+        return result;
+      } catch (err) {
+        this.opts.logger.warn('rsb-webview backend.call threw', {
+          action: request.action,
+          err,
+        });
+        const result = actionFailed(
+          request.action,
+          err instanceof Error ? err.message : String(err),
+        );
+        this.recordActivity(request, false);
+        return result;
+      }
+    })();
+    this.activeCalls.add(operation);
     try {
-      const result = await this.dispatch(request);
-      this.recordActivity(request, result.ok);
-      return result;
-    } catch (err) {
-      this.opts.logger.warn('rsb-webview backend.call threw', {
-        action: request.action,
-        err,
-      });
-      const result = actionFailed(
-        request.action,
-        err instanceof Error ? err.message : String(err),
-      );
-      this.recordActivity(request, false);
-      return result;
+      return await operation;
+    } finally {
+      this.activeCalls.delete(operation);
     }
   }
 
   async dispose(): Promise<void> {
+    this.disposing = true;
+    await Promise.allSettled([...this.activeCalls]);
     // Switching backends never closes the user's tabs. Only the listeners and
     // debugger attachments owned by this backend are released.
     await this.artifacts?.dispose();
@@ -506,7 +507,7 @@ export class RsbWebviewBackend implements BrowserBackend {
 
     if (inner.kind === 'saveResource') {
       if (!this.artifacts) return actionFailed(req.action, 'managed downloads are unavailable');
-      if (typeof inner.url !== 'string' || !isHttpResourceUrl(inner.url)) {
+      if (typeof inner.url !== 'string' || !isPublicHttpResourceUrl(inner.url)) {
         return actionFailed(req.action, 'saveResource.url must be an http(s) URL from snapshot(urls:true)');
       }
       this.automation.assertResource(tabId, inner.url);

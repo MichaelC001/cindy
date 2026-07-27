@@ -97,6 +97,7 @@ interface PageInspection {
 }
 
 const INTERACTIVE_ROLES = new Set([
+  'alertdialog',
   'button',
   'checkbox',
   'combobox',
@@ -219,14 +220,24 @@ function buildSnapshotTree(nodes: RawAxNode[]): { tree: SnapshotTreeNode[]; root
       .map((node) => [node.nodeId, node]),
   );
   const childIndexes = new Set<number>();
-  for (let index = 0; index < tree.length; index += 1) {
-    const raw = rawById.get(tree[index].nodeId);
+  const visibleChildren = (rawId: string, seen = new Set<string>()): number[] => {
+    if (seen.has(rawId)) return [];
+    seen.add(rawId);
+    const raw = rawById.get(rawId);
+    const result: number[] = [];
     for (const childId of raw?.childIds ?? []) {
       const childIndex = byId.get(childId);
-      if (childIndex === undefined) continue;
-      tree[index].children.push(childIndex);
-      childIndexes.add(childIndex);
+      if (childIndex !== undefined) {
+        result.push(childIndex);
+      } else {
+        result.push(...visibleChildren(childId, new Set(seen)));
+      }
     }
+    return result;
+  };
+  for (let index = 0; index < tree.length; index += 1) {
+    tree[index].children = visibleChildren(tree[index].nodeId);
+    for (const childIndex of tree[index].children) childIndexes.add(childIndex);
   }
 
   const roots = tree.map((_node, index) => index).filter((index) => !childIndexes.has(index));
@@ -319,14 +330,18 @@ async function resolveHref(
   };
   const objectId = resolved.object?.objectId;
   if (!objectId) return undefined;
-  const result = await send('Runtime.callFunctionOn', {
-    objectId,
-    functionDeclaration: 'function() { return typeof this.href === "string" ? this.href : ""; }',
-    returnByValue: true,
-  }) as { result?: { value?: unknown } };
-  return typeof result.result?.value === 'string' && result.result.value !== ''
-    ? result.result.value
-    : undefined;
+  try {
+    const result = await send('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: 'function() { return typeof this.href === "string" ? this.href : ""; }',
+      returnByValue: true,
+    }) as { result?: { value?: unknown } };
+    return typeof result.result?.value === 'string' && result.result.value !== ''
+      ? result.result.value
+      : undefined;
+  } finally {
+    await send('Runtime.releaseObject', { objectId }).catch(() => undefined);
+  }
 }
 
 async function inspectPage(
@@ -454,15 +469,17 @@ async function resolveSelector(
   send: DebuggerTransport['sendCommand'],
   selector: string,
   timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
+  options?: { allowHidden?: boolean },
 ): Promise<ResolvedNode> {
-  return resolveElementQuery(send, { css: selector }, timeoutMs);
+  return resolveElementQuery(send, { css: selector }, timeoutMs, options);
 }
 
 async function resolveFrameRoot(
   send: DebuggerTransport['sendCommand'],
   selector: string,
+  timeoutMs?: number,
 ): Promise<{ frameId: string; nodeId?: number }> {
-  const frame = await resolveSelector(send, selector);
+  const frame = await resolveSelector(send, selector, timeoutMs);
   const described = await send('DOM.describeNode', {
     backendNodeId: frame.backendDOMNodeId,
     depth: 1,
@@ -508,6 +525,7 @@ async function resolveElementQuery(
   send: DebuggerTransport['sendCommand'],
   query: BrowserElementQuery,
   timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
+  options?: { allowHidden?: boolean },
 ): Promise<ResolvedNode> {
   if (
     query.index !== undefined
@@ -532,6 +550,7 @@ async function resolveElementQuery(
     DEFAULT_WAIT_TIMEOUT_MS,
     MAX_WAIT_TIMEOUT_MS,
   );
+  const allowHidden = options?.allowHidden === true;
   const evaluated = await send('Runtime.evaluate', {
     expression: `(() => {
       const query = ${JSON.stringify(query)};
@@ -546,6 +565,22 @@ async function resolveElementQuery(
         const explicit = element.getAttribute("role");
         if (explicit) return explicit.toLowerCase();
         const tag = element.tagName.toLowerCase();
+        if (tag === "article") return "article";
+        if (tag === "aside") return "complementary";
+        if (tag === "header") return element.closest("article,aside,main,nav,section") ? "generic" : "banner";
+        if (tag === "footer") return element.closest("article,aside,main,nav,section") ? "generic" : "contentinfo";
+        if (tag === "form") return "form";
+        if (tag === "h1" || tag === "h2" || tag === "h3" || tag === "h4" || tag === "h5" || tag === "h6") return "heading";
+        if (tag === "img") return element.getAttribute("alt") === "" ? "presentation" : "img";
+        if (tag === "main") return "main";
+        if (tag === "nav") return "navigation";
+        if (tag === "section") return element.getAttribute("aria-label") ? "region" : "generic";
+        if (tag === "table") return "table";
+        if (tag === "tr") return "row";
+        if (tag === "td" || tag === "th") return element.tagName === "TH" ? "columnheader" : "cell";
+        if (tag === "li") return "listitem";
+        if (tag === "ul" || tag === "ol") return "list";
+        if (tag === "output") return "status";
         if (tag === "button") return "button";
         if (tag === "a" && element.hasAttribute("href")) return "link";
         if (tag === "select") return element.multiple ? "listbox" : "combobox";
@@ -591,6 +626,9 @@ async function resolveElementQuery(
       };
       const visible = (element) => {
         if (!element.isConnected) return false;
+        if (${JSON.stringify(allowHidden)} && element instanceof HTMLInputElement && element.type === "file") {
+          return !element.disabled && element.getAttribute("aria-disabled") !== "true";
+        }
         const style = getComputedStyle(element);
         if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
         const rect = element.getBoundingClientRect();
@@ -748,7 +786,12 @@ async function fillNode(
         if (!selected) throw new Error("select option not found");
         this.value = selected.value;
       } else if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
-        this.value = text;
+        const setter = Object.getOwnPropertyDescriptor(
+          Object.getPrototypeOf(this),
+          "value",
+        )?.set;
+        if (setter) setter.call(this, text);
+        else this.value = text;
       } else if (this instanceof HTMLElement && this.isContentEditable) {
         this.textContent = text;
       } else {
@@ -776,7 +819,7 @@ async function focusNode(
       if ("disabled" in this && this.disabled) {
         return { ok: false, reason: "target is disabled" };
       }
-      if ("readOnly" in this && this.readOnly) {
+      if (requireEditable && "readOnly" in this && this.readOnly) {
         return { ok: false, reason: "target is read-only" };
       }
       if (requireEditable) {
@@ -797,6 +840,29 @@ async function focusNode(
     [requireEditable],
   );
   if (!result?.ok) throw new Error(result?.reason ?? 'unable to focus target');
+}
+
+async function selectEditableContents(
+  send: DebuggerTransport['sendCommand'],
+  node: ResolvedNode,
+): Promise<void> {
+  await callOnNode(
+    send,
+    node.objectId,
+    `function() {
+      if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
+        this.select();
+        return;
+      }
+      if (this instanceof HTMLElement && this.isContentEditable) {
+        const selection = this.ownerDocument.defaultView?.getSelection();
+        const range = this.ownerDocument.createRange();
+        range.selectNodeContents(this);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }
+    }`,
+  );
 }
 
 async function waitForActionable(
@@ -928,6 +994,9 @@ function modifierMask(modifiers: unknown): number {
       case 'command':
       case 'cmd':
         mask |= 4;
+        break;
+      case 'controlormeta':
+        mask |= process.platform === 'darwin' ? 4 : 2;
         break;
       case 'shift':
         mask |= 8;
@@ -1449,6 +1518,7 @@ function nativeKeyCode(key: string): string | undefined {
     ArrowRight: 'RIGHT',
     ArrowDown: 'DOWN',
     Delete: 'DELETE',
+    Enter: 'ENTER',
     Home: 'HOME',
     End: 'END',
     PageUp: 'PAGEUP',
@@ -1512,6 +1582,7 @@ async function dispatchKey(
   rawKey: string,
   targetTicket?: string,
   nativeDispatch?: NativeKeyDispatcher,
+  delayMs?: number,
 ): Promise<void> {
   const { key, modifiers } = parseKey(rawKey);
   const keyCode = nativeKeyCode(key)
@@ -1524,6 +1595,7 @@ async function dispatchKey(
     const modifierNames = nativeModifiers(modifiers);
     await dispatchInput('Input.dispatchKeyEvent', { type: 'validate' }, targetTicket);
     await nativeDispatch('keyDown', keyCode, modifierNames);
+    if (delayMs && delayMs > 0) await delay(Math.min(delayMs, 5_000));
     await nativeDispatch('keyUp', keyCode, modifierNames);
     return;
   }
@@ -1534,6 +1606,7 @@ async function dispatchKey(
     ...(text ? { text } : {}),
     modifiers,
   }, targetTicket);
+  if (delayMs && delayMs > 0) await delay(Math.min(delayMs, 5_000));
   await dispatchInput('Input.dispatchKeyEvent', {
     type: 'keyUp',
     key,
@@ -1605,20 +1678,20 @@ export class RsbWebviewAutomation {
       await send('Accessibility.enable');
       let response: { nodes?: RawAxNode[] };
       const frame = typeof snapshotReq.frame === 'string' && snapshotReq.frame !== ''
-        ? await resolveFrameRoot(send, snapshotReq.frame)
+        ? await resolveFrameRoot(send, snapshotReq.frame, snapshotReq.timeoutMs)
         : undefined;
       if (typeof snapshotReq.selector === 'string' && snapshotReq.selector !== '') {
         const selected = frame?.nodeId
           ? await resolveSelectorInFrame(send, frame.nodeId, snapshotReq.selector)
           : frame
             ? undefined
-            : await resolveSelector(send, snapshotReq.selector);
+            : await resolveSelector(send, snapshotReq.selector, snapshotReq.timeoutMs);
         if (!selected) {
           throw new Error('frame document is unavailable for selector-scoped snapshot');
         }
         response = await send('Accessibility.getPartialAXTree', {
           backendNodeId: selected.backendDOMNodeId,
-          fetchRelatives: false,
+          fetchRelatives: true,
         }) as { nodes?: RawAxNode[] };
       } else {
         response = await send(
@@ -1630,7 +1703,14 @@ export class RsbWebviewAutomation {
       const { tree, roots } = buildSnapshotTree(Array.isArray(response.nodes) ? response.nodes : []);
       const refs: Record<string, SnapshotRef> = {};
       let refNumber = 1;
-      for (const node of tree) {
+      const refOrder = tree
+        .map((_node, index) => index)
+        .toSorted((left, right) => (
+          Number(INTERACTIVE_ROLES.has(tree[right].role))
+          - Number(INTERACTIVE_ROLES.has(tree[left].role))
+        ));
+      for (const index of refOrder) {
+        const node = tree[index];
         if (!shouldReference(node) || refNumber > MAX_SNAPSHOT_REFS) continue;
         const ref = `e${refNumber}`;
         refNumber += 1;
@@ -1778,9 +1858,9 @@ export class RsbWebviewAutomation {
     return withDebugger(wc, async (send) => {
       let target: ResolvedNode;
       if (req.query && typeof req.query === 'object') {
-        target = await resolveElementQuery(send, req.query, req.timeoutMs);
+        target = await resolveElementQuery(send, req.query, req.timeoutMs, { allowHidden: true });
       } else if (typeof req.element === 'string' && req.element !== '') {
-        target = await resolveSelector(send, req.element, req.timeoutMs);
+        target = await resolveSelector(send, req.element, req.timeoutMs, { allowHidden: true });
       } else {
         const ref = req.inputRef ?? req.ref;
         if (typeof ref !== 'string' || ref === '') {
@@ -1926,13 +2006,24 @@ export class RsbWebviewAutomation {
           await focusNode(send, target, true);
           const ticket = await stampActionTarget(send, target);
           if (typeof request.text !== 'string') throw new Error('type.text required');
-          if (request.slowly === true) {
+          const structured = await callOnNode<boolean>(
+            send,
+            target.objectId,
+            `function() {
+              return this instanceof HTMLInputElement
+                && ["date", "datetime-local", "month", "time", "week"].includes(this.type);
+            }`,
+          );
+          if (structured) {
+            await fillNode(send, target, request.text);
+          } else if (request.slowly === true) {
             const perCharacterDelay = Math.min(request.delayMs ?? 50, 1_000);
             for (const character of Array.from(request.text)) {
               await dispatchInput('Input.insertText', { text: character }, ticket);
               if (perCharacterDelay > 0) await delay(perCharacterDelay);
             }
           } else {
+            await selectEditableContents(send, target);
             await dispatchInput('Input.insertText', { text: request.text }, ticket);
           }
           if (request.submit === true) await dispatchKey(dispatchInput, 'Enter', ticket);
@@ -1949,7 +2040,13 @@ export class RsbWebviewAutomation {
           if (typeof request.key !== 'string' || request.key === '') {
             throw new Error('press.key required');
           }
-          await dispatchKey(dispatchInput, request.key, ticket, options?.nativeKeyDispatch);
+          await dispatchKey(
+            dispatchInput,
+            request.key,
+            ticket,
+            options?.nativeKeyDispatch,
+            request.delayMs,
+          );
           return { tabId, kind: request.kind, key: request.key };
         }
         case 'hover': {
@@ -2099,7 +2196,19 @@ export class RsbWebviewAutomation {
                   if (typeof predicate !== "function") throw new Error("wait.fn did not produce a function");
                 }
                 const matches = async () => {
-                  if (params.selector && !document.querySelector(params.selector)) return false;
+                  if (params.selector) {
+                    const element = document.querySelector(params.selector);
+                    if (!element) return false;
+                    const style = getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    if (
+                      style.display === "none"
+                      || style.visibility === "hidden"
+                      || style.visibility === "collapse"
+                      || rect.width <= 0
+                      || rect.height <= 0
+                    ) return false;
+                  }
                   if (params.url && location.href !== params.url && !location.href.includes(params.url)) return false;
                   if (params.text && !(document.body?.innerText || "").includes(params.text)) return false;
                   if (params.textGone && (document.body?.innerText || "").includes(params.textGone)) return false;

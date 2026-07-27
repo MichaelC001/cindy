@@ -1,4 +1,8 @@
-import type { BrowserControlRequest, BrowserControlRuntime } from '@cindy/browser-control-runtime';
+import {
+  isPublicHttpResourceUrl,
+  type BrowserControlRequest,
+  type BrowserControlRuntime,
+} from '@cindy/browser-control-runtime';
 import { z } from 'zod';
 
 import type { BrowserMcpDeps } from '../types.js';
@@ -151,12 +155,6 @@ function elementQuerySchema(deps: BrowserMcpDeps) {
       });
     }
   });
-}
-
-function isSafeResourceUrl(value: string): boolean {
-  if (!isHttpUrl(value)) return false;
-  const parsed = new URL(value);
-  return parsed.username === '' && parsed.password === '';
 }
 
 // Server-enforced ceiling on a single tool result (~50k tokens). A huge page /
@@ -364,7 +362,7 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
           && args.request?.kind === 'saveResource'
           && (
             typeof args.request.url !== 'string'
-            || !isSafeResourceUrl(args.request.url)
+            || !isPublicHttpResourceUrl(args.request.url)
           )
         ) {
           return errorResult(

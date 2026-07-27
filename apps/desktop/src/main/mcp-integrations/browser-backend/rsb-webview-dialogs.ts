@@ -209,12 +209,17 @@ export class RsbWebviewDialogs {
 
     const accepted = options.accept === true;
     state.handledIds.set(dialog.id, 'agent');
-    await state.debugger.sendCommand('Page.handleJavaScriptDialog', {
-      accept: accepted,
-      ...(accepted && typeof options.promptText === 'string'
-        ? { promptText: options.promptText }
-        : {}),
-    });
+    try {
+      await state.debugger.sendCommand('Page.handleJavaScriptDialog', {
+        accept: accepted,
+        ...(accepted && typeof options.promptText === 'string'
+          ? { promptText: options.promptText }
+          : {}),
+      });
+    } catch (err) {
+      state.handledIds.delete(dialog.id);
+      throw err;
+    }
     // Keep the pending record until Page.javascriptDialogClosed arrives. The
     // close event is the authoritative signal that Chromium finished handling
     // the modal and also records the recent outcome for action coordination.
