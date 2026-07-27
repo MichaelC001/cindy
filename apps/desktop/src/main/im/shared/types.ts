@@ -104,6 +104,12 @@ export interface ImChannelAdapter {
    * threadScoped 渠道会收到 scopeKey(thread root ts), 供 MCP 出站定位 thread。
    */
   buildVendorOptions(userId: string, scopeKey?: string): Record<string, unknown>;
+  /** Durable channels may promote task-scoped attachments after message persistence succeeds. */
+  onUserMessagePersisted?(args: {
+    sessionId: string;
+    userMessageId: string | null;
+    persisted: boolean;
+  }): Promise<void>;
 }
 
 // ── UI 文案包 ─────────────────────────────────────────────────────────────────

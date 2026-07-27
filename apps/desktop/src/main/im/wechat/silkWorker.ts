@@ -1,0 +1,24 @@
+// eslint-disable-next-line no-restricted-imports -- dedicated non-DB worker entry for bounded SILK/WASM decoding.
+import { parentPort } from 'node:worker_threads';
+
+import { decode } from 'silk-wasm';
+import { pcmS16leToWav } from './silkWav';
+
+const port = parentPort;
+if (!port) throw new Error('WeChat SILK decoder must run in a worker thread.');
+
+port.once('message', async (request: { id: string; bytes: ArrayBuffer; sampleRate: number }) => {
+  try {
+    const decoded = await decode(new Uint8Array(request.bytes), request.sampleRate);
+    const wav = pcmS16leToWav(decoded.data, request.sampleRate);
+    if (wav.byteLength > 20 * 1024 * 1024) {
+      throw new Error('Decoded WeChat voice exceeded the output limit.');
+    }
+    const transferable = Uint8Array.from(wav);
+    port.postMessage({ id: request.id, ok: true, bytes: transferable.buffer }, [
+      transferable.buffer,
+    ]);
+  } catch {
+    port.postMessage({ id: request.id, ok: false, errorCode: 'SILK_DECODE_FAILED' });
+  }
+});

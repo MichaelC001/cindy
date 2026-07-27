@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   IlinkApiClient,
@@ -6,9 +7,11 @@ import {
   aes128EcbPaddedSize,
   chunkWechatText,
   decodeInboundMessage,
+  downloadWechatMedia,
   decryptAes128Ecb,
   encryptAes128Ecb,
   filterWechatMarkdown,
+  prepareWechatUpload,
 } from "../index.js";
 
 const signal = () => new AbortController().signal;
@@ -78,6 +81,79 @@ describe("pure protocol utilities", () => {
         item_list: [null] as never,
       }),
     ).toMatchObject({ messageId: "3", media: [] });
+  });
+
+  it("decodes quoted text and media without inventing prior history", () => {
+    expect(
+      decodeInboundMessage({
+        message_id: 4,
+        from_user_id: "user",
+        to_user_id: "bot",
+        context_token: "ctx",
+        item_list: [
+          {
+            type: 1,
+            text_item: { text: "继续分析" },
+            ref_msg: {
+              title: "Alice",
+              message_item: {
+                type: 2,
+                image_item: {
+                  media: {
+                    full_url: "https://cdn.weixin.qq.com/quoted",
+                    aes_key: Buffer.alloc(16, 1).toString("base64"),
+                  },
+                  mid_size: 32,
+                },
+              },
+            },
+          },
+        ],
+      }),
+    ).toMatchObject({
+      text: "继续分析",
+      quote: {
+        title: "Alice",
+        media: [{ kind: "image", encryptedByteLength: 32 }],
+      },
+    });
+  });
+
+  it("decrypts bounded Tencent media and validates file metadata", async () => {
+    const plaintext = Buffer.from("verified attachment");
+    const key = Buffer.alloc(16, 7);
+    const encrypted = encryptAes128Ecb(plaintext, key);
+    const result = await downloadWechatMedia(
+      {
+        kind: "file",
+        downloadUrl: "https://cdn.weixin.qq.com/c2c/download?id=1",
+        aesKeyBase64: key.toString("base64"),
+        byteLength: plaintext.byteLength,
+        md5Hex: createHash("md5").update(plaintext).digest("hex"),
+      },
+      async (_input, init) => {
+        expect(init?.redirect).toBe("manual");
+        return new Response(Buffer.from(encrypted));
+      },
+      signal(),
+    );
+    expect(Buffer.from(result)).toEqual(plaintext);
+  });
+
+  it("rejects untrusted media origins before issuing a request", async () => {
+    const fetchMock = vi.fn();
+    await expect(
+      downloadWechatMedia(
+        {
+          kind: "image",
+          downloadUrl: "https://example.com/file",
+          aesKeyBase64: Buffer.alloc(16).toString("base64"),
+        },
+        fetchMock,
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: "PROTOCOL_ERROR" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -161,6 +237,85 @@ describe("iLink HTTP boundary", () => {
       base_info: {
         channel_version: "1.1.21",
         bot_agent: "Cindy/1.1.21",
+      },
+    });
+  });
+
+  it("uploads encrypted media and sends the returned CDN reference", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const transport = new TencentIlinkTransport({
+      baseUrl: "https://ilinkai.weixin.qq.com",
+      token: "fake-token",
+      botAgent: "Cindy/1.0.0",
+      fetch: async (input, init) => {
+        const url = String(input);
+        calls.push({ url, init });
+        if (url.endsWith("/ilink/bot/getuploadurl")) {
+          return new Response(
+            JSON.stringify({
+              ret: 0,
+              upload_full_url: "https://cdn.weixin.qq.com/c2c/upload?id=1",
+            }),
+          );
+        }
+        if (url.startsWith("https://cdn.weixin.qq.com/")) {
+          return new Response(null, {
+            status: 200,
+            headers: { "x-encrypted-param": "download-token" },
+          });
+        }
+        return new Response(JSON.stringify({ ret: 0 }));
+      },
+    });
+    const bytes = Buffer.from("image bytes");
+    const uploaded = await transport.uploadMedia(
+      { peerId: "peer", bytes, fileName: "image.png", kind: "image" },
+      signal(),
+    );
+    expect(uploaded).toMatchObject({
+      fileName: "image.png",
+      ref: {
+        kind: "image",
+        encryptedQuery: "download-token",
+        byteLength: bytes.byteLength,
+      },
+    });
+    expect(uploaded.ref.encryptedByteLength).toBe(
+      prepareWechatUpload(bytes).ciphertext.byteLength,
+    );
+
+    await expect(
+      transport.sendMedia(
+        {
+          peerId: "peer",
+          contextToken: "context",
+          clientId: "stable-media-id",
+          uploaded,
+        },
+        signal(),
+      ),
+    ).resolves.toEqual({ clientId: "stable-media-id" });
+
+    const uploadRequest = calls.find(({ url }) =>
+      url.startsWith("https://cdn.weixin.qq.com/"),
+    );
+    expect(uploadRequest?.init?.body).toBeInstanceOf(Buffer);
+    const sendRequest = calls.at(-1)?.init;
+    expect(JSON.parse(String(sendRequest?.body))).toMatchObject({
+      msg: {
+        client_id: "stable-media-id",
+        item_list: [
+          {
+            type: 2,
+            image_item: {
+              mid_size: uploaded.ref.encryptedByteLength,
+              media: {
+                encrypt_query_param: "download-token",
+                encrypt_type: 1,
+              },
+            },
+          },
+        ],
       },
     });
   });

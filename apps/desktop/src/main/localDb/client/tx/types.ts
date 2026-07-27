@@ -34,6 +34,8 @@ export type DbTxName =
   | 'wechatRecordOutboxFailure'
   | 'wechatStopAll'
   | 'wechatCloseBindingEpoch'
+  | 'wechatPromoteTaskAttachments'
+  | 'wechatRefreshOutboxContexts'
   | 'wechatUnbindCleanup'
   | 'session.importShare';
 
@@ -196,7 +198,10 @@ export interface OrcaReserveWorkerCreationArgs {
 
 export type OrcaReserveWorkerCreationResult =
   | { ok: true; occupiedSlotsBefore: number }
-  | { ok: false; errorCode: 'DUPLICATE_LABEL' | 'WORKER_CREATION_IN_PROGRESS' | 'WORKER_LIMIT_HARD_EXCEEDED' };
+  | {
+      ok: false;
+      errorCode: 'DUPLICATE_LABEL' | 'WORKER_CREATION_IN_PROGRESS' | 'WORKER_LIMIT_HARD_EXCEEDED';
+    };
 
 export interface OrcaReleaseWorkerCreationReservationArgs {
   reservationId: string;
@@ -612,6 +617,34 @@ export interface WechatCloseBindingEpochResult {
   closed: boolean;
 }
 
+export interface WechatPromoteTaskAttachmentsArgs {
+  bindingEpoch: string;
+  taskId: string;
+  sessionId: string;
+  now: number;
+}
+
+export interface WechatPromoteTaskAttachmentsResult {
+  eligible: boolean;
+  promotedMediaRefs: number;
+  promotedFiles: number;
+}
+
+export interface WechatRefreshOutboxContextsArgs {
+  bindingEpoch: string;
+  peerId: string;
+  now: number;
+  contexts: Array<{
+    taskId: string;
+    context: WechatEncryptedContext;
+  }>;
+}
+
+export interface WechatRefreshOutboxContextsResult {
+  refreshedTasks: number;
+  outboxWoken: number;
+}
+
 export interface WechatUnbindCleanupArgs {
   bindingEpoch: string;
 }
@@ -619,6 +652,7 @@ export interface WechatUnbindCleanupArgs {
 export interface WechatUnbindCleanupResult {
   deletedTasks: number;
   deletedMediaRefs: number;
+  filePaths: string[];
 }
 
 export type DbTxArgsByName = {
@@ -657,6 +691,8 @@ export type DbTxArgsByName = {
   wechatRecordOutboxFailure: WechatRecordOutboxFailureArgs;
   wechatStopAll: WechatStopAllArgs;
   wechatCloseBindingEpoch: WechatCloseBindingEpochArgs;
+  wechatPromoteTaskAttachments: WechatPromoteTaskAttachmentsArgs;
+  wechatRefreshOutboxContexts: WechatRefreshOutboxContextsArgs;
   wechatUnbindCleanup: WechatUnbindCleanupArgs;
   'session.importShare': SessionImportShareArgs;
 };
@@ -697,6 +733,8 @@ export type DbTxResultByName = {
   wechatRecordOutboxFailure: WechatRecordOutboxFailureResult;
   wechatStopAll: WechatStopAllResult;
   wechatCloseBindingEpoch: WechatCloseBindingEpochResult;
+  wechatPromoteTaskAttachments: WechatPromoteTaskAttachmentsResult;
+  wechatRefreshOutboxContexts: WechatRefreshOutboxContextsResult;
   wechatUnbindCleanup: WechatUnbindCleanupResult;
   'session.importShare': { messageCount: number };
 };

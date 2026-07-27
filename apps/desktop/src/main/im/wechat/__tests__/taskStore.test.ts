@@ -105,6 +105,35 @@ describe('WechatTaskStore', () => {
       }),
     ]);
   });
+
+  it('re-encrypts a newer peer token separately for every pending reply task', async () => {
+    const tx = vi.fn().mockResolvedValue({ refreshedTasks: 2, outboxWoken: 2 });
+    const query = vi.fn().mockResolvedValue([
+      { taskId: 'task-1' },
+      { taskId: 'task-2' },
+    ]);
+    const store = new WechatTaskStore(fakeDb(tx, query), randomBytes(32));
+
+    await store.refreshPendingOutboxContext({
+      bindingEpoch: 'epoch-1',
+      peerId: 'peer-1',
+      contextToken: 'new-peer-context',
+      now: 300,
+    });
+
+    expect(tx).toHaveBeenCalledWith(
+      'wechatRefreshOutboxContexts',
+      expect.objectContaining({
+        bindingEpoch: 'epoch-1',
+        peerId: 'peer-1',
+        contexts: [
+          { taskId: 'task-1', context: expect.any(Object) },
+          { taskId: 'task-2', context: expect.any(Object) },
+        ],
+      }),
+    );
+    expect(JSON.stringify(tx.mock.calls[0]?.[1])).not.toContain('new-peer-context');
+  });
 });
 
 function fakeDb(tx: ReturnType<typeof vi.fn>, query: ReturnType<typeof vi.fn> = vi.fn()): DbClient {

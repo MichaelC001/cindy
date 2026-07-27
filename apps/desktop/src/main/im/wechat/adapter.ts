@@ -44,5 +44,6 @@ export function buildWechatAdapter(
     },
     processingEmoji: '',
     buildVendorOptions: () => ({ source: 'wechat' }),
+    onUserMessagePersisted: (args) => wechatIm.onUserMessagePersisted(args),
   };
 }

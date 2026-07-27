@@ -6,10 +6,20 @@ import type {
   WechatAuthChallenge,
   WechatAuthorizationObserver,
   WechatCredentials,
+  WechatMediaRef,
   WechatPollResult,
+  WechatSendMediaRequest,
   WechatSendRequest,
   WechatSendResult,
+  WechatUploadedMedia,
+  WechatUploadRequest,
 } from "./types.js";
+import {
+  downloadWechatMedia,
+  expectedWechatCiphertextSize,
+  prepareWechatUpload,
+  uploadWechatCiphertext,
+} from "./mediaTransfer.js";
 
 export interface WechatTransport {
   beginAuthorization(signal: AbortSignal): Promise<WechatAuthChallenge>;
@@ -33,6 +43,15 @@ export interface WechatTransport {
     active: boolean,
     signal: AbortSignal,
   ): Promise<void>;
+  downloadMedia(ref: WechatMediaRef, signal: AbortSignal): Promise<Uint8Array>;
+  uploadMedia(
+    request: WechatUploadRequest,
+    signal: AbortSignal,
+  ): Promise<WechatUploadedMedia>;
+  sendMedia(
+    request: WechatSendMediaRequest,
+    signal: AbortSignal,
+  ): Promise<WechatSendResult>;
 }
 
 export interface TencentIlinkTransportOptions extends IlinkApiClientOptions {
@@ -155,5 +174,65 @@ export class TencentIlinkTransport implements WechatTransport {
     signal: AbortSignal,
   ): Promise<void> {
     return this.api.setTyping(peerId, ticket, active, signal);
+  }
+
+  downloadMedia(ref: WechatMediaRef, signal: AbortSignal): Promise<Uint8Array> {
+    return downloadWechatMedia(ref, this.options.fetch, signal);
+  }
+
+  async uploadMedia(
+    request: WechatUploadRequest,
+    signal: AbortSignal,
+  ): Promise<WechatUploadedMedia> {
+    if (request.kind === "voice") {
+      throw new WechatIlinkError(
+        "PROTOCOL_ERROR",
+        "Outbound voice messages are not supported.",
+        false,
+      );
+    }
+    const prepared = prepareWechatUpload(request.bytes);
+    const mediaType =
+      request.kind === "image" ? 1 : request.kind === "video" ? 2 : 3;
+    const upload = await this.api.getUploadUrl(
+      {
+        peerId: request.peerId,
+        fileKey: prepared.fileKey,
+        mediaType,
+        rawSize: request.bytes.byteLength,
+        rawMd5: prepared.md5Hex,
+        encryptedSize: expectedWechatCiphertextSize(request.bytes.byteLength),
+        aesKeyHex: prepared.aesKeyHex,
+      },
+      signal,
+    );
+    const encryptedQuery = await uploadWechatCiphertext(
+      {
+        uploadFullUrl: upload.uploadFullUrl,
+        uploadParam: upload.uploadParam,
+        fileKey: prepared.fileKey,
+        ciphertext: prepared.ciphertext,
+      },
+      this.options.fetch,
+      signal,
+    );
+    return {
+      fileName: request.fileName,
+      ref: {
+        kind: request.kind,
+        encryptedQuery,
+        aesKeyBase64: Buffer.from(prepared.aesKeyHex).toString("base64"),
+        byteLength: request.bytes.byteLength,
+        encryptedByteLength: prepared.ciphertext.byteLength,
+      },
+    };
+  }
+
+  async sendMedia(
+    request: WechatSendMediaRequest,
+    signal: AbortSignal,
+  ): Promise<WechatSendResult> {
+    await this.api.sendMedia(request, signal);
+    return { clientId: request.clientId };
   }
 }

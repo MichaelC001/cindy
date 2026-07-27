@@ -9,6 +9,8 @@ import type {
   WechatLeasedTask,
   WechatMarkOutboxDeliveredResult,
   WechatOutboxChunkInput,
+  WechatPromoteTaskAttachmentsResult,
+  WechatRefreshOutboxContextsResult,
   WechatRecordOutboxFailureResult,
   WechatStopAllResult,
   WechatUnbindCleanupResult,
@@ -707,6 +709,7 @@ export function wechatStopAll(db: Database.Database, args: unknown): WechatStopA
        SET status = 'pending', next_retry_at = ?
        WHERE binding_epoch = ? AND status = 'sending'`,
     ).run(now, bindingEpoch);
+    repairAcceptedTaskAttachments(db, bindingEpoch, now);
     const expired = expirePendingTasks(db, bindingEpoch, now);
     const requeued = db
       .prepare(
@@ -750,6 +753,7 @@ export function wechatCloseBindingEpoch(db: Database.Database, args: unknown): {
       db.prepare('SELECT 1 FROM wechat_sync_state WHERE binding_epoch = ?').get(bindingEpoch) !==
       undefined;
     if (!exists) return { closed: false };
+    repairAcceptedTaskAttachments(db, bindingEpoch, now);
     db.prepare(
       `UPDATE wechat_sync_state
        SET is_active = 0, updated_at = ?
@@ -767,6 +771,122 @@ export function wechatCloseBindingEpoch(db: Database.Database, args: unknown): {
     ).run(bindingEpoch);
     releaseTerminalMediaRefs(db, bindingEpoch);
     return { closed: true };
+  })();
+}
+
+export function wechatPromoteTaskAttachments(
+  db: Database.Database,
+  args: unknown,
+): WechatPromoteTaskAttachmentsResult {
+  const payload = asRecord(args, 'wechatPromoteTaskAttachments args');
+  const bindingEpoch = expectId(payload.bindingEpoch, 'bindingEpoch');
+  const taskId = expectId(payload.taskId, 'taskId');
+  const sessionId = expectId(payload.sessionId, 'sessionId');
+  const now = expectTimestamp(payload.now, 'now');
+
+  return db.transaction(() => {
+    const task = db
+      .prepare(
+        `SELECT session_id AS sessionId, status
+         FROM wechat_inbox
+         WHERE binding_epoch = ? AND id = ?`,
+      )
+      .get(bindingEpoch, taskId) as { sessionId: string; status: string } | undefined;
+    if (
+      !task ||
+      task.sessionId !== sessionId ||
+      !['accepted_running', 'waiting_desktop', 'delivery_pending', 'completed'].includes(
+        task.status,
+      )
+    ) {
+      return { eligible: false, promotedMediaRefs: 0, promotedFiles: 0 };
+    }
+
+    const promotedMediaRefs = db
+      .prepare(
+        `INSERT OR IGNORE INTO media_refs
+          (id, hash, ref_kind, ref_id, origin_session_id, origin_kind, origin_id, label, created_at)
+         SELECT
+           lower(hex(randomblob(16))),
+           hash,
+           'session-attachment',
+           ?,
+           ?,
+           'integration',
+           'wechat',
+           label,
+           ?
+         FROM media_refs
+         WHERE ref_kind IN ('im-inbox', 'wechat-inbox') AND ref_id = ?`,
+      )
+      .run(sessionId, sessionId, now, taskId).changes;
+    db.prepare(
+      `DELETE FROM media_refs
+       WHERE ref_kind IN ('im-inbox', 'wechat-inbox') AND ref_id = ?`,
+    ).run(taskId);
+    const promotedFiles = db
+      .prepare(
+        `UPDATE wechat_file_attachments
+         SET status = 'promoted', promoted_at = ?
+         WHERE binding_epoch = ? AND task_id = ? AND session_id = ? AND status = 'staged'`,
+      )
+      .run(now, bindingEpoch, taskId, sessionId).changes;
+    return { eligible: true, promotedMediaRefs, promotedFiles };
+  })();
+}
+
+export function wechatRefreshOutboxContexts(
+  db: Database.Database,
+  args: unknown,
+): WechatRefreshOutboxContextsResult {
+  const payload = asRecord(args, 'wechatRefreshOutboxContexts args');
+  const bindingEpoch = expectId(payload.bindingEpoch, 'bindingEpoch');
+  const peerId = expectString(payload.peerId, 'peerId', 512);
+  const now = expectTimestamp(payload.now, 'now');
+  const contexts = expectArray(payload.contexts, 'contexts');
+  enforceArrayLimit(contexts, 'contexts', 100);
+
+  return db.transaction(() => {
+    const updateContext = db.prepare(
+      `UPDATE wechat_inbox
+       SET context_nonce = ?, context_ciphertext = ?, context_tag = ?
+       WHERE binding_epoch = ? AND id = ? AND peer_id = ? AND status = 'delivery_pending'
+         AND EXISTS (
+           SELECT 1 FROM wechat_outbox
+           WHERE binding_epoch = ? AND task_id = ? AND status = 'pending'
+         )`,
+    );
+    let refreshedTasks = 0;
+    const refreshedIds: string[] = [];
+    for (let index = 0; index < contexts.length; index += 1) {
+      const item = asRecord(contexts[index], `contexts.${index}`);
+      const taskId = expectId(item.taskId, `contexts.${index}.taskId`);
+      const context = parseEncryptedContext(item.context, `contexts.${index}.context`);
+      const changed = updateContext.run(
+        context.nonce,
+        context.ciphertext,
+        context.tag,
+        bindingEpoch,
+        taskId,
+        peerId,
+        bindingEpoch,
+        taskId,
+      ).changes;
+      if (changed > 0) {
+        refreshedTasks += changed;
+        refreshedIds.push(taskId);
+      }
+    }
+    if (refreshedIds.length === 0) return { refreshedTasks: 0, outboxWoken: 0 };
+    const outboxWoken = db
+      .prepare(
+        `UPDATE wechat_outbox
+         SET next_retry_at = ?
+         WHERE binding_epoch = ? AND status = 'pending'
+           AND task_id IN (${sqlPlaceholders(refreshedIds.length)})`,
+      )
+      .run(now, bindingEpoch, ...refreshedIds).changes;
+    return { refreshedTasks, outboxWoken };
   })();
 }
 
@@ -788,15 +908,24 @@ export function wechatUnbindCleanup(
         .pluck()
         .get(bindingEpoch),
     );
+    const filePaths = (
+      db
+        .prepare(
+          `SELECT abs_path AS absPath
+           FROM wechat_file_attachments
+           WHERE binding_epoch = ? AND status != 'promoted'`,
+        )
+        .all(bindingEpoch) as Array<{ absPath: string }>
+    ).map(({ absPath }) => absPath);
     const deletedMediaRefs = db
       .prepare(
         `DELETE FROM media_refs
-         WHERE ref_kind = 'wechat-inbox'
+         WHERE ref_kind IN ('im-inbox', 'wechat-inbox')
            AND ref_id IN (SELECT id FROM wechat_inbox WHERE binding_epoch = ?)`,
       )
       .run(bindingEpoch).changes;
     db.prepare('DELETE FROM wechat_sync_state WHERE binding_epoch = ?').run(bindingEpoch);
-    return { deletedTasks, deletedMediaRefs };
+    return { deletedTasks, deletedMediaRefs, filePaths };
   })();
 }
 
@@ -918,7 +1047,7 @@ function commitMediaRefs(
   const insertRef = db.prepare(
     `INSERT OR IGNORE INTO media_refs
       (id, hash, ref_kind, ref_id, origin_session_id, origin_kind, origin_id, label, created_at)
-     VALUES (?, ?, 'wechat-inbox', ?, NULL, 'integration', 'wechat', ?, ?)`,
+     VALUES (?, ?, 'im-inbox', ?, NULL, 'integration', 'wechat', ?, ?)`,
   );
   for (let index = 0; index < mediaRefs.length; index += 1) {
     const item = asRecord(mediaRefs[index], `mediaRefs.${index}`);
@@ -1038,7 +1167,9 @@ function expirePendingTasks(db: Database.Database, bindingEpoch: string, now: nu
 }
 
 function releaseTaskMediaRefs(db: Database.Database, taskId: string): void {
-  db.prepare("DELETE FROM media_refs WHERE ref_kind = 'wechat-inbox' AND ref_id = ?").run(taskId);
+  db.prepare(
+    "DELETE FROM media_refs WHERE ref_kind IN ('im-inbox', 'wechat-inbox') AND ref_id = ?",
+  ).run(taskId);
   db.prepare(
     `UPDATE wechat_file_attachments
      SET status = 'released'
@@ -1046,10 +1177,60 @@ function releaseTaskMediaRefs(db: Database.Database, taskId: string): void {
   ).run(taskId);
 }
 
+function repairAcceptedTaskAttachments(
+  db: Database.Database,
+  bindingEpoch: string,
+  now: number,
+): void {
+  const acceptedStatuses = [
+    'accepted_running',
+    'waiting_desktop',
+    'delivery_pending',
+    'completed',
+  ] as const;
+  const placeholders = sqlPlaceholders(acceptedStatuses.length);
+  db.prepare(
+    `INSERT OR IGNORE INTO media_refs
+      (id, hash, ref_kind, ref_id, origin_session_id, origin_kind, origin_id, label, created_at)
+     SELECT
+       lower(hex(randomblob(16))),
+       r.hash,
+       'session-attachment',
+       i.session_id,
+       i.session_id,
+       'integration',
+       'wechat',
+       r.label,
+       ?
+     FROM media_refs r
+     INNER JOIN wechat_inbox i ON i.id = r.ref_id
+     WHERE i.binding_epoch = ?
+       AND i.status IN (${placeholders})
+       AND r.ref_kind IN ('im-inbox', 'wechat-inbox')`,
+  ).run(now, bindingEpoch, ...acceptedStatuses);
+  db.prepare(
+    `DELETE FROM media_refs
+     WHERE ref_kind IN ('im-inbox', 'wechat-inbox')
+       AND ref_id IN (
+         SELECT id FROM wechat_inbox
+         WHERE binding_epoch = ? AND status IN (${placeholders})
+       )`,
+  ).run(bindingEpoch, ...acceptedStatuses);
+  db.prepare(
+    `UPDATE wechat_file_attachments
+     SET status = 'promoted', promoted_at = COALESCE(promoted_at, ?)
+     WHERE binding_epoch = ? AND status = 'staged'
+       AND task_id IN (
+         SELECT id FROM wechat_inbox
+         WHERE binding_epoch = ? AND status IN (${placeholders})
+       )`,
+  ).run(now, bindingEpoch, bindingEpoch, ...acceptedStatuses);
+}
+
 function releaseTerminalMediaRefs(db: Database.Database, bindingEpoch: string): void {
   db.prepare(
     `DELETE FROM media_refs
-     WHERE ref_kind = 'wechat-inbox'
+     WHERE ref_kind IN ('im-inbox', 'wechat-inbox')
        AND ref_id IN (
          SELECT id FROM wechat_inbox
          WHERE binding_epoch = ?

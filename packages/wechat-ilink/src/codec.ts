@@ -4,6 +4,7 @@ import {
   MessageType,
   type IlinkCdnMedia,
   type IlinkMessage,
+  type IlinkMessageItem,
   type WechatInboundMessage,
   type WechatMediaRef,
 } from "./types.js";
@@ -36,6 +37,63 @@ function mediaBase(
   };
 }
 
+function decodeQuote(item: IlinkMessageItem) {
+  const ref = item.ref_msg;
+  if (!ref) return undefined;
+  const quoted = ref.message_item;
+  if (!quoted) {
+    return ref.title ? { title: ref.title, media: [] } : undefined;
+  }
+  const text =
+    quoted.type === MessageItemType.TEXT &&
+    typeof quoted.text_item?.text === "string"
+      ? quoted.text_item.text
+      : quoted.type === MessageItemType.VOICE &&
+          typeof quoted.voice_item?.text === "string"
+        ? quoted.voice_item.text
+        : undefined;
+  const decoded = decodeItemMedia(quoted);
+  return {
+    ...(ref.title ? { title: ref.title } : {}),
+    ...(text ? { text } : {}),
+    media: decoded ? [decoded] : [],
+  };
+}
+
+function decodeItemMedia(item: IlinkMessageItem): WechatMediaRef | null {
+  switch (item.type) {
+    case MessageItemType.IMAGE:
+      return {
+        ...mediaBase("image", item.image_item?.media),
+        aesKeyHex: item.image_item?.aeskey,
+        encryptedByteLength: item.image_item?.mid_size,
+      };
+    case MessageItemType.VOICE:
+      return {
+        ...mediaBase("voice", item.voice_item?.media),
+        voiceEncoding: item.voice_item?.encode_type,
+        transcript: item.voice_item?.text,
+      };
+    case MessageItemType.FILE:
+      return {
+        ...mediaBase("file", item.file_item?.media),
+        fileName: item.file_item?.file_name,
+        byteLength:
+          typeof item.file_item?.len === "string"
+            ? Number(item.file_item.len) || undefined
+            : undefined,
+        md5Hex: item.file_item?.md5,
+      };
+    case MessageItemType.VIDEO:
+      return {
+        ...mediaBase("video", item.video_item?.media),
+        encryptedByteLength: item.video_item?.video_size,
+      };
+    default:
+      return null;
+  }
+}
+
 export function decodeInboundMessage(
   message: IlinkMessage,
 ): WechatInboundMessage | null {
@@ -59,9 +117,11 @@ export function decodeInboundMessage(
 
   const textParts: string[] = [];
   const media: WechatMediaRef[] = [];
+  let quote: WechatInboundMessage["quote"];
   const items = Array.isArray(message.item_list) ? message.item_list : [];
   for (const item of items) {
     if (!item || typeof item !== "object") continue;
+    quote ??= decodeQuote(item);
     switch (item.type) {
       case MessageItemType.TEXT:
         if (typeof item.text_item?.text === "string" && item.text_item.text) {
@@ -69,36 +129,19 @@ export function decodeInboundMessage(
         }
         break;
       case MessageItemType.IMAGE:
-        media.push({
-          ...mediaBase("image", item.image_item?.media),
-          aesKeyHex: item.image_item?.aeskey,
-        });
+        media.push(decodeItemMedia(item)!);
         break;
       case MessageItemType.VOICE:
         if (typeof item.voice_item?.text === "string" && item.voice_item.text) {
           textParts.push(item.voice_item.text);
         }
-        media.push({
-          ...mediaBase("voice", item.voice_item?.media),
-          voiceEncoding: item.voice_item?.encode_type,
-          transcript: item.voice_item?.text,
-        });
+        media.push(decodeItemMedia(item)!);
         break;
       case MessageItemType.FILE:
-        media.push({
-          ...mediaBase("file", item.file_item?.media),
-          fileName: item.file_item?.file_name,
-          byteLength:
-            typeof item.file_item?.len === "string"
-              ? Number(item.file_item.len) || undefined
-              : undefined,
-        });
+        media.push(decodeItemMedia(item)!);
         break;
       case MessageItemType.VIDEO:
-        media.push({
-          ...mediaBase("video", item.video_item?.media),
-          byteLength: item.video_item?.video_size,
-        });
+        media.push(decodeItemMedia(item)!);
         break;
     }
   }
@@ -112,5 +155,6 @@ export function decodeInboundMessage(
     contextToken,
     text: textParts.join("\n"),
     media,
+    ...(quote ? { quote } : {}),
   };
 }

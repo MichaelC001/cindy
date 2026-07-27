@@ -5,5 +5,6 @@ export * from "./codec.js";
 export * from "./errors.js";
 export * from "./markdown.js";
 export * from "./mediaCrypto.js";
+export * from "./mediaTransfer.js";
 export * from "./transport.js";
 export * from "./types.js";

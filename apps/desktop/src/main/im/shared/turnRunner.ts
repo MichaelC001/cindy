@@ -134,6 +134,8 @@ interface TurnState {
   streamingHandlePromise: Promise<StreamingTextHandle> | null;
   /** Real assistant text accumulated this turn. */
   buffer: string;
+  /** Managed images discovered in tool output for durable text channels. */
+  mediaAbsPaths: string[];
   done: boolean;
   /** 过程展示(tool_use 时间线)状态 — 见 turnActivity.ts。 */
   activity: TurnActivityState;
@@ -595,6 +597,7 @@ export function createTurnRunner(
       streamingHandle: null,
       streamingHandlePromise: null,
       buffer: '',
+      mediaAbsPaths: [],
       done: false,
       activity: createTurnActivity(Date.now()),
       activityTicker: null,
@@ -679,12 +682,8 @@ export function createTurnRunner(
       attachments,
       notified: false,
       queueMode: args.queueMode,
-      ...(args.beforeProviderStart
-        ? { beforeProviderStart: args.beforeProviderStart }
-        : {}),
-      ...(args.turnPermissionPolicy
-        ? { turnPermissionPolicy: args.turnPermissionPolicy }
-        : {}),
+      ...(args.beforeProviderStart ? { beforeProviderStart: args.beforeProviderStart } : {}),
+      ...(args.turnPermissionPolicy ? { turnPermissionPolicy: args.turnPermissionPolicy } : {}),
     };
 
     // turn 进行中(本 session 的本渠道 turn 未收口 / sendQueue 已有人排队 /
@@ -742,8 +741,7 @@ export function createTurnRunner(
     userId: string,
     item: QueuedSend,
   ): Promise<
-    | { kind: 'accepted'; acceptedAt: number }
-    | { kind: 'busy' | 'rejected'; reason: string }
+    { kind: 'accepted'; acceptedAt: number } | { kind: 'busy' | 'rejected'; reason: string }
   > {
     const rowId = item.rowId;
     // 过程区耗时基准取真实派发时刻 — TurnState 创建时可能还要在 sendQueue 里
@@ -788,9 +786,7 @@ export function createTurnRunner(
         : item.userMessage;
       const sendResult = await state.makerSession.send(outgoingMessage as typeof item.userMessage, {
         planMode: false,
-        ...(item.turnPermissionPolicy
-          ? { turnPermissionPolicy: item.turnPermissionPolicy }
-          : {}),
+        ...(item.turnPermissionPolicy ? { turnPermissionPolicy: item.turnPermissionPolicy } : {}),
         beforeProviderStart: async () => {
           item.turn.interactionRouteLease =
             item.turnPermissionPolicy?.confirmationSurface === 'desktop'
@@ -802,14 +798,12 @@ export function createTurnRunner(
                     interactionSurface: 'desktop',
                     ...(item.turnPermissionPolicy.confirmationTimeoutMs
                       ? {
-                          timeoutMs:
-                            item.turnPermissionPolicy.confirmationTimeoutMs,
+                          timeoutMs: item.turnPermissionPolicy.confirmationTimeoutMs,
                         }
                       : {}),
                     ...(item.turnPermissionPolicy.onInteractionStateChange
                       ? {
-                          onStateChange:
-                            item.turnPermissionPolicy.onInteractionStateChange,
+                          onStateChange: item.turnPermissionPolicy.onInteractionStateChange,
                         }
                       : {}),
                   },
@@ -822,8 +816,7 @@ export function createTurnRunner(
                     interactionSurface: 'channel-card',
                   },
                   handle: handleInteractionFor(rowId, userId, state.scopeKey),
-                  onCancel: (requestId) =>
-                    cancelPending(requestId, 'interaction_route_released'),
+                  onCancel: (requestId) => cancelPending(requestId, 'interaction_route_released'),
                 });
           await item.beforeProviderStart?.();
           acceptedAt = Date.now();
@@ -841,10 +834,15 @@ export function createTurnRunner(
           // 路径直接 session.send,必须额外调这里,否则守卫额度恒 0,首次
           // silent-stop 就落"已耗尽"误导横幅且永不自动续跑)。
           noteSilentStopUserSend(rowId);
-          await persistUserMessage({
+          const persisted = await persistUserMessage({
             sessionId: rowId,
             text: item.text,
             attachments: item.attachments,
+          });
+          await adapter.onUserMessagePersisted?.({
+            sessionId: rowId,
+            userMessageId: item.turn.userMessageId,
+            persisted: persisted !== null,
           });
         },
       });
@@ -2065,9 +2063,13 @@ export function createTurnRunner(
             text: finalText,
             terminal: turn.terminalKind,
             threadTs: turn.scopeKey,
+            ...(turn.mediaAbsPaths.length > 0 ? { mediaAbsPaths: turn.mediaAbsPaths } : {}),
             ...(turn.terminalErrorCode ? { errorCode: turn.terminalErrorCode } : {}),
           });
         }
+      },
+      addExtraImageAbsPath(absPath: string) {
+        if (!turn.mediaAbsPaths.includes(absPath)) turn.mediaAbsPaths.push(absPath);
       },
       close() {
         closed = true;
@@ -2152,6 +2154,7 @@ export function createTurnRunner(
             text: '✅ (本轮无文本输出)',
             terminal: turn.terminalKind,
             threadTs: state.scopeKey,
+            ...(turn.mediaAbsPaths.length > 0 ? { mediaAbsPaths: turn.mediaAbsPaths } : {}),
           });
         } else {
           await output.im.sendText(userId, '✅ (本轮无文本输出)', {
@@ -2207,6 +2210,7 @@ export function createTurnRunner(
             terminal: 'error',
             threadTs: state.scopeKey,
             errorCode: turn?.terminalErrorCode ?? 'agent_turn_error',
+            ...(turn && turn.mediaAbsPaths.length > 0 ? { mediaAbsPaths: turn.mediaAbsPaths } : {}),
           });
         } else {
           await output.im.sendText(userId, `❌ 错误：${msg}`, {

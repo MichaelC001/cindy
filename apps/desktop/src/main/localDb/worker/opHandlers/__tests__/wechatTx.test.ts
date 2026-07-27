@@ -169,6 +169,160 @@ describe('WeChat reliable worker transactions', () => {
     expect(db.prepare('SELECT sync_cursor FROM wechat_sync_state').pluck().get()).toBe('');
   });
 
+  it('promotes accepted task attachments to the session before terminal cleanup', () => {
+    const db = createDb();
+    activate(db, 'epoch-1', null);
+    commitBatch(db, {
+      bindingEpoch: 'epoch-1',
+      messages: [message('task-1', 'platform-1', 'session-1')],
+      mediaBlobs: [
+        {
+          hash: HASH,
+          ext: '.png',
+          mimeType: 'image/png',
+          bytes: 4,
+          isCache: false,
+          createdAt: 100,
+          lastAccessAt: 100,
+        },
+      ],
+      mediaRefs: [
+        {
+          id: 'media-ref-1',
+          hash: HASH,
+          taskId: 'task-1',
+          label: 'wechat-image.png',
+          createdAt: 100,
+        },
+      ],
+      fileAttachments: [
+        {
+          id: 'file-1',
+          taskId: 'task-1',
+          sessionId: 'session-1',
+          absPath: 'C:\\safe\\report.pdf',
+          originalName: 'report.pdf',
+          mimeType: 'application/pdf',
+          bytes: 4,
+          createdAt: 100,
+        },
+      ],
+    });
+    lease(db, 'epoch-1', 200);
+    expect(
+      runTx(db, 'wechatMarkAccepted', {
+        bindingEpoch: 'epoch-1',
+        taskId: 'task-1',
+      }),
+    ).toBe(true);
+
+    expect(
+      runTx(db, 'wechatPromoteTaskAttachments', {
+        bindingEpoch: 'epoch-1',
+        taskId: 'task-1',
+        sessionId: 'session-1',
+        now: 201,
+      }),
+    ).toEqual({
+      eligible: true,
+      promotedMediaRefs: 1,
+      promotedFiles: 1,
+    });
+    expect(db.prepare('SELECT ref_kind AS refKind, ref_id AS refId FROM media_refs').all()).toEqual(
+      [{ refKind: 'session-attachment', refId: 'session-1' }],
+    );
+    expect(
+      db.prepare('SELECT status, promoted_at AS promotedAt FROM wechat_file_attachments').get(),
+    ).toEqual({ status: 'promoted', promotedAt: 201 });
+  });
+
+  it('refreshes pending replies with a newer peer context token and wakes delivery', () => {
+    const db = createDb();
+    activate(db, 'epoch-1', null);
+    commitBatch(db, {
+      messages: [message('task-1', 'platform-1', 'session-1')],
+    });
+    lease(db, 'epoch-1', 200);
+    runTx(db, 'wechatMarkAccepted', {
+      bindingEpoch: 'epoch-1',
+      taskId: 'task-1',
+    });
+    runTx(db, 'wechatCommitTerminal', {
+      bindingEpoch: 'epoch-1',
+      taskId: 'task-1',
+      now: 201,
+      outbox: [outbox('outbox-1', 'client-1', 0, 'reply')],
+    });
+    db.prepare('UPDATE wechat_outbox SET next_retry_at = 9999').run();
+    const replacement = {
+      nonce: Buffer.alloc(12, 8).toString('base64'),
+      ciphertext: Buffer.from('replacement-context').toString('base64'),
+      tag: Buffer.alloc(16, 9).toString('base64'),
+    };
+
+    expect(
+      runTx(db, 'wechatRefreshOutboxContexts', {
+        bindingEpoch: 'epoch-1',
+        peerId: 'peer-session-1',
+        now: 202,
+        contexts: [{ taskId: 'task-1', context: replacement }],
+      }),
+    ).toEqual({ refreshedTasks: 1, outboxWoken: 1 });
+    expect(
+      db
+        .prepare(
+          `SELECT context_nonce AS nonce, context_ciphertext AS ciphertext,
+                  context_tag AS tag
+           FROM wechat_inbox WHERE id = 'task-1'`,
+        )
+        .get(),
+    ).toEqual(replacement);
+    expect(db.prepare('SELECT next_retry_at FROM wechat_outbox').pluck().get()).toBe(202);
+  });
+
+  it('repairs accepted attachment ownership conservatively after a process restart', () => {
+    const db = createDb();
+    activate(db, 'epoch-1', null);
+    commitBatch(db, {
+      messages: [message('task-1', 'platform-1', 'session-1')],
+      mediaBlobs: [
+        {
+          hash: HASH,
+          ext: '.png',
+          mimeType: 'image/png',
+          bytes: 4,
+          isCache: false,
+          createdAt: 100,
+          lastAccessAt: 100,
+        },
+      ],
+      mediaRefs: [
+        {
+          id: 'media-ref-1',
+          hash: HASH,
+          taskId: 'task-1',
+          label: 'image',
+          createdAt: 100,
+        },
+      ],
+    });
+    lease(db, 'epoch-1', 200);
+    runTx(db, 'wechatMarkAccepted', {
+      bindingEpoch: 'epoch-1',
+      taskId: 'task-1',
+    });
+
+    runTx(db, 'wechatStopAll', {
+      bindingEpoch: 'epoch-1',
+      now: 201,
+      errorCode: 'PROCESS_RESTARTED',
+    });
+    expect(readTaskStatus(db, 'task-1')).toBe('interrupted');
+    expect(db.prepare('SELECT ref_kind AS refKind, ref_id AS refId FROM media_refs').all()).toEqual(
+      [{ refKind: 'session-attachment', refId: 'session-1' }],
+    );
+  });
+
   it('replays only pre-accepted work and interrupts accepted work after recovery', () => {
     const db = createDb();
     activate(db, 'epoch-1', null);
@@ -536,6 +690,7 @@ describe('WeChat reliable worker transactions', () => {
     expect(runTx(db, 'wechatUnbindCleanup', { bindingEpoch: 'epoch-1' })).toEqual({
       deletedTasks: 1,
       deletedMediaRefs: 0,
+      filePaths: [],
     });
     expect(count(db, 'wechat_sync_state')).toBe(0);
     expect(count(db, 'wechat_inbox')).toBe(0);

@@ -28,6 +28,7 @@ import { ensureProjectGitInitialized } from '../../git-snapshot/projectGitBootst
 import { readGitSafetySettings } from '../../maker-host/git-safety-settings-store';
 import * as imageCacheStore from '../../imageCacheStore';
 import { removeSessionRefs as removeSessionMediaRefs } from '../../cindy-media/ledger';
+import { removeWechatSessionAttachmentDir } from '../../im/wechat/mediaStaging';
 import { upsertRecentWorkdir } from './recentWorkdirs';
 import { createLogger } from '../../logger';
 import { DESKTOP_VISIBLE_SESSION_SOURCES } from '../../../shared/sessionSource.js';
@@ -1110,6 +1111,12 @@ export async function patchSessionMetaInDb(
           err: err instanceof Error ? err.message : String(err),
         });
       });
+    void removeWechatSessionAttachmentDir(sessionId).catch((err) => {
+      log.warn('WeChat session attachment cleanup failed', {
+        sessionId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
   removeHookAttachmentDir(sessionId, patch.status);
   scheduleWorktreeRecycleForStatusChange(sessionId, patch.status);

@@ -16,6 +16,8 @@ import {
   wechatLeaseNextTask,
   wechatMarkAccepted,
   wechatMarkOutboxDelivered,
+  wechatPromoteTaskAttachments,
+  wechatRefreshOutboxContexts,
   wechatRecordOutboxFailure,
   wechatReleaseDispatch,
   wechatSetWaitingDesktop,
@@ -103,6 +105,10 @@ export function tx(db: Database.Database, args: unknown): unknown {
       return wechatStopAll(db, txArgs);
     case 'wechatCloseBindingEpoch':
       return wechatCloseBindingEpoch(db, txArgs);
+    case 'wechatPromoteTaskAttachments':
+      return wechatPromoteTaskAttachments(db, txArgs);
+    case 'wechatRefreshOutboxContexts':
+      return wechatRefreshOutboxContexts(db, txArgs);
     case 'wechatUnbindCleanup':
       return wechatUnbindCleanup(db, txArgs);
     case 'session.importShare':

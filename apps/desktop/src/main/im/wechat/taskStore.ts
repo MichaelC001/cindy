@@ -11,6 +11,7 @@ import type {
   WechatPollMediaBlobInput,
   WechatPollMediaRefInput,
   WechatRecordOutboxFailureResult,
+  WechatPromoteTaskAttachmentsResult,
   WechatStopAllResult,
   WechatUnbindCleanupResult,
 } from '../../localDb/client/tx/types.js';
@@ -226,6 +227,47 @@ export class WechatTaskStore {
 
   markAccepted(bindingEpoch: string, taskId: string): Promise<boolean> {
     return this.#db.tx('wechatMarkAccepted', { bindingEpoch, taskId });
+  }
+
+  promoteTaskAttachments(args: {
+    bindingEpoch: string;
+    taskId: string;
+    sessionId: string;
+    now: number;
+  }): Promise<WechatPromoteTaskAttachmentsResult> {
+    return this.#db.tx('wechatPromoteTaskAttachments', args);
+  }
+
+  async refreshPendingOutboxContext(args: {
+    bindingEpoch: string;
+    peerId: string;
+    contextToken: string;
+    now: number;
+  }): Promise<void> {
+    const rows = await this.#db.query<{ taskId: string }>(
+      `SELECT DISTINCT i.id AS taskId
+       FROM wechat_inbox i
+       INNER JOIN wechat_outbox o
+         ON o.binding_epoch = i.binding_epoch AND o.task_id = i.id
+       WHERE i.binding_epoch = ? AND i.peer_id = ? AND i.status = 'delivery_pending'
+         AND o.status = 'pending'`,
+      [args.bindingEpoch, args.peerId],
+    );
+    if (rows.length === 0) return;
+    await this.#db.tx('wechatRefreshOutboxContexts', {
+      bindingEpoch: args.bindingEpoch,
+      peerId: args.peerId,
+      now: args.now,
+      contexts: rows.map(({ taskId }) => ({
+        taskId,
+        context: encryptWechatContextToken(
+          args.contextToken,
+          this.#dataKey,
+          args.bindingEpoch,
+          taskId,
+        ),
+      })),
+    });
   }
 
   releaseDispatch(bindingEpoch: string, taskId: string): Promise<boolean> {

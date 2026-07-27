@@ -21,8 +21,16 @@ export interface IlinkCdnMedia {
 export interface IlinkMessageItem {
   type?: number;
   msg_id?: string;
+  ref_msg?: {
+    title?: string;
+    message_item?: IlinkMessageItem;
+  };
   text_item?: { text?: string };
-  image_item?: { media?: IlinkCdnMedia; aeskey?: string };
+  image_item?: {
+    media?: IlinkCdnMedia;
+    aeskey?: string;
+    mid_size?: number;
+  };
   voice_item?: {
     media?: IlinkCdnMedia;
     encode_type?: number;
@@ -88,9 +96,19 @@ export interface WechatMediaRef {
   aesKeyBase64?: string;
   aesKeyHex?: string;
   fileName?: string;
+  /** Plaintext byte length when the wire format exposes it. */
   byteLength?: number;
+  /** AES-padded ciphertext byte length used by image/video send payloads. */
+  encryptedByteLength?: number;
   voiceEncoding?: number;
   transcript?: string;
+  md5Hex?: string;
+}
+
+export interface WechatQuote {
+  title?: string;
+  text?: string;
+  media: WechatMediaRef[];
 }
 
 export interface WechatInboundMessage {
@@ -102,6 +120,7 @@ export interface WechatInboundMessage {
   contextToken: string;
   text: string;
   media: WechatMediaRef[];
+  quote?: WechatQuote;
 }
 
 export interface WechatPollResult {
@@ -127,4 +146,17 @@ export interface WechatUploadRequest {
   bytes: Uint8Array;
   fileName: string;
   kind: WechatMediaRef["kind"];
+}
+
+export interface WechatUploadedMedia {
+  ref: WechatMediaRef;
+  fileName: string;
+}
+
+export interface WechatSendMediaRequest {
+  peerId: string;
+  contextToken: string;
+  clientId: string;
+  uploaded: WechatUploadedMedia;
+  runId?: string;
 }

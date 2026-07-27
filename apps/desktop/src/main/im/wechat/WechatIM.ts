@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 import {
   BaseIM,
@@ -14,6 +16,7 @@ import {
   asWechatIlinkError,
   chunkWechatText,
   filterWechatMarkdown,
+  WECHAT_MEDIA_MAX_BYTES,
   type WechatAuthorizationEvent,
   type WechatCredentials,
   type WechatInboundMessage,
@@ -27,6 +30,12 @@ import type { ImTurnRunner } from '../shared/turnRunner';
 import { createWechatTurnPermissionPolicy } from './permissionPolicy';
 import { WechatTaskStore, type WechatActiveBinding, type WechatTask } from './taskStore';
 import type { DbClient } from '../../localDb/client/DbClient';
+import {
+  removeUncommittedWechatFiles,
+  removeReleasedWechatFiles,
+  stageWechatTaskMedia,
+  type WechatTaskAttachment,
+} from './mediaStaging';
 
 const CREDENTIAL_PREFIX = 'wechat_credentials_';
 const DATA_KEY_NAME = 'wechat_data_key_v1';
@@ -64,6 +73,7 @@ interface StoredWechatCredentials {
 
 interface WechatTaskPayload {
   text: string;
+  attachments: WechatTaskAttachment[];
   unsupportedMedia: string[];
 }
 
@@ -240,7 +250,8 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     if (!store) throw new Error('WECHAT_DATA_KEY_UNAVAILABLE');
     await store.closeBindingEpoch(active.bindingEpoch, this.#now());
     await this.#stopEpoch();
-    await store.unbindCleanup(active.bindingEpoch);
+    const cleanup = await store.unbindCleanup(active.bindingEpoch);
+    await removeReleasedWechatFiles(cleanup.filePaths);
     this.host.secrets.remove(`${CREDENTIAL_PREFIX}${active.bindingEpoch}`);
     this.host.secrets.remove(DATA_KEY_NAME);
     store.destroy();
@@ -301,8 +312,44 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     return this.sendText(userId, filterWechatMarkdown(markdown));
   }
 
-  async sendFile(): Promise<SendFileResult> {
-    return { ok: false, reason: 'UPLOAD_FAIL' };
+  async sendFile(userId: string, absPath: string, displayName?: string): Promise<SendFileResult> {
+    const active = this.#activeTasks.get(userId);
+    const epoch = this.#epoch;
+    if (!active || !epoch) return { ok: false, reason: 'SEND_FAIL' };
+    let uploadedSuccessfully = false;
+    try {
+      const local = await readOutboundWechatFile(absPath, displayName);
+      const uploaded = await epoch.transport.uploadMedia(
+        {
+          peerId: userId,
+          bytes: local.bytes,
+          fileName: local.fileName,
+          kind: local.kind,
+        },
+        epoch.abort.signal,
+      );
+      uploadedSuccessfully = true;
+      const clientId = randomUUID();
+      await epoch.transport.sendMedia(
+        {
+          peerId: userId,
+          contextToken: active.task.contextToken,
+          clientId,
+          uploaded,
+        },
+        epoch.abort.signal,
+      );
+      return { ok: true, messageId: clientId };
+    } catch (error) {
+      const code =
+        error instanceof Error && 'code' in error
+          ? String((error as NodeJS.ErrnoException).code)
+          : '';
+      if (code === 'ENOENT') return { ok: false, reason: 'NOT_FOUND' };
+      if (code === 'WECHAT_FILE_EMPTY') return { ok: false, reason: 'EMPTY' };
+      if (code === 'WECHAT_FILE_TOO_LARGE') return { ok: false, reason: 'TOO_LARGE' };
+      return { ok: false, reason: uploadedSuccessfully ? 'SEND_FAIL' : 'UPLOAD_FAIL' };
+    }
   }
 
   sendInteractiveCard(): Promise<{ messageId: string }> {
@@ -349,10 +396,42 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         kind,
         chunkIndex: index,
         text: chunk,
+        ...(index === 0 && output.mediaAbsPaths?.length
+          ? {
+              mediaJson: JSON.stringify(
+                output.mediaAbsPaths.slice(0, 4).map((absPath) => ({
+                  absPath,
+                  clientId: randomUUID(),
+                })),
+              ),
+            }
+          : {}),
       })),
     });
     if (!result.committed) throw new Error('WECHAT_TERMINAL_COMMIT_REJECTED');
     active.terminalCommitted = true;
+  }
+
+  async onUserMessagePersisted(args: {
+    sessionId: string;
+    userMessageId: string | null;
+    persisted: boolean;
+  }): Promise<void> {
+    const bindingEpoch = this.#epoch?.binding.bindingEpoch;
+    if (!args.persisted || !args.userMessageId || !bindingEpoch) return;
+    try {
+      await this.#requireStore().promoteTaskAttachments({
+        bindingEpoch,
+        taskId: args.userMessageId,
+        sessionId: args.sessionId,
+        now: this.#now(),
+      });
+    } catch (error) {
+      this.log.warn('WeChat attachment promotion requires repair', {
+        task: shortId(args.userMessageId),
+        code: machineErrorCode(error),
+      });
+    }
   }
 
   async #activateAuthorizedCredentials(raw: WechatCredentials, generation: number): Promise<void> {
@@ -436,11 +515,15 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       try {
         const result = await transport.poll(cursor, signal);
         const now = this.#now();
-        const inputs = await Promise.all(
+        const preparedInputs = await Promise.all(
           result.messages.map((message, index) =>
-            this.#toTaskInput(binding.bindingEpoch, message, now, index),
+            this.#toTaskInput(binding.bindingEpoch, message, transport, signal, now, index),
           ),
         );
+        const inputs = preparedInputs.map((input) => input.message);
+        const mediaBlobs = preparedInputs.flatMap((input) => input.mediaBlobs);
+        const mediaRefs = preparedInputs.flatMap((input) => input.mediaRefs);
+        const fileAttachments = preparedInputs.flatMap((input) => input.fileAttachments);
         let releasePollBarrier!: () => void;
         this.#pollBarrier = new Promise<void>((resolve) => {
           releasePollBarrier = resolve;
@@ -453,7 +536,24 @@ export class WechatIM extends BaseIM implements RichChannelIM {
             nextCursor: result.cursor,
             now,
             messages: inputs,
+            mediaBlobs,
+            mediaRefs,
+            fileAttachments,
           });
+          await removeUncommittedWechatFiles(
+            fileAttachments,
+            new Set(committed.committed ? committed.insertedTaskIds : []),
+          );
+          if (committed.committed) {
+            for (const message of result.messages) {
+              await this.#requireStore().refreshPendingOutboxContext({
+                bindingEpoch: binding.bindingEpoch,
+                peerId: message.senderId,
+                contextToken: message.contextToken,
+                now,
+              });
+            }
+          }
           if (committed.committed) {
             for (let index = 0; index < result.messages.length; index += 1) {
               const message = result.messages[index];
@@ -584,32 +684,40 @@ export class WechatIM extends BaseIM implements RichChannelIM {
 
     const active: ActiveTask = { task, terminalCommitted: false };
     this.#activeTasks.set(task.peerId, active);
-    const dispatch = await runtime.runner.dispatchAgentTurn({
-      botContextId: this.#epoch?.credentials.ilinkBotId ?? '',
-      userId: task.peerId,
-      userMessageId: task.id,
-      text: prompt,
-      attachments: [],
-      queueMode: 'external',
-      beforeProviderStart: async () => {
-        const accepted = await this.#requireStore().markAccepted(task.bindingEpoch, task.id);
-        if (!accepted) throw new Error('WECHAT_ACCEPT_CAS_REJECTED');
-      },
-      turnPermissionPolicy: createWechatTurnPermissionPolicy(task.id, {
-        onInteractionStateChange: (state) => {
-          if (state === 'waiting') {
-            void this.#requireStore().setWaitingDesktop(task.bindingEpoch, task.id, true);
-            void this.sendText(task.peerId, '任务正在等待你在 Cindy 桌面端确认。').catch(
-              () => undefined,
-            );
-          } else {
-            void this.#requireStore().setWaitingDesktop(task.bindingEpoch, task.id, false);
-          }
+    const stopTyping = await this.#startTyping(task);
+    let dispatch;
+    try {
+      dispatch = await runtime.runner.dispatchAgentTurn({
+        botContextId: this.#epoch?.credentials.ilinkBotId ?? '',
+        userId: task.peerId,
+        userMessageId: task.id,
+        text: prompt,
+        attachments: payload.attachments,
+        queueMode: 'external',
+        beforeProviderStart: async () => {
+          const accepted = await this.#requireStore().markAccepted(task.bindingEpoch, task.id);
+          if (!accepted) throw new Error('WECHAT_ACCEPT_CAS_REJECTED');
         },
-      }),
-    });
+        turnPermissionPolicy: createWechatTurnPermissionPolicy(task.id, {
+          onInteractionStateChange: (state) => {
+            if (state === 'waiting') {
+              void this.#requireStore().setWaitingDesktop(task.bindingEpoch, task.id, true);
+              void this.sendText(task.peerId, '任务正在等待你在 Cindy 桌面端确认。').catch(
+                () => undefined,
+              );
+            } else {
+              void this.#requireStore().setWaitingDesktop(task.bindingEpoch, task.id, false);
+            }
+          },
+        }),
+      });
+    } catch (error) {
+      await stopTyping();
+      throw error;
+    }
 
     if (dispatch.kind !== 'accepted') {
+      await stopTyping();
       this.#activeTasks.delete(task.peerId);
       if (dispatch.kind === 'busy') {
         await this.#requireStore().releaseDispatch(task.bindingEpoch, task.id);
@@ -619,7 +727,12 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       }
       return;
     }
-    const terminal = await dispatch.terminal;
+    let terminal;
+    try {
+      terminal = await dispatch.terminal;
+    } finally {
+      await stopTyping();
+    }
     this.#activeTasks.delete(task.peerId);
     if (!active.terminalCommitted) {
       await this.#requireStore().commitInterrupted({
@@ -630,6 +743,63 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       });
     }
     await this.#flushOutbox(this.#epoch?.transport, task.bindingEpoch);
+  }
+
+  async #startTyping(task: WechatTask): Promise<() => Promise<void>> {
+    const epoch = this.#epoch;
+    if (!epoch) return async () => undefined;
+    let ticket: string;
+    try {
+      ticket = await epoch.transport.getTypingTicket(
+        task.peerId,
+        task.contextToken,
+        epoch.abort.signal,
+      );
+      await epoch.transport.setTyping(task.peerId, ticket, true, epoch.abort.signal);
+    } catch {
+      return async () => undefined;
+    }
+
+    let stopped = false;
+    let busy = false;
+    let nextHeartbeatAt = this.#now() + 60_000;
+    const timer = setInterval(() => {
+      if (stopped || busy || epoch.abort.signal.aborted) return;
+      busy = true;
+      void (async () => {
+        try {
+          await epoch.transport.setTyping(task.peerId, ticket, true, epoch.abort.signal);
+          if (this.#now() >= nextHeartbeatAt) {
+            await epoch.transport.sendMessage(
+              {
+                peerId: task.peerId,
+                text: '任务仍在处理中…',
+                contextToken: task.contextToken,
+                clientId: randomUUID(),
+              },
+              epoch.abort.signal,
+            );
+            nextHeartbeatAt = this.#now() + 120_000;
+          }
+        } catch {
+          // Presence is best effort and must never fail the task.
+        } finally {
+          busy = false;
+        }
+      })();
+    }, 5_000);
+    timer.unref?.();
+
+    return async () => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      try {
+        await epoch.transport.setTyping(task.peerId, ticket, false, epoch.abort.signal);
+      } catch {
+        // Best-effort presence cleanup.
+      }
+    };
   }
 
   async #processCommand(task: WechatTask, command: string): Promise<void> {
@@ -750,36 +920,76 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     if (!transport) return;
     const store = this.#requireStore();
     for (const item of await store.listDueOutbox(bindingEpoch, this.#now())) {
-      if (!(await store.claimOutbox(bindingEpoch, item.id))) continue;
-      try {
-        await transport.sendMessage(
-          {
-            peerId: await this.#peerIdForTask(bindingEpoch, item.taskId),
-            text: item.text,
-            contextToken: item.contextToken,
-            clientId: item.clientId,
-          },
-          this.#epoch?.abort.signal ?? new AbortController().signal,
-        );
-        await store.markOutboxDelivered(bindingEpoch, item.id, this.#now());
-      } catch (error) {
-        const safe = asWechatIlinkError(error);
-        await store.recordOutboxFailure({
-          bindingEpoch,
-          outboxId: item.id,
-          nextRetryAt: this.#now() + retryDelay(item.attempts + 1),
-          terminal: false,
-          errorCode: safe.code,
-        });
-        if (safe.code === 'AUTH_REPLACED' || safe.code === 'AUTH_EXPIRED') {
-          this.#setState({
-            ...this.#state,
-            phase: 'needs_reauth',
-            errorCode: safe.code.toLowerCase(),
+      for (let immediateAttempt = 0; immediateAttempt < 3; immediateAttempt += 1) {
+        if (!(await store.claimOutbox(bindingEpoch, item.id))) break;
+        try {
+          await this.#sendOutboxItem(transport, bindingEpoch, item);
+          await store.markOutboxDelivered(bindingEpoch, item.id, this.#now());
+          break;
+        } catch (error) {
+          const safe = asWechatIlinkError(error);
+          const retryNow = safe.retryable && immediateAttempt < 2;
+          await store.recordOutboxFailure({
+            bindingEpoch,
+            outboxId: item.id,
+            nextRetryAt: retryNow
+              ? this.#now()
+              : this.#now() + retryDelay(item.attempts + immediateAttempt + 1),
+            terminal: false,
+            errorCode: safe.code,
           });
-          return;
+          if (safe.code === 'AUTH_REPLACED' || safe.code === 'AUTH_EXPIRED') {
+            this.#setState({
+              ...this.#state,
+              phase: 'needs_reauth',
+              errorCode: safe.code.toLowerCase(),
+            });
+            return;
+          }
+          if (!retryNow) break;
         }
       }
+    }
+  }
+
+  async #sendOutboxItem(
+    transport: WechatTransport,
+    bindingEpoch: string,
+    item: Awaited<ReturnType<WechatTaskStore['listDueOutbox']>>[number],
+  ): Promise<void> {
+    const signal = this.#epoch?.abort.signal ?? new AbortController().signal;
+    const peerId = await this.#peerIdForTask(bindingEpoch, item.taskId);
+    if (item.text) {
+      await transport.sendMessage(
+        {
+          peerId,
+          text: item.text,
+          contextToken: item.contextToken,
+          clientId: item.clientId,
+        },
+        signal,
+      );
+    }
+    for (const media of parseOutboxMedia(item.mediaJson)) {
+      const local = await readOutboundWechatFile(media.absPath);
+      const uploaded = await transport.uploadMedia(
+        {
+          peerId,
+          bytes: local.bytes,
+          fileName: local.fileName,
+          kind: local.kind,
+        },
+        signal,
+      );
+      await transport.sendMedia(
+        {
+          peerId,
+          contextToken: item.contextToken,
+          clientId: media.clientId,
+          uploaded,
+        },
+        signal,
+      );
     }
   }
 
@@ -797,6 +1007,8 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   async #toTaskInput(
     bindingEpoch: string,
     message: WechatInboundMessage,
+    transport: WechatTransport,
+    signal: AbortSignal,
     receivedAt: number,
     index: number,
   ) {
@@ -809,25 +1021,41 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       existing ?? (await runtime.repo.createSession(botId, message.senderId, undefined, prepared));
     const epoch = await this.#requireStore().getConversationEpoch(bindingEpoch, message.senderId);
     const taskId = randomUUID();
-    return {
-      id: taskId,
-      platformMessageId: message.messageId,
-      platformSeq: platformSequence(message, receivedAt, index),
-      peerId: message.senderId,
-      receivedAt,
-      platformCreatedAt: message.createdAt ?? receivedAt,
+    const staged = await stageWechatTaskMedia({
+      bindingEpoch,
+      taskId,
       sessionId: session.id,
-      conversationEpoch: epoch,
-      payloadJson: JSON.stringify({
-        text: message.text,
-        unsupportedMedia: message.media.map((item) => item.kind),
-      } satisfies WechatTaskPayload),
-      contextToken: message.contextToken,
-      overloadReply: {
-        outboxId: randomUUID(),
-        clientId: randomUUID(),
-        text: '当前微信任务较多，请稍后再试。',
+      media: [...(message.quote?.media ?? []), ...message.media],
+      transport,
+      signal,
+      now: receivedAt,
+    });
+    const quote = formatWechatQuote(message);
+    return {
+      message: {
+        id: taskId,
+        platformMessageId: message.messageId,
+        platformSeq: platformSequence(message, receivedAt, index),
+        peerId: message.senderId,
+        receivedAt,
+        platformCreatedAt: message.createdAt ?? receivedAt,
+        sessionId: session.id,
+        conversationEpoch: epoch,
+        payloadJson: JSON.stringify({
+          text: quote ? `${quote}\n${message.text}`.trim() : message.text,
+          attachments: staged.attachments,
+          unsupportedMedia: staged.unsupportedMedia,
+        } satisfies WechatTaskPayload),
+        contextToken: message.contextToken,
+        overloadReply: {
+          outboxId: randomUUID(),
+          clientId: randomUUID(),
+          text: '当前微信任务较多，请稍后再试。',
+        },
       },
+      mediaBlobs: staged.mediaBlobs,
+      mediaRefs: staged.mediaRefs,
+      fileAttachments: staged.fileAttachments,
     };
   }
 
@@ -907,14 +1135,44 @@ export function sessionIdFor(botId: string, peerId: string): string {
 
 function parseTaskPayload(raw: string): WechatTaskPayload {
   const value = JSON.parse(raw) as Partial<WechatTaskPayload>;
+  const attachments = value.attachments ?? [];
   if (
     typeof value.text !== 'string' ||
+    !Array.isArray(attachments) ||
+    !attachments.every(isWechatTaskAttachment) ||
     !Array.isArray(value.unsupportedMedia) ||
     !value.unsupportedMedia.every((item) => typeof item === 'string')
   ) {
     throw new Error('WECHAT_TASK_PAYLOAD_INVALID');
   }
-  return { text: value.text, unsupportedMedia: value.unsupportedMedia };
+  return {
+    text: value.text,
+    attachments,
+    unsupportedMedia: value.unsupportedMedia,
+  };
+}
+
+function isWechatTaskAttachment(value: unknown): value is WechatTaskAttachment {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Partial<WechatTaskAttachment>;
+  return (
+    (item.kind === 'image' || item.kind === 'file') &&
+    (item.storage === 'cindy-media' || item.storage === 'file') &&
+    typeof item.absPath === 'string' &&
+    typeof item.originalName === 'string' &&
+    typeof item.mimeType === 'string' &&
+    (item.url === undefined || typeof item.url === 'string')
+  );
+}
+
+function formatWechatQuote(message: WechatInboundMessage): string {
+  const quote = message.quote;
+  if (!quote) return '';
+  const details = [quote.title?.trim(), quote.text?.trim()].filter((item): item is string =>
+    Boolean(item),
+  );
+  if (quote.media.length > 0) details.push(`附件 ${quote.media.length} 个`);
+  return details.length > 0 ? `[引用：${details.join('｜')}]` : '';
 }
 
 function platformSequence(
@@ -929,6 +1187,109 @@ function platformSequence(
 
 function retryDelay(attempt: number): number {
   return [1_000, 5_000, 30_000, 120_000][Math.min(Math.max(attempt - 1, 0), 3)];
+}
+
+interface OutboxMedia {
+  absPath: string;
+  clientId: string;
+}
+
+function parseOutboxMedia(raw: string): OutboxMedia[] {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error('WECHAT_OUTBOX_MEDIA_INVALID');
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length > 4 ||
+    !value.every(
+      (item) =>
+        item &&
+        typeof item === 'object' &&
+        !Array.isArray(item) &&
+        typeof (item as Partial<OutboxMedia>).absPath === 'string' &&
+        path.isAbsolute((item as Partial<OutboxMedia>).absPath!) &&
+        typeof (item as Partial<OutboxMedia>).clientId === 'string' &&
+        (item as Partial<OutboxMedia>).clientId!.length > 0,
+    )
+  ) {
+    throw new Error('WECHAT_OUTBOX_MEDIA_INVALID');
+  }
+  return value as OutboxMedia[];
+}
+
+async function readOutboundWechatFile(
+  absPath: string,
+  displayName?: string,
+): Promise<{
+  bytes: Uint8Array;
+  fileName: string;
+  kind: 'image' | 'video' | 'file';
+}> {
+  if (!path.isAbsolute(absPath)) {
+    throw Object.assign(new Error('WeChat outbound path must be absolute.'), {
+      code: 'ENOENT',
+    });
+  }
+  const handle = await fs.open(absPath, 'r');
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw Object.assign(new Error('WeChat outbound path is not a regular file.'), {
+        code: 'ENOENT',
+      });
+    }
+    if (stat.size === 0) {
+      throw Object.assign(new Error('WeChat outbound file is empty.'), {
+        code: 'WECHAT_FILE_EMPTY',
+      });
+    }
+    if (stat.size > WECHAT_MEDIA_MAX_BYTES) {
+      throw Object.assign(new Error('WeChat outbound file exceeds 5 MB.'), {
+        code: 'WECHAT_FILE_TOO_LARGE',
+      });
+    }
+    const bytes = await handle.readFile();
+    if (bytes.byteLength !== stat.size) {
+      throw new Error('WECHAT_OUTBOUND_FILE_CHANGED');
+    }
+    return {
+      bytes,
+      fileName: sanitizeOutboundFileName(displayName ?? path.basename(absPath)),
+      kind: detectOutboundWechatKind(bytes),
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+function sanitizeOutboundFileName(input: string): string {
+  const value = path
+    .basename(input.normalize('NFKC'))
+    .replace(/\p{Cc}/gu, '_')
+    .replace(/[<>:"/\\|?*]/g, '_')
+    .replace(/[. ]+$/g, '')
+    .trim()
+    .slice(0, 180);
+  return value || 'cindy-file.bin';
+}
+
+function detectOutboundWechatKind(bytes: Uint8Array): 'image' | 'video' | 'file' {
+  const ascii = (offset: number, value: string): boolean =>
+    bytes.length >= offset + value.length &&
+    Array.from(value).every((char, index) => bytes[offset + index] === char.charCodeAt(0));
+  if (
+    (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) ||
+    (bytes.length >= 8 && bytes[0] === 0x89 && ascii(1, 'PNG\r\n\u001a\n')) ||
+    ascii(0, 'GIF87a') ||
+    ascii(0, 'GIF89a') ||
+    (ascii(0, 'RIFF') && ascii(8, 'WEBP'))
+  ) {
+    return 'image';
+  }
+  return ascii(4, 'ftyp') ? 'video' : 'file';
 }
 
 function withJitter(value: number): number {

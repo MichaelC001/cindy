@@ -1,7 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { asWechatIlinkError, WechatIlinkError } from "./errors.js";
 import { parseJsonObject } from "./codec.js";
-import type { IlinkMessage, WechatSendRequest } from "./types.js";
+import type {
+  IlinkMessage,
+  IlinkMessageItem,
+  WechatMediaRef,
+  WechatSendMediaRequest,
+  WechatSendRequest,
+} from "./types.js";
 import {
   MessageItemType,
   MessageState,
@@ -384,6 +390,108 @@ export class IlinkApiClient {
     }
   }
 
+  async getUploadUrl(
+    request: {
+      peerId: string;
+      fileKey: string;
+      mediaType: number;
+      rawSize: number;
+      rawMd5: string;
+      encryptedSize: number;
+      aesKeyHex: string;
+    },
+    signal: AbortSignal,
+  ): Promise<{
+    uploadParam?: string;
+    uploadFullUrl?: string;
+  }> {
+    const response = await this.request(
+      "ilink/bot/getuploadurl",
+      {
+        method: "POST",
+        authenticated: true,
+        body: {
+          filekey: request.fileKey,
+          media_type: request.mediaType,
+          to_user_id: request.peerId,
+          rawsize: request.rawSize,
+          rawfilemd5: request.rawMd5,
+          filesize: request.encryptedSize,
+          no_need_thumb: true,
+          aeskey: request.aesKeyHex,
+          base_info: this.baseInfo(),
+        },
+      },
+      signal,
+    );
+    if (typeof response.ret === "number" && response.ret !== 0) {
+      throw new WechatIlinkError(
+        "PROTOCOL_ERROR",
+        "iLink rejected the media upload request.",
+        true,
+      );
+    }
+    return {
+      uploadParam:
+        typeof response.upload_param === "string"
+          ? response.upload_param
+          : undefined,
+      uploadFullUrl:
+        typeof response.upload_full_url === "string"
+          ? response.upload_full_url
+          : undefined,
+    };
+  }
+
+  async sendMedia(
+    request: WechatSendMediaRequest,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const { ref, fileName } = request.uploaded;
+    if (
+      !request.peerId.trim() ||
+      !request.contextToken.trim() ||
+      !request.clientId.trim() ||
+      !ref.encryptedQuery ||
+      !ref.aesKeyBase64
+    ) {
+      throw new WechatIlinkError(
+        "PROTOCOL_ERROR",
+        "The iLink media message is incomplete.",
+        false,
+      );
+    }
+    const item = mediaItemFor(ref, fileName);
+    const response = await this.request(
+      "ilink/bot/sendmessage",
+      {
+        method: "POST",
+        authenticated: true,
+        body: {
+          msg: {
+            from_user_id: "",
+            to_user_id: request.peerId,
+            client_id: request.clientId,
+            message_type: MessageType.BOT,
+            message_state: MessageState.FINISH,
+            item_list: [item],
+            context_token: request.contextToken,
+            run_id: request.runId,
+          },
+          base_info: this.baseInfo(),
+        },
+      },
+      signal,
+    );
+    if (typeof response.ret === "number" && response.ret !== 0) {
+      throw new WechatIlinkError(
+        "PROTOCOL_ERROR",
+        "iLink rejected the media message.",
+        true,
+      );
+    }
+  }
+
   getConfig(peerId: string, contextToken: string, signal: AbortSignal) {
     if (!peerId.trim() || !contextToken.trim()) {
       throw new WechatIlinkError(
@@ -483,5 +591,47 @@ export class IlinkApiClient {
       }
     }
     return messages;
+  }
+}
+
+function mediaItemFor(ref: WechatMediaRef, fileName: string): IlinkMessageItem {
+  const media = {
+    encrypt_query_param: ref.encryptedQuery,
+    aes_key: ref.aesKeyBase64,
+    encrypt_type: 1,
+  };
+  switch (ref.kind) {
+    case "image":
+      return {
+        type: MessageItemType.IMAGE,
+        image_item: {
+          media,
+          mid_size: ref.encryptedByteLength ?? ref.byteLength,
+        },
+      };
+    case "video":
+      return {
+        type: MessageItemType.VIDEO,
+        video_item: {
+          media,
+          video_size: ref.encryptedByteLength ?? ref.byteLength,
+        },
+      };
+    case "file":
+      return {
+        type: MessageItemType.FILE,
+        file_item: {
+          media,
+          file_name: fileName,
+          len:
+            ref.byteLength === undefined ? undefined : String(ref.byteLength),
+        },
+      };
+    case "voice":
+      throw new WechatIlinkError(
+        "PROTOCOL_ERROR",
+        "Outbound voice messages are not supported.",
+        false,
+      );
   }
 }

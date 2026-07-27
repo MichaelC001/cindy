@@ -118,6 +118,8 @@ export interface ImFinalOutput {
   terminal: 'done' | 'aborted' | 'error';
   threadTs?: string;
   errorCode?: string;
+  /** Managed local media discovered in the terminal assistant output. */
+  mediaAbsPaths?: string[];
 }
 
 /**

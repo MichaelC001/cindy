@@ -1329,6 +1329,12 @@ const config: ForgeConfig = {
           target: 'preload',
         },
         {
+          entry: 'src/main/im/wechat/silkWorker.ts',
+          config: 'vite.silk-worker.config.ts',
+          // SILK/WASM 解码隔离在线程中，避免阻塞 Electron main。
+          target: 'preload',
+        },
+        {
           entry: 'src/main/watcher-host/watcherHostProcess.ts',
           config: 'vite.watcher-host.config.ts',
           // 同 dbWorker:借 preload target 出 CJS 单文件；运行时是 Electron

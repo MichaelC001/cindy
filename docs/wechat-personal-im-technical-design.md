@@ -18,6 +18,11 @@ Cindy 在「设置 → IM 机器人 → 个人」中增加个人微信连接。�
 
 最终架构：
 
+> 架构决策（2026-07-27）：实现形态采用更接近 FeishuBot 的 Desktop Main
+> 进程内直连通道，复用共享 IM turn runner；微信模块自行负责授权、长轮询、
+> durable inbox/outbox 与媒体生命周期。SlackBot 的 hook-control/WebSocket
+> 控制面不进入本功能范围。
+
 ```mermaid
 flowchart LR
   WX["个人微信"]
