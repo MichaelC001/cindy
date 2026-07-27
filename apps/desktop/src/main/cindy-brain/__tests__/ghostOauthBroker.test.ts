@@ -87,6 +87,22 @@ describe('createGhostOauthBrokerClient', () => {
     });
   });
 
+  it('账号能力切换等非传输异常→ EXCHANGE_FAILED,不误报 NETWORK', async () => {
+    const client = createGhostOauthBrokerClient({
+      apiPost: vi.fn(async () => {
+        throw Object.assign(new Error('[PRECONDITION_FAILED] app session is switching'), {
+          code: 'PRECONDITION_FAILED',
+        });
+      }),
+      hasLoginToken: () => true,
+    });
+    await expect(client.refresh('jira', { refreshToken: 'rt' })).resolves.toMatchObject({
+      ok: false,
+      error: 'EXCHANGE_FAILED',
+      invalidGrant: false,
+    });
+  });
+
   it.each([
     ['HTTP_404', 404],
     ['INTERNAL_ERROR', 503],

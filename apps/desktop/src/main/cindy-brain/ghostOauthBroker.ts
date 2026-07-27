@@ -153,7 +153,10 @@ export function createGhostOauthBrokerClient(deps: GhostOauthBrokerDeps): GhostO
           detail: `${err.code} ${err.message}`.slice(0, 200),
         };
       }
-      return { ok: false, error: 'NETWORK', invalidGrant: false, detail: String(err) };
+      // serverApiFetch 的真实传输失败会带 statusCode:0 / NETWORK_ERROR,
+      // 已在上方精确归类。其余异常可能来自账号能力门禁或调用前置条件，
+      // 不能误导用户检查网络。
+      return { ok: false, error: 'EXCHANGE_FAILED', invalidGrant: false, detail: String(err) };
     }
     const bundle = toBundle(raw);
     if (!bundle) {
