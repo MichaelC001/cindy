@@ -32,6 +32,10 @@ import { ownerScopedImSecrets } from './ownerScopedStorage';
 import { captureImAccountGeneration, isImAccountGenerationCurrent } from './accountBoundary';
 import { getDbClient } from '../localDb/client/current';
 import { WechatIM, WECHAT_AUTH_BASE_URL } from './wechat/WechatIM';
+import {
+  WECHAT_COMPATIBILITY_POLICY_PRODUCTION_CONFIG,
+  WechatCompatibilityPolicyService,
+} from './wechat/compatibilityPolicy';
 
 const log = createLogger('im/host');
 
@@ -123,6 +127,17 @@ export const discordIm = createDiscordIM(host, {
   expiredCardNotice: discordUiText.expiredCardNotice,
   ownerNoticeText: (phase) => t(`settings.discordBot.ownerNotice.${phase}`),
 });
+export const wechatCompatibilityPolicy = new WechatCompatibilityPolicyService({
+  ...WECHAT_COMPATIBILITY_POLICY_PRODUCTION_CONFIG,
+  cachePath: () =>
+    path.join(
+      app.getPath('userData'),
+      'controlled-config',
+      'wechat-compatibility-policy.v1.json',
+    ),
+  appVersion: () => app.getVersion(),
+  fetch: (input, init) => net.fetch(input, init),
+});
 export const wechatIm = new WechatIM({
   host,
   getDbClient,
@@ -148,5 +163,11 @@ export const wechatIm = new WechatIM({
   openAuthorizationUrl: (url) => shell.openExternal(url),
   captureAccountGeneration: captureImAccountGeneration,
   isAccountGenerationCurrent: isImAccountGenerationCurrent,
+  isCompatibilityDisabled: () => wechatCompatibilityPolicy.isDisabled(),
+});
+wechatCompatibilityPolicy.subscribe((decision) => {
+  void wechatIm.setCompatibilityDisabled(decision.disabled).catch(() => {
+    log.warn('failed to apply personal WeChat compatibility policy');
+  });
 });
 export const im = createIM([feishuIm, discordIm, wechatIm]);

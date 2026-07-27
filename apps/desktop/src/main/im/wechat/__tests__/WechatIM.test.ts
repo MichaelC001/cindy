@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { IMHost } from '@cindy/im';
+import type { WechatCredentials, WechatTransport } from '@cindy/wechat-ilink';
 
 import type { DbClient } from '../../../localDb/client/DbClient';
 import { sessionIdFor, WechatIM, type WechatIMDeps } from '../WechatIM';
@@ -35,6 +36,76 @@ describe('WechatIM host boundary', () => {
     await expect(im.patchMarkdownCard()).rejects.toThrow('WECHAT_RICH_OUTPUT_UNSUPPORTED');
     await expect(im.startStreamingText('peer')).rejects.toThrow('WECHAT_RICH_OUTPUT_UNSUPPORTED');
   });
+
+  it('fails closed before authorization when the signed compatibility policy disables it', async () => {
+    const createTransport = vi.fn();
+    const im = new WechatIM(
+      deps({
+        createTransport,
+        isCompatibilityDisabled: () => true,
+      }),
+    );
+
+    await expect(im.authorize()).rejects.toThrow('WECHAT_DISABLED_BY_POLICY');
+    expect(im.getState()).toMatchObject({
+      phase: 'disabled_by_policy',
+      bound: false,
+    });
+    expect(createTransport).not.toHaveBeenCalled();
+  });
+
+  it('applies and clears a runtime compatibility disable without starting a transport', async () => {
+    let disabled = false;
+    const im = new WechatIM(
+      deps({
+        isCompatibilityDisabled: () => disabled,
+      }),
+    );
+
+    disabled = true;
+    await im.setCompatibilityDisabled(true);
+    expect(im.getState()).toMatchObject({ phase: 'disabled_by_policy', bound: false });
+
+    disabled = false;
+    await im.setCompatibilityDisabled(false);
+    expect(im.getState()).toMatchObject({ phase: 'disconnected', bound: false });
+  });
+
+  it('drops late authorization credentials after a compatibility revision changes', async () => {
+    const testHost = host();
+    let resolveCredentials!: (credentials: WechatCredentials) => void;
+    const waitAuthorization = vi.fn(
+      () =>
+        new Promise<WechatCredentials>((resolve) => {
+          resolveCredentials = resolve;
+        }),
+    );
+    const authorizationTransport = {
+      beginAuthorization: vi.fn(async () => ({
+        id: 'challenge',
+        qrCodeUrl: 'https://ilinkai.weixin.qq.com/qr/challenge',
+        createdAt: 1,
+      })),
+      waitAuthorization,
+    } as unknown as WechatTransport;
+    const createTransport = vi.fn(() => authorizationTransport);
+    const im = new WechatIM(deps({ host: testHost, createTransport }));
+
+    await im.authorize();
+    await vi.waitFor(() => expect(waitAuthorization).toHaveBeenCalledOnce());
+    await im.setCompatibilityDisabled(true);
+    resolveCredentials({
+      token: 'late-token',
+      botId: 'late-bot',
+      userId: 'late-user',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(createTransport).toHaveBeenCalledOnce();
+    expect(testHost.secrets.write).not.toHaveBeenCalled();
+    expect(im.getState()).toMatchObject({ phase: 'disabled_by_policy', bound: false });
+  });
 });
 
 function deps(overrides: Partial<WechatIMDeps> & { host?: IMHost } = {}): WechatIMDeps {
@@ -50,6 +121,7 @@ function deps(overrides: Partial<WechatIMDeps> & { host?: IMHost } = {}): Wechat
     captureAccountGeneration: overrides.captureAccountGeneration ?? (() => 1),
     isAccountGenerationCurrent:
       overrides.isAccountGenerationCurrent ?? ((generation) => generation === 1),
+    isCompatibilityDisabled: overrides.isCompatibilityDisabled ?? (() => false),
     now: overrides.now ?? (() => 100),
   };
 }

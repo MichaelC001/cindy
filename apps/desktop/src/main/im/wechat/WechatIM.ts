@@ -17,6 +17,7 @@ import {
   chunkWechatText,
   filterWechatMarkdown,
   WECHAT_MEDIA_MAX_BYTES,
+  WechatIlinkError,
   type WechatAuthorizationEvent,
   type WechatCredentials,
   type WechatInboundMessage,
@@ -104,6 +105,7 @@ export interface WechatIMDeps {
   openAuthorizationUrl(url: string): Promise<void>;
   captureAccountGeneration(): number | null;
   isAccountGenerationCurrent(generation: number): boolean;
+  isCompatibilityDisabled(): boolean;
   now?: () => number;
 }
 
@@ -134,10 +136,14 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   } | null = null;
   #authorizationAbort: AbortController | null = null;
   #pollBarrier: Promise<void> = Promise.resolve();
+  #compatibilityDisabled = false;
+  #compatibilityRevision = 0;
+  #lifecycleBarrier: Promise<void> = Promise.resolve();
 
   constructor(deps: WechatIMDeps) {
     super('wechat', deps.host);
     this.#deps = deps;
+    this.#compatibilityDisabled = deps.isCompatibilityDisabled();
   }
 
   attachTurnRuntime(runtime: TurnRuntime): void {
@@ -150,14 +156,63 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   }
 
   async init(): Promise<void> {
-    if (this.#store) return;
-    const active = await this.#readActiveBindingWithoutKey();
-    if (!active) {
-      this.#hasBinding = false;
+    await this.setCompatibilityDisabled(this.#deps.isCompatibilityDisabled());
+    const revision = this.#compatibilityRevision;
+    await this.#queueLifecycle(async () => {
+      if (this.#store && !this.#compatibilityDisabled) return;
+      await this.#resumeStoredBinding(revision);
+    });
+  }
+
+  setCompatibilityDisabled(disabled: boolean): Promise<void> {
+    if (disabled === this.#compatibilityDisabled) return this.#lifecycleBarrier;
+    this.#compatibilityDisabled = disabled;
+    const revision = ++this.#compatibilityRevision;
+    if (disabled) {
+      this.cancelAuthorization();
+      this.#epoch?.abort.abort();
+      this.#setState({
+        phase: 'disabled_by_policy',
+        queuedTasks: this.#state.queuedTasks,
+      });
+    }
+    return this.#queueLifecycle(() => this.#applyCompatibilityDisabled(disabled, revision));
+  }
+
+  async #applyCompatibilityDisabled(disabled: boolean, revision: number): Promise<void> {
+    if (revision !== this.#compatibilityRevision || disabled !== this.#compatibilityDisabled) return;
+    if (disabled) {
+      const stopped = this.#stopEpoch();
+      this.#setState({
+        phase: 'disabled_by_policy',
+        queuedTasks: this.#state.queuedTasks,
+      });
+      await stopped;
+      return;
+    }
+    if (!this.#hasBinding) {
       this.#setState({ phase: 'disconnected', queuedTasks: 0 });
       return;
     }
+    await this.#resumeStoredBinding(revision);
+  }
+
+  async #resumeStoredBinding(revision: number): Promise<void> {
+    const active = await this.#readActiveBindingWithoutKey();
+    if (!this.#isCompatibilityRevisionCurrent(revision)) return;
+    if (!active) {
+      this.#hasBinding = false;
+      this.#setState({
+        phase: this.#compatibilityDisabled ? 'disabled_by_policy' : 'disconnected',
+        queuedTasks: 0,
+      });
+      return;
+    }
     this.#hasBinding = true;
+    if (this.#compatibilityDisabled) {
+      this.#setState({ phase: 'disabled_by_policy', queuedTasks: 0 });
+      return;
+    }
     const key = this.#readDataKey();
     const credentials = this.#readCredentials(active.bindingEpoch);
     if (!key || !credentials) {
@@ -168,23 +223,30 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       });
       return;
     }
-    this.#store = new WechatTaskStore(this.#deps.getDbClient(), key);
-    await this.#store.stopAll({
-      bindingEpoch: active.bindingEpoch,
-      now: this.#now(),
-      errorCode: 'PROCESS_RESTARTED',
-    });
-    await this.#startEpoch(active, credentials);
+    if (!this.#store) {
+      this.#store = new WechatTaskStore(this.#deps.getDbClient(), key);
+      await this.#store.stopAll({
+        bindingEpoch: active.bindingEpoch,
+        now: this.#now(),
+        errorCode: 'PROCESS_RESTARTED',
+      });
+    }
+    if (!this.#isCompatibilityRevisionAllowed(revision)) return;
+    await this.#stopEpoch();
+    if (!this.#isCompatibilityRevisionAllowed(revision)) return;
+    await this.#startEpoch(active, credentials, revision);
   }
 
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
     this.cancelAuthorization();
-    await this.#stopEpoch();
-    this.#store?.destroy();
-    this.#store = null;
-    this.#activeTasks.clear();
-    this.#hasBinding = false;
-    this.#setState({ phase: 'disconnected', queuedTasks: 0 });
+    return this.#queueLifecycle(async () => {
+      await this.#stopEpoch();
+      this.#store?.destroy();
+      this.#store = null;
+      this.#activeTasks.clear();
+      this.#hasBinding = false;
+      this.#setState({ phase: 'disconnected', queuedTasks: 0 });
+    });
   }
 
   registerIpc(): void {
@@ -192,6 +254,17 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   }
 
   async authorize(): Promise<{ started: true }> {
+    if (this.#deps.isCompatibilityDisabled() && !this.#compatibilityDisabled) {
+      await this.setCompatibilityDisabled(true);
+    }
+    if (this.#compatibilityDisabled) {
+      this.#setState({
+        phase: 'disabled_by_policy',
+        queuedTasks: this.#state.queuedTasks,
+      });
+      throw new Error('WECHAT_DISABLED_BY_POLICY');
+    }
+    const compatibilityRevision = this.#compatibilityRevision;
     if (!this.host.secrets.isAvailable()) {
       throw new Error('WECHAT_SAFE_STORAGE_UNAVAILABLE');
     }
@@ -204,6 +277,12 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     const transport = this.#deps.createTransport({
       credentials: null,
       onAuthorizationEvent: (event) => {
+        if (
+          this.#authorizationAbort !== abort ||
+          !this.#isCompatibilityRevisionAllowed(compatibilityRevision)
+        ) {
+          return;
+        }
         if (event.status === 'waiting' || event.status === 'scanned') {
           this.#setState({ ...this.#state, phase: 'waiting_confirmation' });
         } else if (event.status === 'qr-refreshed') {
@@ -215,15 +294,33 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     void (async () => {
       try {
         const challenge = await transport.beginAuthorization(abort.signal);
-        if (!this.#isGenerationCurrent(generation)) return;
+        if (
+          this.#authorizationAbort !== abort ||
+          !this.#isGenerationCurrent(generation) ||
+          !this.#isCompatibilityRevisionAllowed(compatibilityRevision)
+        ) {
+          return;
+        }
         this.#setState({ ...this.#state, phase: 'waiting_confirmation' });
         await this.#deps.openAuthorizationUrl(challenge.qrCodeUrl);
         const credentials = await transport.waitAuthorization(challenge, abort.signal);
-        if (!this.#isGenerationCurrent(generation)) return;
-        await this.#activateAuthorizedCredentials(credentials, generation);
+        if (
+          this.#authorizationAbort !== abort ||
+          !this.#isGenerationCurrent(generation) ||
+          !this.#isCompatibilityRevisionAllowed(compatibilityRevision)
+        ) {
+          return;
+        }
+        await this.#queueLifecycle(() =>
+          this.#activateAuthorizedCredentials(credentials, generation, compatibilityRevision),
+        );
       } catch (error) {
         const safe = asWechatIlinkError(error);
-        if (safe.code !== 'ABORTED' && this.#isGenerationCurrent(generation)) {
+        if (
+          safe.code !== 'ABORTED' &&
+          this.#isGenerationCurrent(generation) &&
+          this.#isCompatibilityRevisionAllowed(compatibilityRevision)
+        ) {
           this.#setState({
             ...this.#state,
             phase: safe.code === 'AUTH_REPLACED' ? 'needs_reauth' : 'error',
@@ -245,14 +342,23 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     }
   }
 
-  async unbind(): Promise<void> {
+  unbind(): Promise<void> {
+    this.cancelAuthorization();
+    return this.#queueLifecycle(() => this.#unbind());
+  }
+
+  async #unbind(): Promise<void> {
     const active = this.#epoch?.binding ?? (await this.#readActiveBindingWithoutKey());
     if (!active) {
-      this.#setState({ phase: 'disconnected', queuedTasks: 0 });
+      this.#setState({
+        phase: this.#compatibilityDisabled ? 'disabled_by_policy' : 'disconnected',
+        queuedTasks: 0,
+      });
       return;
     }
-    const store = this.#store;
-    if (!store) throw new Error('WECHAT_DATA_KEY_UNAVAILABLE');
+    const key = this.#readDataKey();
+    if (!key) throw new Error('WECHAT_DATA_KEY_UNAVAILABLE');
+    const store = this.#store ?? new WechatTaskStore(this.#deps.getDbClient(), key);
     await store.closeBindingEpoch(active.bindingEpoch, this.#now());
     await this.#stopEpoch();
     const cleanup = await store.unbindCleanup(active.bindingEpoch);
@@ -262,7 +368,10 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     store.destroy();
     this.#store = null;
     this.#hasBinding = false;
-    this.#setState({ phase: 'disconnected', queuedTasks: 0 });
+    this.#setState({
+      phase: this.#compatibilityDisabled ? 'disabled_by_policy' : 'disconnected',
+      queuedTasks: 0,
+    });
   }
 
   onMessage(handler: (event: IMMessageEvent) => void): () => void {
@@ -300,7 +409,9 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   async sendText(userId: string, text: string): Promise<{ messageId: string }> {
     const active = this.#activeTasks.get(userId);
     const epoch = this.#epoch;
-    if (!active || !epoch) throw new Error('WECHAT_NO_ACTIVE_CONTEXT');
+    if (!active || !epoch || this.#compatibilityDisabled || epoch.abort.signal.aborted) {
+      throw new Error('WECHAT_NO_ACTIVE_CONTEXT');
+    }
     const clientId = randomUUID();
     await epoch.transport.sendMessage(
       {
@@ -321,10 +432,15 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   async sendFile(userId: string, absPath: string, displayName?: string): Promise<SendFileResult> {
     const active = this.#activeTasks.get(userId);
     const epoch = this.#epoch;
-    if (!active || !epoch) return { ok: false, reason: 'SEND_FAIL' };
+    if (!active || !epoch || this.#compatibilityDisabled || epoch.abort.signal.aborted) {
+      return { ok: false, reason: 'SEND_FAIL' };
+    }
     let uploadedSuccessfully = false;
     try {
       const local = await readOutboundWechatFile(absPath, displayName);
+      if (this.#compatibilityDisabled || epoch.abort.signal.aborted) {
+        return { ok: false, reason: 'SEND_FAIL' };
+      }
       const uploaded = await epoch.transport.uploadMedia(
         {
           peerId: userId,
@@ -335,6 +451,9 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         epoch.abort.signal,
       );
       uploadedSuccessfully = true;
+      if (this.#compatibilityDisabled || epoch.abort.signal.aborted) {
+        return { ok: false, reason: 'SEND_FAIL' };
+      }
       const clientId = randomUUID();
       await epoch.transport.sendMedia(
         {
@@ -440,8 +559,17 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     }
   }
 
-  async #activateAuthorizedCredentials(raw: WechatCredentials, generation: number): Promise<void> {
-    if (!this.#isGenerationCurrent(generation)) return;
+  async #activateAuthorizedCredentials(
+    raw: WechatCredentials,
+    generation: number,
+    compatibilityRevision: number,
+  ): Promise<void> {
+    if (
+      !this.#isGenerationCurrent(generation) ||
+      !this.#isCompatibilityRevisionAllowed(compatibilityRevision)
+    ) {
+      return;
+    }
     const bindingEpoch = randomUUID();
     const stored: StoredWechatCredentials = {
       botToken: raw.token,
@@ -477,13 +605,16 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       await store.unbindCleanup(previous.bindingEpoch);
       this.host.secrets.remove(`${CREDENTIAL_PREFIX}${previous.bindingEpoch}`);
     }
-    await this.#startEpoch({ bindingEpoch, cursor: '' }, stored);
+    if (!this.#isCompatibilityRevisionAllowed(compatibilityRevision)) return;
+    await this.#startEpoch({ bindingEpoch, cursor: '' }, stored, compatibilityRevision);
   }
 
   async #startEpoch(
     binding: WechatActiveBinding,
     credentials: StoredWechatCredentials,
+    compatibilityRevision: number,
   ): Promise<void> {
+    if (!this.#isCompatibilityRevisionAllowed(compatibilityRevision)) return;
     const generation = this.#deps.captureAccountGeneration();
     if (generation === null) throw new Error('WECHAT_ACCOUNT_SCOPE_CLOSED');
     const abort = new AbortController();
@@ -494,10 +625,15 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       this.#outboxLoop(binding, transport, abort.signal, generation),
     ]).then(() => undefined);
     this.#epoch = { binding, credentials, transport, abort, drain, generation };
+    const queuedTasks = await this.#requireStore().countQueuedTasks(binding.bindingEpoch);
+    if (!this.#isCompatibilityRevisionAllowed(compatibilityRevision)) {
+      await this.#stopEpoch();
+      return;
+    }
     this.#setState({
       phase: 'connected',
       connectedAt: this.#now(),
-      queuedTasks: await this.#requireStore().countQueuedTasks(binding.bindingEpoch),
+      queuedTasks,
     });
   }
 
@@ -749,12 +885,14 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         errorCode: safeMachineCode(terminal.errorCode ?? 'terminal_output_missing'),
       });
     }
-    await this.#flushOutbox(this.#epoch?.transport, task.bindingEpoch);
+    await this.#flushCurrentOutbox(task.bindingEpoch);
   }
 
   async #startTyping(task: WechatTask): Promise<() => Promise<void>> {
     const epoch = this.#epoch;
-    if (!epoch) return async () => undefined;
+    if (!epoch || this.#compatibilityDisabled || epoch.abort.signal.aborted) {
+      return async () => undefined;
+    }
     let ticket: string;
     try {
       ticket = await epoch.transport.getTypingTicket(
@@ -771,7 +909,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     let busy = false;
     let nextHeartbeatAt = this.#now() + 60_000;
     const timer = setInterval(() => {
-      if (stopped || busy || epoch.abort.signal.aborted) return;
+      if (stopped || busy || this.#compatibilityDisabled || epoch.abort.signal.aborted) return;
       busy = true;
       void (async () => {
         try {
@@ -865,7 +1003,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
           terminal: 'done',
         });
         this.#activeTasks.delete(task.peerId);
-        await this.#flushOutbox(this.#epoch?.transport, task.bindingEpoch);
+        await this.#flushCurrentOutbox(task.bindingEpoch);
         return;
       }
       default:
@@ -883,7 +1021,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     } finally {
       this.#activeTasks.delete(task.peerId);
     }
-    await this.#flushOutbox(this.#epoch?.transport, task.bindingEpoch);
+    await this.#flushCurrentOutbox(task.bindingEpoch);
   }
 
   async #commitPreDispatchFailure(task: WechatTask, reason: string): Promise<void> {
@@ -908,7 +1046,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         text: chunk,
       })),
     });
-    await this.#flushOutbox(this.#epoch?.transport, task.bindingEpoch);
+    await this.#flushCurrentOutbox(task.bindingEpoch);
   }
 
   async #outboxLoop(
@@ -918,19 +1056,41 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     generation: number,
   ): Promise<void> {
     while (!signal.aborted && this.#isGenerationCurrent(generation)) {
-      await this.#flushOutbox(transport, binding.bindingEpoch);
+      await this.#flushOutbox(transport, binding.bindingEpoch, signal);
       await delay(1_000, signal);
     }
   }
 
-  async #flushOutbox(transport: WechatTransport | undefined, bindingEpoch: string): Promise<void> {
-    if (!transport) return;
+  async #flushCurrentOutbox(bindingEpoch: string): Promise<void> {
+    const epoch = this.#epoch;
+    if (!epoch || epoch.binding.bindingEpoch !== bindingEpoch) return;
+    await this.#flushOutbox(epoch.transport, bindingEpoch, epoch.abort.signal);
+  }
+
+  async #flushOutbox(
+    transport: WechatTransport,
+    bindingEpoch: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!this.#isSendEpochCurrent(bindingEpoch, signal)) return;
     const store = this.#requireStore();
     for (const item of await store.listDueOutbox(bindingEpoch, this.#now())) {
+      if (!this.#isSendEpochCurrent(bindingEpoch, signal)) return;
       for (let immediateAttempt = 0; immediateAttempt < 3; immediateAttempt += 1) {
+        if (!this.#isSendEpochCurrent(bindingEpoch, signal)) return;
         if (!(await store.claimOutbox(bindingEpoch, item.id))) break;
+        if (!this.#isSendEpochCurrent(bindingEpoch, signal)) {
+          await store.recordOutboxFailure({
+            bindingEpoch,
+            outboxId: item.id,
+            nextRetryAt: this.#now(),
+            terminal: false,
+            errorCode: 'ABORTED',
+          });
+          return;
+        }
         try {
-          await this.#sendOutboxItem(transport, bindingEpoch, item);
+          await this.#sendOutboxItem(transport, bindingEpoch, item, signal);
           await store.markOutboxDelivered(bindingEpoch, item.id, this.#now());
           break;
         } catch (error) {
@@ -963,9 +1123,11 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     transport: WechatTransport,
     bindingEpoch: string,
     item: Awaited<ReturnType<WechatTaskStore['listDueOutbox']>>[number],
+    signal: AbortSignal,
   ): Promise<void> {
-    const signal = this.#epoch?.abort.signal ?? new AbortController().signal;
+    this.#assertSendEpochCurrent(bindingEpoch, signal);
     const peerId = await this.#peerIdForTask(bindingEpoch, item.taskId);
+    this.#assertSendEpochCurrent(bindingEpoch, signal);
     if (item.text) {
       await transport.sendMessage(
         {
@@ -978,7 +1140,9 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       );
     }
     for (const media of parseOutboxMedia(item.mediaJson)) {
+      this.#assertSendEpochCurrent(bindingEpoch, signal);
       const local = await readOutboundWechatFile(media.absPath);
+      this.#assertSendEpochCurrent(bindingEpoch, signal);
       const uploaded = await transport.uploadMedia(
         {
           peerId,
@@ -988,6 +1152,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         },
         signal,
       );
+      this.#assertSendEpochCurrent(bindingEpoch, signal);
       await transport.sendMedia(
         {
           peerId,
@@ -1115,6 +1280,39 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   #requireStore(): WechatTaskStore {
     if (!this.#store) throw new Error('WECHAT_STORE_NOT_READY');
     return this.#store;
+  }
+
+  #queueLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#lifecycleBarrier.then(operation);
+    this.#lifecycleBarrier = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  #isCompatibilityRevisionCurrent(revision: number): boolean {
+    return revision === this.#compatibilityRevision;
+  }
+
+  #isCompatibilityRevisionAllowed(revision: number): boolean {
+    return this.#isCompatibilityRevisionCurrent(revision) && !this.#compatibilityDisabled;
+  }
+
+  #isSendEpochCurrent(bindingEpoch: string, signal: AbortSignal): boolean {
+    const epoch = this.#epoch;
+    return (
+      !this.#compatibilityDisabled &&
+      !signal.aborted &&
+      epoch?.binding.bindingEpoch === bindingEpoch &&
+      epoch.abort.signal === signal
+    );
+  }
+
+  #assertSendEpochCurrent(bindingEpoch: string, signal: AbortSignal): void {
+    if (!this.#isSendEpochCurrent(bindingEpoch, signal)) {
+      throw new WechatIlinkError('ABORTED', 'The WeChat send epoch was stopped.', true);
+    }
   }
 
   #isGenerationCurrent(generation: number): boolean {

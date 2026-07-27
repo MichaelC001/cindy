@@ -57,7 +57,7 @@ import { and, eq, like, ne, sql } from 'drizzle-orm';
 
 import { getDbClient } from '../localDb/client/current';
 import { sessions } from '../localDb/schema';
-import { im, feishuIm, discordIm, wechatIm } from './host';
+import { im, feishuIm, discordIm, wechatCompatibilityPolicy, wechatIm } from './host';
 import { wireFeishuOrchestrator, type FeishuOrchestratorConfig } from './feishu';
 import { wireDiscordOrchestrator } from './discord';
 import { wireWechatOrchestrator } from './wechat';
@@ -154,6 +154,7 @@ const WECHAT_CONFIG: ImOrchestratorConfig = {
 };
 
 export function startImOrchestrators(): void {
+  wechatCompatibilityPolicy.start();
   if (wired) return;
   wired = true;
   // Production bootstrap wires handlers before login/DbClient readiness.

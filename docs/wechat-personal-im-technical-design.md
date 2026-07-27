@@ -1305,7 +1305,7 @@ feat(settings): add personal WeChat connector controls
 - WechatBotSection/useWechatBot；
 - preload/renderer types；
 - Agent/模型/项目/permission；
-- Full Access 二次确认；
+- Full Access 禁用与不可选原因文案；
 - Light/Dark；
 - 中英文/i18n glossary；
 - UI tests。
