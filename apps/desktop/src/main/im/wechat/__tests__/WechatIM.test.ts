@@ -42,6 +42,12 @@ describe('WechatIM host boundary', () => {
     expect(__testing.normalizeFinalOutputText('hello')).toBe('hello');
   });
 
+  it('returns to needs_reauth when cancelling an authorization for an existing binding', () => {
+    expect(__testing.authorizationCancelPhase(false, true)).toBe('needs_reauth');
+    expect(__testing.authorizationCancelPhase(false, false)).toBe('disconnected');
+    expect(__testing.authorizationCancelPhase(true, true)).toBe('connected');
+  });
+
   it('fails closed before authorization when the signed compatibility policy disables it', async () => {
     const createTransport = vi.fn();
     const im = new WechatIM(

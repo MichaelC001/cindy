@@ -212,6 +212,19 @@ describe('personal WeChat compatibility policy', () => {
     expect(fs.readFileSync(cachePath)).toEqual(sequenceTwo);
   });
 
+  it('applies a verified remote decision even when its cache cannot be persisted', async () => {
+    const cacheParent = path.join(root, 'cache-parent');
+    const cachePath = path.join(cacheParent, 'policy.json');
+    fs.writeFileSync(cacheParent, 'not a directory');
+    const policy = service({
+      cachePath,
+      fetch: vi.fn(async () => response(signedManifest({ sequence: 2 }))),
+    });
+
+    await expect(policy.refresh()).resolves.toBeUndefined();
+    expect(policy.getDecision()).toMatchObject({ disabled: true, sequence: 2 });
+  });
+
   it('fails open after the last verified cached manifest expires', async () => {
     const cachePath = path.join(root, 'policy.json');
     fs.writeFileSync(cachePath, signedManifest({ expiresAt: NOW }));

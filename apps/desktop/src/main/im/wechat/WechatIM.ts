@@ -338,7 +338,10 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     this.#authorizationAbort?.abort();
     this.#authorizationAbort = null;
     if (this.#state.phase === 'authorizing' || this.#state.phase === 'waiting_confirmation') {
-      this.#setState({ ...this.#state, phase: this.#epoch ? 'connected' : 'disconnected' });
+      this.#setState({
+        ...this.#state,
+        phase: authorizationCancelPhase(Boolean(this.#epoch), this.#hasBinding),
+      });
     }
   }
 
@@ -1516,11 +1519,17 @@ function normalizeFinalOutputText(text: string): string {
   return filterWechatMarkdown(text) || '✅ (本轮无文本输出)';
 }
 
+function authorizationCancelPhase(hasEpoch: boolean, hasBinding: boolean): WechatBotPhase {
+  if (hasEpoch) return 'connected';
+  return hasBinding ? 'needs_reauth' : 'disconnected';
+}
+
 function machineErrorCode(error: unknown): string {
   return error instanceof Error ? safeMachineCode(error.message) : 'unknown_error';
 }
 
 export const __testing = {
+  authorizationCancelPhase,
   normalizeFinalOutputText,
 };
 

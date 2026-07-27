@@ -229,7 +229,6 @@ export class WechatCompatibilityPolicyService {
     );
     if (manifest.sequence < this.#lastSequence) throw new Error('SEQUENCE_ROLLBACK');
     this.#lastSequence = manifest.sequence;
-    if (persist) writeCacheAtomic(this.#options.cachePath(), bytes);
     const decision = evaluateWechatCompatibilityManifest(
       manifest,
       this.#options.appVersion(),
@@ -238,6 +237,15 @@ export class WechatCompatibilityPolicyService {
     this.#setDecision(decision);
     this.#decisionExpiresAt = decision.disabled ? manifest.expiresAt : null;
     this.#scheduleDecisionExpiry();
+    if (persist) {
+      try {
+        writeCacheAtomic(this.#options.cachePath(), bytes);
+      } catch (error) {
+        log.warn('failed to persist personal WeChat compatibility policy cache', {
+          errorCode: safePolicyErrorCode(error),
+        });
+      }
+    }
   }
 
   #publicKey(): KeyObject | null {
