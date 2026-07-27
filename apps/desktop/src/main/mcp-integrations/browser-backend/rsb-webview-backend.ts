@@ -478,7 +478,12 @@ export class RsbWebviewBackend implements BrowserBackend {
           : {}),
     } as BackendRequest;
     if (inner.kind === 'close') {
-      return this.handleClose(requestWithInnerTarget);
+      const result = await this.handleClose(requestWithInnerTarget);
+      if (!result.ok || !result.data || typeof result.data !== 'object') return result;
+      return {
+        ...result,
+        data: { ...(result.data as Record<string, unknown>), kind: 'close' },
+      };
     }
 
     const tabId = await this.resolveDirectActionTarget(requestWithInnerTarget);
@@ -529,26 +534,11 @@ export class RsbWebviewBackend implements BrowserBackend {
       if (typeof inner.fn !== 'string' || inner.fn === '') {
         return actionFailed(req.action, 'evaluate.fn (JS expression source) required');
       }
-
-      // Safety / parity model:
-      //
-      // The vendored runtime's `act:evaluate` builds an in-page evaluator that
-      // does literally `eval("(" + fnSource + ")")` then calls the resulting
-      // function. JSON.stringify keeps the complete agent-provided source in a
-      // single JS string literal, preventing it from escaping this IIFE.
-      const wrapped = `(() => {
-        var candidate = eval("(" + ${JSON.stringify(inner.fn)} + ")");
-        if (typeof candidate !== "function") {
-          throw new Error("evaluate source did not produce a function");
-        }
-        var result = candidate();
-        return Promise.resolve(result);
-      })()`;
       return this.withTabPin(tabId, async () => {
         await this.tryObservePageSignals(wc, tabId);
         let value: unknown;
         try {
-          value = await wc.executeJavaScript(wrapped, /* userGesture */ false);
+          value = await this.automation.evaluate(tabId, wc, automationRequest);
         } catch (err) {
           return actionFailed(
             req.action,

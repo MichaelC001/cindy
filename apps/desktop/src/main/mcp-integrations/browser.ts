@@ -325,6 +325,7 @@ export async function setActiveBrowserBackendKind(kind: BackendKind): Promise<vo
 export function getBrowserMcpDeps(): {
   getRuntime(): BrowserControlRuntime;
   supportsResourceDownloads(): boolean;
+  supportsSemanticQueries(): boolean;
   logger: typeof logger;
   getUserRecipes(): Promise<UserRecipesResult>;
   saveUserRecipe(input: Parameters<typeof writeUserRecipe>[0]): Promise<WriteUserRecipeResult>;
@@ -340,6 +341,7 @@ export function getBrowserMcpDeps(): {
     // @cindy/mcps' perspective.
     getRuntime: () => router,
     supportsResourceDownloads: () => router.kind === 'rsb-webview',
+    supportsSemanticQueries: () => router.kind === 'rsb-webview',
     logger,
   };
 }

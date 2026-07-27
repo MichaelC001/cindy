@@ -117,6 +117,27 @@ function actKindSchema(deps: BrowserMcpDeps) {
   });
 }
 
+function elementQuerySchema(deps: BrowserMcpDeps) {
+  return z.object({
+    css: z.string().optional(),
+    role: z.string().optional(),
+    name: z.string().optional(),
+    text: z.string().optional(),
+    label: z.string().optional(),
+    placeholder: z.string().optional(),
+    testId: z.string().optional(),
+    exact: z.boolean().optional(),
+    index: z.number().int().nonnegative().optional(),
+  }).superRefine((_query, ctx) => {
+    if (deps.supportsSemanticQueries?.() === false) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '当前浏览器后端不支持语义元素查询',
+      });
+    }
+  });
+}
+
 function isSafeResourceUrl(value: string): boolean {
   if (!isHttpUrl(value)) return false;
   const parsed = new URL(value);
@@ -186,6 +207,7 @@ function toRuntimeRequest(args: Record<string, unknown>): BrowserControlRequest 
 
 export function registerBrowserTools(registry: BrowserToolRegistry, deps: BrowserMcpDeps): void {
   const actKind = actKindSchema(deps);
+  const elementQuery = elementQuerySchema(deps);
   registry.register({
     name: 'browser',
     category: 'browser',
@@ -221,18 +243,7 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
       level: z.string().optional(),
       paths: z.array(z.string()).optional(),
       inputRef: z.string().optional(),
-      query: z
-        .object({
-          css: z.string().optional(),
-          role: z.string().optional(),
-          name: z.string().optional(),
-          text: z.string().optional(),
-          label: z.string().optional(),
-          placeholder: z.string().optional(),
-          testId: z.string().optional(),
-          exact: z.boolean().optional(),
-          index: z.number().int().nonnegative().optional(),
-        })
+      query: elementQuery
         .optional()
         .describe('action=upload 时定位文件输入框；字段语义与 act.request.query 一致'),
       timeoutMs: z.number().int().positive().optional(),
@@ -263,18 +274,7 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
           kind: actKind,
           targetId: z.string().optional(),
           ref: z.string().optional(),
-          query: z
-            .object({
-              css: z.string().optional(),
-              role: z.string().optional(),
-              name: z.string().optional(),
-              text: z.string().optional(),
-              label: z.string().optional(),
-              placeholder: z.string().optional(),
-              testId: z.string().optional(),
-              exact: z.boolean().optional(),
-              index: z.number().int().nonnegative().optional(),
-            })
+          query: elementQuery
             .optional()
             .describe(
               '语义元素查询，可组合 role/name/text/label/placeholder/testId/css；' +

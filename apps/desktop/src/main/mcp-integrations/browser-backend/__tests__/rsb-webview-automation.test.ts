@@ -380,9 +380,45 @@ describe('RsbWebviewAutomation act', () => {
     });
 
     expect(result).toMatchObject({ kind: 'fill', textLength: 10 });
-    expect(harness.executeJavaScript.mock.calls[0][0]).toContain(
-      '["date", "datetime-local", "month", "time", "week"]',
+    const fillCall = harness.sendCommand.mock.calls.find(([method, params]) =>
+      method === 'Runtime.callFunctionOn'
+      && String((params as { functionDeclaration?: unknown })?.functionDeclaration)
+        .includes('const type ='),
     );
+    expect(fillCall?.[1]).toMatchObject({
+      arguments: [{ value: '2026-07-27' }, { value: undefined }],
+    });
+    expect(fillCall).toBeDefined();
+  });
+
+  it('fills the shared multi-field form shape', async () => {
+    const instance = automation();
+    const harness = debuggerHarness(async (method, params) => {
+      if (method === 'Runtime.evaluate') return { result: { objectId: 'field-object' } };
+      if (method === 'Accessibility.enable') return {};
+      if (method === 'Accessibility.getFullAXTree') return AX_TREE;
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 6 } };
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'field-object' } };
+      if (method === 'Runtime.callFunctionOn') {
+        if (String(params?.functionDeclaration).includes('const type =')) {
+          expect(params?.arguments).toEqual([{ value: 'Ada' }, { value: 'text' }]);
+          return { result: { value: undefined } };
+        }
+        return { result: { value: { ok: true } } };
+      }
+      throw new Error(`unexpected command: ${method}`);
+    });
+
+    await instance.snapshot('tab-1', harness.wc, {
+      action: 'snapshot',
+      interactive: true,
+    });
+    const result = await instance.act('tab-1', harness.wc, {
+      kind: 'fill',
+      fields: [{ ref: 'e2', type: 'text', value: 'Ada' }],
+    });
+
+    expect(result).toMatchObject({ kind: 'fill', filled: 1 });
   });
 
   it('hovers without focusing the target', async () => {

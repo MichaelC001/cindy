@@ -601,6 +601,16 @@ async function resolveElementQuery(
           let candidates;
           try {
             candidates = Array.from(document.querySelectorAll(query.css || "*")).filter(matches);
+            const hasNarrowingField = Boolean(
+              query.css || query.role || query.name || query.label || query.placeholder || query.testId
+            );
+            if (query.text && !hasNarrowingField) {
+              candidates = candidates.filter((element) => (
+                !Array.from(element.children).some((child) => (
+                  visible(child) && equals(child.textContent, query.text)
+                ))
+              ));
+            }
           } catch (error) {
             reject(error);
             return;
@@ -694,6 +704,52 @@ async function callOnNode<T>(
     );
   }
   return result.result?.value as T;
+}
+
+async function fillNode(
+  send: DebuggerTransport['sendCommand'],
+  target: ResolvedNode,
+  value: unknown,
+  declaredType?: string,
+): Promise<void> {
+  await callOnNode(
+    send,
+    target.objectId,
+    `function(value, declaredType) {
+      const type = String(declaredType || (
+        this instanceof HTMLInputElement ? this.type : ""
+      )).toLowerCase();
+      if (type === "checkbox" || type === "radio") {
+        if (!(this instanceof HTMLInputElement)) {
+          throw new Error("checkbox/radio fill target is not an input");
+        }
+        const checked = value === true || value === 1 || value === "1" || value === "true";
+        if (this.checked !== checked) {
+          this.checked = checked;
+          this.dispatchEvent(new Event("input", { bubbles: true }));
+          this.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return;
+      }
+      const text = value === undefined || value === null ? "" : String(value);
+      if (this instanceof HTMLSelectElement) {
+        const selected = Array.from(this.options).find((option) => (
+          option.value === text || option.label === text
+        ));
+        if (!selected) throw new Error("select option not found");
+        this.value = selected.value;
+      } else if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
+        this.value = text;
+      } else if (this instanceof HTMLElement && this.isContentEditable) {
+        this.textContent = text;
+      } else {
+        throw new Error("fill target is not editable");
+      }
+      this.dispatchEvent(new Event("input", { bubbles: true }));
+      this.dispatchEvent(new Event("change", { bubbles: true }));
+    }`,
+    [value, declaredType],
+  );
 }
 
 async function focusNode(
@@ -1627,6 +1683,69 @@ export class RsbWebviewAutomation {
     }
   }
 
+  async evaluate(
+    tabId: string,
+    wc: WebContents,
+    request: Pick<BrowserActRequest, 'fn' | 'ref' | 'timeoutMs'>,
+  ): Promise<unknown> {
+    if (typeof request.fn !== 'string' || request.fn === '') {
+      throw new Error('evaluate.fn (JS expression source) required');
+    }
+    const timeoutMs = positiveInt(
+      request.timeoutMs,
+      DEFAULT_WAIT_TIMEOUT_MS,
+      MAX_WAIT_TIMEOUT_MS,
+    );
+    return withDebugger(wc, async (send) => {
+      let response: {
+        result?: { value?: unknown };
+        exceptionDetails?: { text?: string; exception?: { description?: string } };
+      };
+      if (request.ref) {
+        const snapshotRef = this.refsByTab.get(tabId)?.get(request.ref);
+        if (!snapshotRef) {
+          throw new Error(`unknown or stale snapshot ref: ${request.ref}; take a new snapshot`);
+        }
+        const target = await resolveRef(send, snapshotRef);
+        response = await send('Runtime.callFunctionOn', {
+          objectId: target.objectId,
+          functionDeclaration: `function(fnSource) {
+            var candidate = eval("(" + fnSource + ")");
+            if (typeof candidate !== "function") {
+              throw new Error("evaluate source did not produce a function");
+            }
+            return Promise.resolve(candidate(this));
+          }`,
+          arguments: [{ value: request.fn }],
+          awaitPromise: true,
+          returnByValue: true,
+          timeout: timeoutMs,
+        }) as typeof response;
+      } else {
+        response = await send('Runtime.evaluate', {
+          expression: `(() => {
+            var candidate = eval("(" + ${JSON.stringify(request.fn)} + ")");
+            if (typeof candidate !== "function") {
+              throw new Error("evaluate source did not produce a function");
+            }
+            return Promise.resolve(candidate());
+          })()`,
+          awaitPromise: true,
+          returnByValue: true,
+          timeout: timeoutMs,
+        }) as typeof response;
+      }
+      if (response.exceptionDetails) {
+        throw new Error(
+          response.exceptionDetails.exception?.description
+          ?? response.exceptionDetails.text
+          ?? 'evaluate failed',
+        );
+      }
+      return response.result?.value;
+    });
+  }
+
   async setFiles(
     tabId: string,
     wc: WebContents,
@@ -1738,8 +1857,46 @@ export class RsbWebviewAutomation {
           await dispatchClick(dispatchInput, x, y, request);
           return { tabId, kind: request.kind, x, y };
         }
-        case 'type':
         case 'fill': {
+          if (Array.isArray(request.fields) && request.fields.length > 0) {
+            let filled = 0;
+            for (const rawField of request.fields) {
+              if (!rawField || typeof rawField !== 'object') {
+                throw new Error('fill.fields entries must be objects');
+              }
+              const field = rawField as Record<string, unknown>;
+              if (typeof field.ref !== 'string' || field.ref === '') {
+                throw new Error('fill.fields[].ref required');
+              }
+              const target = await resolveTarget(field.ref, undefined, undefined);
+              await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
+              await fillNode(
+                send,
+                target,
+                field.value,
+                typeof field.type === 'string' ? field.type : undefined,
+              );
+              filled += 1;
+            }
+            return { tabId, kind: request.kind, filled };
+          }
+          // Keep the single-target form accepted by existing embedded-backend
+          // callers while also honoring the shared multi-field contract above.
+          const target = await resolveTarget();
+          await waitForActionable(send, target, {
+            editable: true,
+            timeoutMs: request.timeoutMs,
+          });
+          await focusNode(send, target, true);
+          if (typeof request.text !== 'string') throw new Error('fill.text required');
+          await fillNode(send, target, request.text);
+          if (request.submit === true) {
+            const ticket = await stampActionTarget(send, target);
+            await dispatchKey(dispatchInput, 'Enter', ticket);
+          }
+          return { tabId, kind: request.kind, textLength: request.text.length };
+        }
+        case 'type': {
           const target = await resolveTarget();
           await waitForActionable(send, target, {
             editable: true,
@@ -1747,28 +1904,7 @@ export class RsbWebviewAutomation {
           });
           await focusNode(send, target, true);
           const ticket = await stampActionTarget(send, target);
-          if (typeof request.text !== 'string') throw new Error(`${request.kind}.text required`);
-          if (request.kind === 'fill') {
-            await callOnNode(
-              send,
-              target.objectId,
-              `function() {
-                if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
-                  this.select();
-                  return true;
-                }
-                if (this instanceof HTMLElement && this.isContentEditable) {
-                  const selection = this.ownerDocument.getSelection();
-                  const range = this.ownerDocument.createRange();
-                  range.selectNodeContents(this);
-                  selection?.removeAllRanges();
-                  selection?.addRange(range);
-                  return true;
-                }
-                throw new Error("target is not editable");
-              }`,
-            );
-          }
+          if (typeof request.text !== 'string') throw new Error('type.text required');
           if (request.slowly === true) {
             const perCharacterDelay = Math.min(request.delayMs ?? 50, 1_000);
             for (const character of Array.from(request.text)) {
@@ -1817,21 +1953,29 @@ export class RsbWebviewAutomation {
             send,
             await resolveTarget(request.endRef, undefined),
           );
-          await dispatchInput('Input.dispatchMouseEvent', {
+          await send('Input.dispatchMouseEvent', {
+            type: 'mouseMoved',
+            x: start.x,
+            y: start.y,
+          });
+          await send('Input.dispatchMouseEvent', {
             type: 'mousePressed',
             x: start.x,
             y: start.y,
             button: 'left',
             clickCount: 1,
           });
-          await dispatchInput('Input.dispatchMouseEvent', {
-            type: 'mouseMoved',
-            x: end.x,
-            y: end.y,
-            button: 'left',
-            buttons: 1,
-          });
-          await dispatchInput('Input.dispatchMouseEvent', {
+          for (let step = 1; step <= 8; step += 1) {
+            const ratio = step / 8;
+            await send('Input.dispatchMouseEvent', {
+              type: 'mouseMoved',
+              x: start.x + ((end.x - start.x) * ratio),
+              y: start.y + ((end.y - start.y) * ratio),
+              button: 'left',
+              buttons: 1,
+            });
+          }
+          await send('Input.dispatchMouseEvent', {
             type: 'mouseReleased',
             x: end.x,
             y: end.y,
@@ -1891,36 +2035,54 @@ export class RsbWebviewAutomation {
             MAX_WAIT_TIMEOUT_MS,
           );
           const hasCondition = Boolean(
-            request.selector || request.url || request.loadState || request.textGone,
+            request.selector
+            || request.url
+            || request.loadState
+            || request.text
+            || request.textGone
+            || request.fn,
           );
           if (hasCondition) {
             const params = {
               selector: request.selector,
               url: request.url,
               loadState: request.loadState,
+              text: request.text,
               textGone: request.textGone,
+              fn: request.fn,
               timeoutMs,
             };
             const result = await send('Runtime.evaluate', {
               expression: `(() => {
                 const params = ${JSON.stringify(params)};
                 const deadline = Date.now() + params.timeoutMs;
-                const matches = () => {
+                let predicate;
+                if (params.fn) {
+                  predicate = eval("(" + params.fn + ")");
+                  if (typeof predicate !== "function") throw new Error("wait.fn did not produce a function");
+                }
+                const matches = async () => {
                   if (params.selector && !document.querySelector(params.selector)) return false;
                   if (params.url && location.href !== params.url && !location.href.includes(params.url)) return false;
+                  if (params.text && !(document.body?.innerText || "").includes(params.text)) return false;
                   if (params.textGone && (document.body?.innerText || "").includes(params.textGone)) return false;
                   if (params.loadState === "load" && document.readyState !== "complete") return false;
                   if (params.loadState === "domcontentloaded" && document.readyState === "loading") return false;
                   if (params.loadState === "networkidle" && document.readyState !== "complete") return false;
+                  if (predicate && !await Promise.resolve(predicate())) return false;
                   return true;
                 };
                 return new Promise((resolve, reject) => {
-                  const poll = () => {
-                    if (matches()) return resolve({ url: location.href, readyState: document.readyState });
-                    if (Date.now() >= deadline) return reject(new Error("wait timed out"));
-                    setTimeout(poll, 100);
+                  const poll = async () => {
+                    try {
+                      if (await matches()) return resolve({ url: location.href, readyState: document.readyState });
+                      if (Date.now() >= deadline) return reject(new Error("wait timed out"));
+                      setTimeout(poll, 100);
+                    } catch (error) {
+                      reject(error);
+                    }
                   };
-                  poll();
+                  void poll();
                 });
               })()`,
               awaitPromise: true,

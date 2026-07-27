@@ -224,6 +224,36 @@ describe('createBrowserMcpServer', () => {
     await h.cleanup();
   });
 
+  it('rejects semantic queries when the active backend does not support them', async () => {
+    let semanticQueriesSupported = true;
+    const h = await makeHarness({
+      supportsSemanticQueries: () => semanticQueriesSupported,
+    });
+    const request = {
+      name: 'browser',
+      args: {
+        action: 'act',
+        targetId: 't1',
+        request: {
+          kind: 'click',
+          query: { role: 'button', name: 'Continue' },
+        },
+      },
+    };
+
+    await h.client.callTool({ name: 'call_tool', arguments: request });
+    expect(h.calls).toHaveLength(1);
+
+    semanticQueriesSupported = false;
+    const blocked = await h.client.callTool({ name: 'call_tool', arguments: request });
+    expect(h.calls).toHaveLength(1);
+    expect(JSON.parse((blocked.content as Array<{ text: string }>)[0].text)).toMatchObject({
+      ok: false,
+      errorCode: 'INVALID_ARGS',
+    });
+    await h.cleanup();
+  });
+
   it('compiles extract into an act:evaluate call', async () => {
     const h = await makeHarness();
     await h.client.callTool({

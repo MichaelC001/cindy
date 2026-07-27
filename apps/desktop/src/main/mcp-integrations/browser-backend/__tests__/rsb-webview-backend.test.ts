@@ -402,13 +402,34 @@ describe('RsbWebviewBackend — direct WebContents actions', () => {
 
 describe('RsbWebviewBackend — act:evaluate', () => {
   function buildEvalEnv(initialReturn: unknown) {
+    let attached = false;
+    const sendCommand = vi.fn(async (
+      method: string,
+      _params?: Record<string, unknown>,
+    ): Promise<unknown> => {
+      if (method === 'Runtime.evaluate' || method === 'Runtime.callFunctionOn') {
+        return { result: { value: initialReturn } };
+      }
+      return {};
+    });
     const wc = {
       getURL: () => '',
       getTitle: () => '',
       isDestroyed: () => false,
       executeJavaScript: vi.fn(async () => initialReturn),
+      debugger: {
+        isAttached: vi.fn(() => attached),
+        attach: vi.fn(() => {
+          attached = true;
+        }),
+        detach: vi.fn(() => {
+          attached = false;
+        }),
+        sendCommand,
+      },
     } as unknown as Electron.WebContents & {
       executeJavaScript: ReturnType<typeof vi.fn>;
+      debugger: { sendCommand: ReturnType<typeof vi.fn> };
     };
     const registry = fakeRegistry(
       [{ sessionId: 's1', tabId: 't1', webContentsId: 101 }],
@@ -420,11 +441,11 @@ describe('RsbWebviewBackend — act:evaluate', () => {
       bridge: { getHostWebContents: () => null, logger: logger() },
       logger: logger(),
     });
-    return { backend, wc };
+    return { backend, wc, sendCommand };
   }
 
   it('runs the fn in the guest and returns its result + as variable name', async () => {
-    const { backend, wc } = buildEvalEnv({ posts: [1, 2, 3] });
+    const { backend, wc, sendCommand } = buildEvalEnv({ posts: [1, 2, 3] });
     const res = await backend.call({
       action: 'act',
       targetId: 't1',
@@ -437,11 +458,11 @@ describe('RsbWebviewBackend — act:evaluate', () => {
     // The wrapper mirrors the vendored runtime's evaluator: eval("(" + JSON.stringified-fn + ")")
     // → call it → wrap in Promise.resolve. The injected fn text is a JS string
     // LITERAL, so multi-statement payloads can't escape the IIFE.
-    expect(wc.executeJavaScript).toHaveBeenCalledTimes(1);
-    const callArg = (wc.executeJavaScript as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(sendCommand).toHaveBeenCalledWith('Runtime.evaluate', expect.anything());
+    const callArg = sendCommand.mock.calls.find(([method]) => method === 'Runtime.evaluate')?.[1]
+      ?.expression as string;
     expect(callArg).toContain('eval("(" + "() => ({ posts: [1, 2, 3] })" + ")")');
-    expect(callArg).toContain('did not produce a function');
-    expect((wc.executeJavaScript as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe(false);
+    expect(callArg).toContain('evaluate source did not produce a function');
     expect(res.ok).toBe(true);
     expect(res.data).toMatchObject({
       tabId: 't1',
@@ -452,7 +473,7 @@ describe('RsbWebviewBackend — act:evaluate', () => {
   });
 
   it('escapes embedded quotes/backslashes in fn so multi-stmt payload cannot escape IIFE', async () => {
-    const { backend, wc } = buildEvalEnv(null);
+    const { backend, sendCommand } = buildEvalEnv(null);
     // Adversarial payload: try to close the string + run a second statement.
     const adversarial = '() => {}; window.__pwned = 1; (() => null';
     await backend.call({
@@ -460,7 +481,8 @@ describe('RsbWebviewBackend — act:evaluate', () => {
       targetId: 't1',
       request: { kind: 'evaluate', fn: adversarial },
     } as never);
-    const callArg = (wc.executeJavaScript as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    const callArg = sendCommand.mock.calls.find(([method]) => method === 'Runtime.evaluate')?.[1]
+      ?.expression as string;
     // The whole payload is a JSON.stringified literal — `"` inside got escaped,
     // and the literal sits inside `eval("(" + LITERAL + ")")` so any "statement
     // separator" the attacker tries (a quote + `;`) stays inside the literal.
@@ -503,10 +525,10 @@ describe('RsbWebviewBackend — act:evaluate', () => {
   });
 
   it('executeJavaScript throw propagates as actionFailed', async () => {
-    const { backend, wc } = buildEvalEnv(null);
-    (wc.executeJavaScript as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error('SyntaxError'),
-    );
+    const { backend, sendCommand } = buildEvalEnv(null);
+    sendCommand.mockResolvedValueOnce({
+      exceptionDetails: { exception: { description: 'SyntaxError' } },
+    } as never);
     const res = await backend.call({
       action: 'act',
       targetId: 't1',
