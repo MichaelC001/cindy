@@ -39,6 +39,8 @@ interface MonitorState {
   requests: RequestRecord[];
   byRequestId: Map<string, RequestRecord>;
   responses: Map<string, ResponseRecord>;
+  inFlight: Set<string>;
+  lastActivityAt: number;
   messageHandler: (...args: unknown[]) => void;
   detachHandler: (...args: unknown[]) => void;
   destroyedHandler: (...args: unknown[]) => void;
@@ -49,6 +51,7 @@ const DEFAULT_BODY_CHARS = 200_000;
 const MAX_BODY_CHARS = 1_000_000;
 const DEFAULT_BODY_WAIT_MS = 20_000;
 const MAX_BODY_WAIT_MS = 60_000;
+const DEFAULT_IDLE_WINDOW_MS = 500;
 const SENSITIVE_HEADERS = new Set([
   'authorization',
   'cookie',
@@ -187,6 +190,24 @@ export class RsbWebviewNetwork {
     }
   }
 
+  async waitForIdle(
+    wc: WebContents,
+    options: { timeoutMs?: number; idleMs?: number } = {},
+  ): Promise<void> {
+    await this.observe(wc);
+    const state = this.states.get(wc);
+    if (!state) throw new Error('network monitor unavailable');
+    const timeoutMs = boundedPositive(options.timeoutMs, DEFAULT_BODY_WAIT_MS, MAX_BODY_WAIT_MS);
+    const idleMs = boundedPositive(options.idleMs, DEFAULT_IDLE_WINDOW_MS, MAX_BODY_WAIT_MS);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const now = Date.now();
+      if (state.inFlight.size === 0 && now - state.lastActivityAt >= idleMs) return;
+      if (now >= deadline) throw new Error('network did not become idle before timeout');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
   diagnostics(): { observedTabs: number; bufferedRequests: number } {
     let bufferedRequests = 0;
     for (const state of this.states.values()) bufferedRequests += state.requests.length;
@@ -206,6 +227,8 @@ export class RsbWebviewNetwork {
       requests: [],
       byRequestId: new Map(),
       responses: new Map(),
+      inFlight: new Set(),
+      lastActivityAt: Date.now(),
       messageHandler: () => {},
       detachHandler: () => {},
       destroyedHandler: () => {},
@@ -254,6 +277,8 @@ export class RsbWebviewNetwork {
       };
       state.requests.push(record);
       state.byRequestId.set(requestId, record);
+      state.inFlight.add(requestId);
+      state.lastActivityAt = Date.now();
       if (state.requests.length > MAX_REQUESTS) {
         const removed = state.requests.splice(0, state.requests.length - MAX_REQUESTS);
         for (const item of removed) {
@@ -280,11 +305,14 @@ export class RsbWebviewNetwork {
         headers: safeHeaders(response.headers),
         finished: false,
       });
+      state.lastActivityAt = Date.now();
       return;
     }
     if (method === 'Network.loadingFinished') {
       const response = state.responses.get(requestId);
       if (response) response.finished = true;
+      state.inFlight.delete(requestId);
+      state.lastActivityAt = Date.now();
       return;
     }
     if (method === 'Network.loadingFailed') {
@@ -293,6 +321,8 @@ export class RsbWebviewNetwork {
         request.ok = false;
         request.failureText = text(params.errorText) || 'request failed';
       }
+      state.inFlight.delete(requestId);
+      state.lastActivityAt = Date.now();
     }
   }
 

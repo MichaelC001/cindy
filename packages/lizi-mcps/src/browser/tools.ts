@@ -106,6 +106,13 @@ function getRuntime(deps: BrowserMcpDeps): BrowserControlRuntime {
   return deps.getRuntime();
 }
 
+function actKindSchema(deps: BrowserMcpDeps) {
+  const kinds = deps.supportsResourceDownloads?.() === false
+    ? ACT_KINDS.filter((kind) => kind !== 'saveResource')
+    : [...ACT_KINDS];
+  return z.enum(kinds as [typeof ACT_KINDS[number], ...typeof ACT_KINDS[number][]]);
+}
+
 function isSafeResourceUrl(value: string): boolean {
   if (!isHttpUrl(value)) return false;
   const parsed = new URL(value);
@@ -174,6 +181,7 @@ function toRuntimeRequest(args: Record<string, unknown>): BrowserControlRequest 
 }
 
 export function registerBrowserTools(registry: BrowserToolRegistry, deps: BrowserMcpDeps): void {
+  const actKind = actKindSchema(deps);
   registry.register({
     name: 'browser',
     category: 'browser',
@@ -248,7 +256,7 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
         .describe('action=saveRecipe: 可选,一并保存的站点指南对象(site/entry/recipes/notes…)'),
       request: z
         .object({
-          kind: z.enum(ACT_KINDS),
+          kind: actKind,
           targetId: z.string().optional(),
           ref: z.string().optional(),
           query: z
@@ -321,6 +329,16 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
               `url 必须是 http(s);不支持 file:// / chrome:// / data: 等协议(收到 "${u}")`,
             );
           }
+        }
+        if (
+          args.action === 'act'
+          && args.request?.kind === 'saveResource'
+          && deps.supportsResourceDownloads?.() === false
+        ) {
+          return errorResult(
+            args.action,
+            '当前浏览器后端不支持 saveResource，请使用内嵌浏览器后端',
+          );
         }
         if (
           args.action === 'act'

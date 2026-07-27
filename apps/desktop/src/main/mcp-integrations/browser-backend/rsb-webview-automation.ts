@@ -86,9 +86,14 @@ export interface RsbActResult {
   [key: string]: unknown;
 }
 
+export interface HumanVerificationBarrier {
+  kind: 'human-verification';
+  evidence: string[];
+}
+
 interface PageInspection {
   resources: Array<{ kind: string; url: string; label?: string }>;
-  barrier?: { kind: 'human-verification'; evidence: string[] };
+  barrier?: HumanVerificationBarrier;
 }
 
 const INTERACTIVE_ROLES = new Set([
@@ -836,6 +841,12 @@ type InputDispatcher = (
   targetTicket?: string,
 ) => Promise<void>;
 
+type NativeKeyDispatcher = (
+  type: 'keyDown' | 'keyUp',
+  keyCode: string,
+  modifiers: string[],
+) => Promise<void>;
+
 /**
  * Runs inside the guest page, not in Electron Main.
  *
@@ -1200,6 +1211,7 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
     const key = stringParam(params.key, 'key');
     const target = deepestActiveElement(document) ?? document.body ?? document.documentElement;
     requireTicket(target);
+    if (type === 'validate') return;
     const code = keyCode(key);
     const init: KeyboardEventInit & { keyCode: number; which: number } = {
       ...modifiers(Number(params.modifiers ?? 0)),
@@ -1304,6 +1316,34 @@ async function dispatchTranslatedInput(
   }
 }
 
+function nativeKeyCode(key: string): string | undefined {
+  const known: Record<string, string> = {
+    Backspace: 'BACKSPACE',
+    Tab: 'TAB',
+    Escape: 'ESCAPE',
+    ArrowLeft: 'LEFT',
+    ArrowUp: 'UP',
+    ArrowRight: 'RIGHT',
+    ArrowDown: 'DOWN',
+    Delete: 'DELETE',
+    Home: 'HOME',
+    End: 'END',
+    PageUp: 'PAGEUP',
+    PageDown: 'PAGEDOWN',
+    Insert: 'INSERT',
+  };
+  return known[key];
+}
+
+function nativeModifiers(mask: number): string[] {
+  return [
+    ...(mask & 1 ? ['alt'] : []),
+    ...(mask & 2 ? ['control'] : []),
+    ...(mask & 4 ? ['meta'] : []),
+    ...(mask & 8 ? ['shift'] : []),
+  ];
+}
+
 async function dispatchClick(
   dispatchInput: InputDispatcher,
   x: number,
@@ -1348,8 +1388,22 @@ async function dispatchKey(
   dispatchInput: InputDispatcher,
   rawKey: string,
   targetTicket?: string,
+  nativeDispatch?: NativeKeyDispatcher,
 ): Promise<void> {
   const { key, modifiers } = parseKey(rawKey);
+  const keyCode = nativeKeyCode(key)
+    ?? (modifiers !== 0 && key.length === 1 ? key.toUpperCase() : undefined);
+  // Printable unmodified characters and Enter retain the page-side path,
+  // which emits the input/change events expected by web applications. Native
+  // dispatch is reserved for navigation/editing keys whose browser defaults
+  // cannot be reproduced by synthetic KeyboardEvents.
+  if (nativeDispatch && keyCode) {
+    const modifierNames = nativeModifiers(modifiers);
+    await dispatchInput('Input.dispatchKeyEvent', { type: 'validate' }, targetTicket);
+    await nativeDispatch('keyDown', keyCode, modifierNames);
+    await nativeDispatch('keyUp', keyCode, modifierNames);
+    return;
+  }
   const text = key.length === 1 && modifiers === 0 ? key : undefined;
   await dispatchInput('Input.dispatchKeyEvent', {
     type: 'keyDown',
@@ -1367,12 +1421,21 @@ async function dispatchKey(
 export class RsbWebviewAutomation {
   private readonly refsByTab = new Map<string, Map<string, SnapshotRef>>();
   private readonly resourcesByTab = new Map<string, Set<string>>();
+  private readonly barriersByTab = new Map<string, HumanVerificationBarrier>();
 
   constructor(private readonly logger: AutomationLogger) {}
 
   forgetTab(tabId: string): void {
     this.refsByTab.delete(tabId);
     this.resourcesByTab.delete(tabId);
+    this.barriersByTab.delete(tabId);
+  }
+
+  getHumanVerificationBarrier(tabId: string): HumanVerificationBarrier | undefined {
+    const barrier = this.barriersByTab.get(tabId);
+    return barrier
+      ? { kind: barrier.kind, evidence: [...barrier.evidence] }
+      : undefined;
   }
 
   async snapshot(
@@ -1393,6 +1456,7 @@ export class RsbWebviewAutomation {
       }
       if (inspection.barrier) {
         this.refsByTab.set(tabId, new Map());
+        this.barriersByTab.set(tabId, inspection.barrier);
         return {
           format: req.snapshotFormat ?? 'ai',
           targetId: tabId,
@@ -1402,6 +1466,7 @@ export class RsbWebviewAutomation {
           stats: { lines: 0, chars: 0, refs: 0, interactive: 0 },
         };
       }
+      this.barriersByTab.delete(tabId);
       await send('Accessibility.enable');
       let response: { nodes?: RawAxNode[] };
       if (typeof req.selector === 'string' && req.selector !== '') {
@@ -1557,6 +1622,10 @@ export class RsbWebviewAutomation {
     tabId: string,
     wc: WebContents,
     request: BrowserActRequest,
+    options?: {
+      nativeKeyDispatch?: NativeKeyDispatcher;
+      waitForNetworkIdle?: (timeoutMs: number) => Promise<void>;
+    },
   ): Promise<RsbActResult> {
     return withDebugger(wc, async (send) => {
       const dispatchInput: InputDispatcher = async (method, params, targetTicket) => {
@@ -1652,7 +1721,7 @@ export class RsbWebviewAutomation {
           if (typeof request.key !== 'string' || request.key === '') {
             throw new Error('press.key required');
           }
-          await dispatchKey(dispatchInput, request.key, ticket);
+          await dispatchKey(dispatchInput, request.key, ticket, options?.nativeKeyDispatch);
           return { tabId, kind: request.kind, key: request.key };
         }
         case 'hover': {
@@ -1796,6 +1865,9 @@ export class RsbWebviewAutomation {
                 ?? result.exceptionDetails.text
                 ?? 'wait failed',
               );
+            }
+            if (request.loadState === 'networkidle') {
+              await options?.waitForNetworkIdle?.(timeoutMs);
             }
             return { tabId, kind: request.kind, waitedMs: timeMs, state: result.result?.value };
           }

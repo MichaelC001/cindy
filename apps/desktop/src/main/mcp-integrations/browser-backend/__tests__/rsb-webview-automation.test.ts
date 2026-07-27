@@ -201,6 +201,35 @@ describe('RsbWebviewAutomation snapshot', () => {
 });
 
 describe('RsbWebviewAutomation act', () => {
+  it('uses native keyboard input for browser-default navigation keys', async () => {
+    const harness = debuggerHarness(async () => {
+      throw new Error('unexpected debugger command');
+    });
+    const sendInputEvent = vi.fn();
+    Object.assign(harness.wc, { sendInputEvent });
+
+    await automation().act('tab-1', harness.wc, {
+      kind: 'press',
+      key: 'Ctrl+A',
+    }, {
+      nativeKeyDispatch: async (type, keyCode, modifiers) => {
+        sendInputEvent({ type, keyCode, modifiers });
+      },
+    });
+
+    expect(sendInputEvent).toHaveBeenNthCalledWith(1, {
+      type: 'keyDown',
+      keyCode: 'A',
+      modifiers: ['control'],
+    });
+    expect(sendInputEvent).toHaveBeenNthCalledWith(2, {
+      type: 'keyUp',
+      keyCode: 'A',
+      modifiers: ['control'],
+    });
+    expect(harness.executeJavaScript.mock.calls[0][0]).toContain('"type":"validate"');
+  });
+
   it('clicks a snapshot ref at the center of its DOM box', async () => {
     const instance = automation();
     let phase: 'snapshot' | 'click' = 'snapshot';

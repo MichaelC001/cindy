@@ -130,6 +130,48 @@ describe('RsbWebviewArtifacts', () => {
     expect(item.setSavePath).not.toHaveBeenCalled();
   });
 
+  it('captures a download that starts after the action returns', async () => {
+    const harness = artifactHarness();
+    const item = downloadItem('completed');
+    const artifacts = new RsbWebviewArtifacts(() => root, { warn: vi.fn() });
+
+    const result = await artifacts.capture(
+      harness.wc,
+      { sessionId: 'delayed-download', timeoutMs: 2_000 },
+      async () => {
+        setTimeout(() => {
+          harness.emitDownload(item);
+          setTimeout(() => item.finish(), 0);
+        }, 300);
+        return 'clicked';
+      },
+    );
+
+    expect(result.downloads).toHaveLength(1);
+    expect(result.downloads[0].state).toBe('completed');
+  });
+
+  it('limits artifact diagnostics to the requested session', async () => {
+    const harness = artifactHarness();
+    const artifacts = new RsbWebviewArtifacts(() => root, { warn: vi.fn() });
+
+    for (const sessionId of ['session-a', 'session-b']) {
+      const item = downloadItem('completed');
+      await artifacts.capture(
+        harness.wc,
+        { sessionId, timeoutMs: 1_000 },
+        async () => {
+          harness.emitDownload(item);
+          setTimeout(() => item.finish(), 0);
+        },
+      );
+    }
+
+    expect(artifacts.diagnostics('session-a').recentArtifacts).toHaveLength(1);
+    expect(artifacts.diagnostics('session-b').recentArtifacts).toHaveLength(1);
+    expect(artifacts.diagnostics('session-c').recentArtifacts).toHaveLength(0);
+  });
+
   it('cancels a download that exceeds the per-file quota before saving', async () => {
     const harness = artifactHarness();
     const item = downloadItem('cancelled', { totalBytes: 32 * 1024 * 1024 + 1 });

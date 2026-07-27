@@ -46,6 +46,7 @@ interface PendingDownload {
 
 interface ArtifactCapture {
   id: string;
+  sessionId: string;
   webContents: WebContents;
   directory: string;
   accepting: boolean;
@@ -54,7 +55,10 @@ interface ArtifactCapture {
   reservedBytes: number;
 }
 
-const DOWNLOAD_GRACE_MS = 250;
+// A click can schedule a download after the event handler returns (for
+// example, a page may first fetch a signed URL). Keep this wait bounded while
+// allowing normal deferred download starts to be observed.
+const DOWNLOAD_GRACE_MS = 1_000;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60_000;
 const MAX_DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const MAX_DOWNLOADS_PER_CAPTURE = 8;
@@ -136,6 +140,7 @@ export class RsbWebviewArtifacts {
   private readonly sessionListeners = new Map<SessionLike, (...args: unknown[]) => void>();
   private readonly captures = new Map<WebContents, ArtifactCapture>();
   private readonly recent: BrowserArtifact[] = [];
+  private readonly artifactSessions = new Map<string, string>();
   private retainedBytes = 0;
 
   constructor(
@@ -161,6 +166,7 @@ export class RsbWebviewArtifacts {
     );
     const capture: ArtifactCapture = {
       id: `${Date.now().toString(36)}-${captureSequence.toString(36)}`,
+      sessionId: context.sessionId,
       webContents: wc,
       directory,
       accepting: true,
@@ -212,6 +218,7 @@ export class RsbWebviewArtifacts {
         artifact.bytes = await this.fileSize(artifact.path);
       }
       this.recent.push(artifact);
+      this.artifactSessions.set(artifact.id, context.sessionId);
       if (artifact.path && artifact.bytes) this.retainedBytes += artifact.bytes;
     }
     await this.trimRecent();
@@ -221,10 +228,15 @@ export class RsbWebviewArtifacts {
     return { value, downloads };
   }
 
-  diagnostics(): { activeCaptures: number; recentArtifacts: BrowserArtifact[] } {
+  diagnostics(sessionId?: string): { activeCaptures: number; recentArtifacts: BrowserArtifact[] } {
     return {
-      activeCaptures: this.captures.size,
-      recentArtifacts: this.recent.slice(-20).map((artifact) => ({ ...artifact })),
+      activeCaptures: [...this.captures.values()]
+        .filter((capture) => !sessionId || capture.sessionId === sessionId)
+        .length,
+      recentArtifacts: this.recent
+        .filter((artifact) => !sessionId || this.artifactSessions.get(artifact.id) === sessionId)
+        .slice(-20)
+        .map((artifact) => ({ ...artifact })),
     };
   }
 
@@ -241,6 +253,7 @@ export class RsbWebviewArtifacts {
       await this.removeDirectory(capture.directory);
     }));
     const retained = this.recent.splice(0);
+    this.artifactSessions.clear();
     this.retainedBytes = 0;
     await Promise.all(retained.map((artifact) => (
       artifact.path ? this.removeArtifactFile(artifact.path) : Promise.resolve()
@@ -394,6 +407,7 @@ export class RsbWebviewArtifacts {
       const artifact = this.recent.shift();
       if (!artifact) break;
       evicted.push(artifact);
+      this.artifactSessions.delete(artifact.id);
       if (artifact.path && artifact.bytes) this.retainedBytes -= artifact.bytes;
     }
     await Promise.all(evicted.map((artifact) => (
@@ -417,6 +431,17 @@ export class RsbWebviewArtifacts {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT' && code !== 'ENOTEMPTY') {
         this.logger.warn('failed to remove empty browser artifact directory', { err });
+      }
+      return;
+    }
+    try {
+      // Capture directories live below a session directory. Reclaim that
+      // parent too once the last retained file for the session is gone.
+      await fs.promises.rmdir(path.dirname(path.dirname(filePath)));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTEMPTY') {
+        this.logger.warn('failed to remove empty browser artifact session directory', { err });
       }
     }
   }

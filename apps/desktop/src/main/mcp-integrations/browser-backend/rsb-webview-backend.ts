@@ -285,7 +285,7 @@ export class RsbWebviewBackend implements BrowserBackend {
       totalRegisteredTabs: this.opts.registry.listAll().length,
       pinnedTabs: this.opts.registry.listPinned(),
       dialogs: this.dialogs.diagnostics(),
-      ...(this.artifacts ? { artifacts: this.artifacts.diagnostics() } : {}),
+      ...(this.artifacts ? { artifacts: this.artifacts.diagnostics(sessionId ?? undefined) } : {}),
       network: this.network.diagnostics(),
       recentActivity: this.activity.slice(-20),
     });
@@ -342,6 +342,7 @@ export class RsbWebviewBackend implements BrowserBackend {
     if (!result.ok) {
       return actionFailed(req.action, result.error);
     }
+    if (result.tabId) void this.observeOpenedTab(result.tabId);
     return actionOk(req.action, {
       targetId: result.tabId,
       tabId: result.tabId,
@@ -458,6 +459,9 @@ export class RsbWebviewBackend implements BrowserBackend {
     if (!inner || typeof inner !== 'object') {
       return actionFailed(req.action, 'request body required');
     }
+    const automationRequest = inner.timeoutMs === undefined && req.timeoutMs !== undefined
+      ? { ...inner, timeoutMs: req.timeoutMs }
+      : inner;
     const requestWithInnerTarget = {
       ...req,
       ...(typeof req.targetId === 'string'
@@ -475,6 +479,14 @@ export class RsbWebviewBackend implements BrowserBackend {
     const resolved = await this.resolveTabForDirectAction(requestWithInnerTarget, tabId);
     if (!resolved.ok) return resolved.result;
     const wc = resolved.wc;
+    const humanVerification = this.automation.getHumanVerificationBarrier(tabId);
+    if (humanVerification) {
+      return actionOk(req.action, {
+        tabId,
+        kind: inner.kind,
+        barrier: humanVerification,
+      });
+    }
 
     if (inner.kind === 'saveResource') {
       if (!this.artifacts) return actionFailed(req.action, 'managed downloads are unavailable');
@@ -569,7 +581,20 @@ export class RsbWebviewBackend implements BrowserBackend {
             barrier: { kind: 'page-dialog', dialog: dialogBeforeStart },
           };
         }
-        const actionPromise = this.automation.act(tabId, wc, inner);
+        const actionPromise = this.automation.act(tabId, wc, automationRequest, {
+          nativeKeyDispatch: async (type, keyCode, modifiers) => {
+            const sendInputEvent = (wc as unknown as {
+              sendInputEvent?: (event: {
+                type: 'keyDown' | 'keyUp';
+                keyCode: string;
+                modifiers?: string[];
+              }) => void;
+            }).sendInputEvent;
+            if (!sendInputEvent) throw new Error('native keyboard input is unavailable');
+            sendInputEvent({ type, keyCode, modifiers });
+          },
+          waitForNetworkIdle: (timeoutMs) => this.network.waitForIdle(wc, { timeoutMs }),
+        });
         if (!opening) return actionPromise;
         const outcome = await Promise.race([
           actionPromise.then((value) => ({ type: 'action' as const, value })),
@@ -839,6 +864,36 @@ export class RsbWebviewBackend implements BrowserBackend {
       await this.dialogs.observe(wc);
     } catch (err) {
       this.opts.logger.warn('RSB page dialog observation unavailable', { tabId, err });
+    }
+  }
+
+  /**
+   * Arm Network.enable as soon as the renderer reports a newly-created tab.
+   * `open` starts navigation in the renderer, so waiting until a later
+   * `requests` call would lose the document's initial requests.
+   */
+  private async observeOpenedTab(tabId: string): Promise<void> {
+    try {
+      const deadline = Date.now() + 2_000;
+      for (;;) {
+        const wc = this.opts.registry.getWebContentsByTabId(tabId);
+        if (wc) {
+          await this.tryObserveNetwork(wc, tabId);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          this.opts.logger.warn('new browser tab was not reported before network capture arm', {
+            tabId,
+          });
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } catch (err) {
+      this.opts.logger.warn('failed to arm network capture for new browser tab', {
+        tabId,
+        err,
+      });
     }
   }
 

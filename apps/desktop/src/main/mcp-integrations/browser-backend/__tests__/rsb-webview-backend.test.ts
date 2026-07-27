@@ -949,6 +949,7 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
   function buildPageEnv(options?: {
     uploadRoot?: string;
     resourceUrl?: string;
+    humanVerification?: boolean;
     onDialogHandled?: () => void;
     pageEnableError?: Error;
   }) {
@@ -964,6 +965,19 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
       if (method === 'Accessibility.enable') return {};
       if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
       if (method === 'Runtime.evaluate') {
+        if (options?.humanVerification) {
+          return {
+            result: {
+              value: {
+                resources: [],
+                barrier: {
+                  kind: 'human-verification',
+                  evidence: ['page contains a verification control'],
+                },
+              },
+            },
+          };
+        }
         return options?.resourceUrl
           ? {
               result: {
@@ -1187,6 +1201,28 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
       await env.backend.dispose();
       await fs.rm(root, { recursive: true, force: true });
     }
+  });
+
+  it('blocks direct actions after a human-verification snapshot barrier', async () => {
+    const env = buildPageEnv({ humanVerification: true });
+    const snapshot = await env.backend.call({ action: 'snapshot', targetId: 't1' });
+    expect(snapshot.data).toMatchObject({
+      barrier: { kind: 'human-verification' },
+    });
+
+    const action = await env.backend.call({
+      action: 'act',
+      targetId: 't1',
+      request: { kind: 'clickCoords', x: 10, y: 10 },
+    });
+    expect(action.data).toMatchObject({
+      barrier: { kind: 'human-verification' },
+    });
+    expect(env.sendCommand).not.toHaveBeenCalledWith(
+      'Input.dispatchMouseEvent',
+      expect.anything(),
+    );
+    await env.backend.dispose();
   });
 
   it('continues a page action when dialog observation is unavailable', async () => {

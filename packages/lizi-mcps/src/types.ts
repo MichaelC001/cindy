@@ -465,6 +465,8 @@ export type ControlWorkerAgent = 'claude-code' | 'codex';
 /** Browser automation MCP host deps. Core browser execution is injected by host. */
 export interface BrowserMcpDeps {
   getRuntime(): BrowserControlRuntime;
+  /** Whether the active backend accepts managed resource downloads. */
+  supportsResourceDownloads?(): boolean;
   logger?: LiziMcpLogger;
   /**
    * Optional L2 (user-local) recipe layer. The host scans userData, parses with

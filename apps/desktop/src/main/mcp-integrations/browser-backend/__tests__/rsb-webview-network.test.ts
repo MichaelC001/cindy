@@ -104,4 +104,20 @@ describe('RsbWebviewNetwork', () => {
     expect(network.readRequests(harness.wc)).toEqual([]);
     expect(JSON.stringify(network.diagnostics())).not.toContain('secret');
   });
+
+  it('waits for an actual quiet network window', async () => {
+    const harness = networkHarness();
+    const network = new RsbWebviewNetwork({ warn: vi.fn() });
+    await network.observe(harness.wc);
+
+    harness.emit('message', 'Network.requestWillBeSent', {
+      requestId: 'request-idle',
+      type: 'Fetch',
+      request: { method: 'GET', url: 'https://example.test/data' },
+    });
+    const pending = network.waitForIdle(harness.wc, { timeoutMs: 2_000, idleMs: 50 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    harness.emit('message', 'Network.loadingFinished', { requestId: 'request-idle' });
+    await expect(pending).resolves.toBeUndefined();
+  });
 });
