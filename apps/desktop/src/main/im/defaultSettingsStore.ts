@@ -218,6 +218,9 @@ export function writeImDefaultSettingsPatch(
   patch: ImDefaultSettingsPatch,
   channel?: ImDefaultSettingsChannel,
 ): OverrideSettingsState<ImDefaultSettings> {
+  if (channel === 'wechat' && patch.permissionMode === 'bypassPermissions') {
+    throw new Error('WECHAT_FULL_ACCESS_UNSUPPORTED');
+  }
   const document = store.read();
   const current = channel ? document.channels[channel] : document.global;
   const next = mergeSettingsPatch(current, patch);

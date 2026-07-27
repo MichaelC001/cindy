@@ -1494,6 +1494,89 @@
       },
       "bind": "連携"
     },
+    "wechatBot": {
+      "title": "個人 WeChat",
+      "description": "QR コードで個人 WeChat を接続し、プライベートチャットから {{appName}} を利用します。",
+      "statusAria": "個人 WeChat の状態: {{status}}",
+      "status": {
+        "disconnected": "未接続",
+        "authorizing": "認証を準備中…",
+        "waitingConfirmation": "WeChat の確認待ち…",
+        "connected": "接続済み",
+        "reconnecting": "再接続中…",
+        "needsReauth": "再認証が必要",
+        "disabled": "利用不可",
+        "error": "接続失敗"
+      },
+      "intro": "接続後、この WeChat 接続へのプライベートメッセージは、このコンピューターの Cindy に届きます。認証ページは Tencent が提供し、OpenClaw と表示される場合があります。",
+      "errorNote": "接続を完了できませんでした。ネットワークを確認してもう一度スキャンしてください。失敗時に Cindy が認証情報を平文で保存することはありません。",
+      "disabledNote": "互換性ポリシーにより、このバージョンでは個人 WeChat 接続が一時停止されています。保存済みの会話と設定は削除されません。",
+      "permission": {
+        "label": "権限モード",
+        "hint": "/new 後の新しいコンテキストに適用されます。高リスク操作は引き続き Cindy Desktop での確認が必要です。",
+        "fullAccessDisabled": "WeChat 内で確認できない操作が直接実行されないよう、個人 WeChat では Full Access をまだ利用できません。"
+      },
+      "authorization": {
+        "title": "WeChat を認証",
+        "rebindTitle": "新しい Cindy を WeChat に接続",
+        "description": "Tencent の認証ページをシステムブラウザで開きます。スキャン後、WeChat から Cindy と会話できます。",
+        "rebindDescription": "この WeChat には既に接続があります。続行すると、既存の Cindy または OpenClaw 接続が置き換わる場合があります。",
+        "confirm": "認証へ",
+        "cancel": "キャンセル",
+        "steps": {
+          "1": "「認証へ」を選択し、システムブラウザで WeChat の連携ページを開きます。",
+          "2": "WeChat アプリでスキャンし、WeChat 画面で接続を確認します。",
+          "3": "連携後に Cindy へ戻ると、接続状態が自動更新されます。",
+          "4": "認証ページは Tencent が提供し、OpenClaw と表示される場合があります。"
+        }
+      },
+      "waiting": {
+        "heading": "WeChat での確認を待っています",
+        "note": "システムブラウザでスキャンと確認を完了してください。成功すると自動更新されます。続けない場合はキャンセルできます。",
+        "cancel": "認証をキャンセル"
+      },
+      "bound": {
+        "heading": "個人 WeChat 接続済み",
+        "attentionHeading": "個人 WeChat の確認が必要です",
+        "notes": {
+          "disconnected": "接続は保存されていますが、現在は動作していません。",
+          "authorizing": "新しい WeChat 認証を準備しています。",
+          "waiting_confirmation": "WeChat のスキャン確認を待っています。",
+          "connected": "WeChat のプライベートメッセージはこのコンピューターの Cindy に直接届き、Cindy サーバーを経由しません。",
+          "reconnecting": "WeChat 接続を復旧しています。再スキャンは不要です。",
+          "needs_reauth": "WeChat 認証が期限切れか、別の接続に置き換えられました。もう一度スキャンしてください。",
+          "disabled_by_policy": "互換性ポリシーにより接続は一時停止中です。認証情報と会話は保持されています。",
+          "error": "接続を一時的に利用できません。再スキャンするか、連携解除後にもう一度お試しください。"
+        }
+      },
+      "actions": {
+        "connect": "WeChat を接続",
+        "rebind": "再接続",
+        "unbind": "連携解除"
+      },
+      "workingDir": {
+        "title": "新しい会話の作業ディレクトリ",
+        "hint": "WeChat の初回会話と /new の後に使用します。変更しても現在のコンテキストは移動しません。",
+        "managed": "Cindy 管理の専用ディレクトリを使用",
+        "reset": "デフォルトに戻す",
+        "unavailable": "選択したディレクトリにアクセスできません。新しい会話では一時的に Cindy 管理のディレクトリを使用します。"
+      },
+      "unbind": {
+        "title": "個人 WeChat の連携を解除しますか？",
+        "description": "連携を解除するとメッセージ送受信を停止し、ローカルの WeChat 認証情報と未完了タスクを削除します。既存の Cindy 会話、履歴、保存済み添付ファイルは残ります。",
+        "confirm": "連携解除",
+        "cancel": "キャンセル"
+      },
+      "toasts": {
+        "authorizeFailed": "WeChat 認証を開始できませんでした。しばらくしてからもう一度お試しください。",
+        "cancelFailed": "WeChat 認証をキャンセルできませんでした",
+        "unbound": "個人 WeChat の連携を解除しました",
+        "unbindFailed": "連携解除に失敗しました。しばらくしてからもう一度お試しください。",
+        "workingDirSaved": "WeChat の新しい会話の作業ディレクトリを更新しました",
+        "workingDirReset": "WeChat の新しい会話はデフォルトディレクトリを使用します",
+        "workingDirFailed": "作業ディレクトリを更新できませんでした。もう一度選択してください。"
+      }
+    },
     "discordBot": {
       "title": "Discord ボット",
       "description": "自分で作成した Discord ボットを連携し、Discord の DM から {{appName}} を使えるようにします。",
@@ -2215,15 +2298,16 @@
       },
       "tips": {
         "cindy": "Cindy は公式提供の共有ボットです。認証情報の申請は不要で、Slack を連携して @Cindy にメンションするだけでタスクを任せられます。",
-        "personal": "個人ボットは自分で申請した認証情報で Feishu / Discord に接続します。ボットは完全に自分専用ですが、アプリの作成と設定の入力が必要です。",
-        "personalFeishuOnly": "個人ボットは自分で申請した認証情報で Feishu に接続します。ボットは完全に自分専用ですが、アプリの作成と設定の入力が必要です。"
+        "personal": "個人接続には WeChat のスキャン認証と、自分の Feishu / Discord 認証情報を使用する接続があります。新規会話設定はチャネルごとに保存されます。",
+        "personalFeishuOnly": "個人接続には WeChat のスキャン認証と、自分の Feishu 認証情報を使用する接続があります。新規会話設定はチャネルごとに保存されます。"
       },
       "defaults": {
         "title": "新規会話設定",
         "channelDescriptions": {
           "feishu": "Feishu の新規会話では、この Agent とモデルを使用します。既存の DM には /new で適用します。",
           "slack": "Slack の新しいスレッドでは、この Agent とモデルを使用します。",
-          "discord": "Discord の新規会話では、この Agent とモデルを使用します。既存の DM には /new で適用します。"
+          "discord": "Discord の新規会話では、この Agent とモデルを使用します。既存の DM には /new で適用します。",
+          "wechat": "WeChat の新規会話では、この Agent・モデル・権限モードを使用します。既存のチャットには /new で適用します。"
         },
         "agentLabel": "Agent",
         "modelLabel": "モデル設定",

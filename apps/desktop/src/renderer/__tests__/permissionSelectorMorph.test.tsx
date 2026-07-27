@@ -259,6 +259,20 @@ describe('PermissionSelector triggerVariant', () => {
     await waitFor(() => expect(document.activeElement).toBe(selectedOption));
   });
 
+  it('field 形态可原生禁用渠道不支持的权限档', async () => {
+    const { onChange } = renderSelector({
+      triggerVariant: 'field',
+      disabledModes: { bypassPermissions: '个人微信暂不支持' },
+    });
+    fireEvent.click(getTrigger());
+    await screen.findByRole('listbox');
+
+    const fullAccess = screen.getByRole('option', { name: '完全访问' });
+    expect((fullAccess as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(fullAccess);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it('ariaContext 前置到 trigger 可及名(多实例同屏读屏区分,不传则原样)', () => {
     renderSelector({ triggerVariant: 'field', ariaContext: '权限模式 · chat' });
     expect(screen.getByRole('button', { name: '权限模式 · chat:默认权限' })).toBeTruthy();

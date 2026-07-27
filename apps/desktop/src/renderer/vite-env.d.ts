@@ -374,6 +374,31 @@ type DiscordBotTransportStatus =
   | { kind: 'conflict'; appId: string }
   | { kind: 'error'; reason: string };
 
+type WechatBotPhase =
+  | 'disconnected'
+  | 'authorizing'
+  | 'waiting_confirmation'
+  | 'connected'
+  | 'reconnecting'
+  | 'needs_reauth'
+  | 'disabled_by_policy'
+  | 'error';
+
+interface WechatBotState {
+  phase: WechatBotPhase;
+  bound: boolean;
+  connectedAt?: number;
+  lastInboundAt?: number;
+  queuedTasks: number;
+  errorCode?: string;
+}
+
+interface WechatChannelSettingsState {
+  version: 1;
+  workingDir: string | null;
+  workingDirAvailable: boolean;
+}
+
 type DiscordBotSessionAuthCheckResult = {
   ok: boolean;
   missing: 'gateway-key' | 'agent-oauth' | 'provider-key' | 'provider-disconnected' | null;
@@ -1632,6 +1657,21 @@ interface ElectronAPI {
         status: DiscordBotTransportStatus;
       }) => void,
     ) => () => void;
+  };
+
+  // ── Personal WeChat (Settings → IM Bot → Personal) ──
+  wechatBot: {
+    getState: () => Promise<WechatBotState>;
+    authorize: () => Promise<{ started: true }>;
+    cancelAuthorization: () => Promise<{ ok: true }>;
+    unbind: () => Promise<{ ok: true }>;
+    getChannelSettings: () => Promise<WechatChannelSettingsState>;
+    chooseWorkingDirectory: () => Promise<{
+      canceled: boolean;
+      state: WechatChannelSettingsState;
+    }>;
+    resetWorkingDirectory: () => Promise<WechatChannelSettingsState>;
+    onStateChange: (callback: (state: WechatBotState) => void) => () => void;
   };
 
   /**

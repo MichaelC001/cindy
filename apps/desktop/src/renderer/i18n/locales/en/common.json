@@ -1495,6 +1495,89 @@
       },
       "bind": "Bind"
     },
+    "wechatBot": {
+      "title": "Personal WeChat",
+      "description": "Scan to connect personal WeChat and work with {{appName}} from a private chat.",
+      "statusAria": "Personal WeChat status: {{status}}",
+      "status": {
+        "disconnected": "Not connected",
+        "authorizing": "Preparing authorization…",
+        "waitingConfirmation": "Waiting for WeChat…",
+        "connected": "Connected",
+        "reconnecting": "Reconnecting…",
+        "needsReauth": "Authorization required",
+        "disabled": "Unavailable",
+        "error": "Connection failed"
+      },
+      "intro": "After connecting, private messages sent to this WeChat connection enter Cindy on this computer. Tencent provides the authorization page, which may display OpenClaw.",
+      "errorNote": "The connection was not completed. Check your network and scan again. Cindy never stores plaintext credentials after a failed connection.",
+      "disabledNote": "Personal WeChat is paused in this version by the compatibility policy. Saved conversations and settings are not removed.",
+      "permission": {
+        "label": "Permission mode",
+        "hint": "Applies to new context after /new. Risky actions still require confirmation in Cindy Desktop.",
+        "fullAccessDisabled": "Personal WeChat does not support Full Access yet because actions that cannot be confirmed in WeChat must not run directly."
+      },
+      "authorization": {
+        "title": "Authorize WeChat",
+        "rebindTitle": "Connect a new Cindy to WeChat",
+        "description": "Tencent's webpage will open for authorization. After scanning, you can talk to Cindy from WeChat.",
+        "rebindDescription": "This WeChat account already has a connection. Continuing may replace its existing Cindy or OpenClaw connection.",
+        "confirm": "Authorize",
+        "cancel": "Cancel",
+        "steps": {
+          "1": "Select Authorize to open the WeChat binding page in your system browser.",
+          "2": "Scan with the WeChat app and confirm the connection in WeChat.",
+          "3": "Return to Cindy after binding; the connection status updates automatically.",
+          "4": "Tencent provides the authorization page, which may display OpenClaw."
+        }
+      },
+      "waiting": {
+        "heading": "Waiting for confirmation in WeChat",
+        "note": "Finish scanning and confirmation in your system browser. Cindy updates automatically when it succeeds, or you can cancel this attempt.",
+        "cancel": "Cancel authorization"
+      },
+      "bound": {
+        "heading": "Personal WeChat connected",
+        "attentionHeading": "Personal WeChat needs attention",
+        "notes": {
+          "disconnected": "The connection is saved but is not currently running.",
+          "authorizing": "Preparing a new WeChat authorization.",
+          "waiting_confirmation": "Waiting for scan confirmation in WeChat.",
+          "connected": "WeChat private messages go directly to Cindy on this computer and are not relayed through Cindy servers.",
+          "reconnecting": "This computer is restoring the WeChat connection. No new scan is needed.",
+          "needs_reauth": "The WeChat authorization expired or was replaced by another connection. Scan again.",
+          "disabled_by_policy": "The connection is paused by this version's compatibility policy; credentials and conversations remain saved.",
+          "error": "The connection is temporarily unavailable. Scan again or unbind and retry later."
+        }
+      },
+      "actions": {
+        "connect": "Connect WeChat",
+        "rebind": "Reconnect",
+        "unbind": "Unbind"
+      },
+      "workingDir": {
+        "title": "Working directory for new conversations",
+        "hint": "Used for the first WeChat conversation and after /new. Changing it does not move the current context.",
+        "managed": "Use a Cindy-managed directory",
+        "reset": "Restore default",
+        "unavailable": "The selected directory is unavailable. New conversations temporarily use a Cindy-managed directory."
+      },
+      "unbind": {
+        "title": "Unbind personal WeChat?",
+        "description": "Unbinding stops messaging, removes local WeChat credentials, and clears unfinished tasks. Existing Cindy conversations, history, and saved attachments remain.",
+        "confirm": "Unbind",
+        "cancel": "Cancel"
+      },
+      "toasts": {
+        "authorizeFailed": "Could not start WeChat authorization. Try again later.",
+        "cancelFailed": "Could not cancel WeChat authorization",
+        "unbound": "Personal WeChat unbound",
+        "unbindFailed": "Unbind failed. Try again later.",
+        "workingDirSaved": "Working directory for new WeChat conversations updated",
+        "workingDirReset": "New WeChat conversations now use the default directory",
+        "workingDirFailed": "Could not update the working directory. Select it again."
+      }
+    },
     "discordBot": {
       "title": "Discord Bot",
       "description": "Connect your own Discord bot so {{appName}} can work from Discord DMs.",
@@ -2216,15 +2299,16 @@
       },
       "tips": {
         "cindy": "Cindy is the official shared bot — no credentials needed. Connect Slack and just @Cindy to hand off tasks.",
-        "personal": "Personal bots connect to Feishu / Discord with your own credentials — the bot is fully yours, but you create the app and fill in its config yourself.",
-        "personalFeishuOnly": "Personal bots connect to Feishu with your own credentials — the bot is fully yours, but you create the app and fill in its config yourself."
+        "personal": "Personal connections include WeChat scan authorization and your own Feishu / Discord credentials. Each channel keeps independent new-conversation settings.",
+        "personalFeishuOnly": "Personal connections include WeChat scan authorization and your own Feishu credentials. Each channel keeps independent new-conversation settings."
       },
       "defaults": {
         "title": "New Conversation Configuration",
         "channelDescriptions": {
           "feishu": "New Feishu conversations use this Agent and model. Send /new in an existing DM to apply it.",
           "slack": "New Slack threads use this Agent and model.",
-          "discord": "New Discord conversations use this Agent and model. Send /new in an existing DM to apply it."
+          "discord": "New Discord conversations use this Agent and model. Send /new in an existing DM to apply it.",
+          "wechat": "New WeChat conversations use this Agent, model, and permission mode. Send /new in an existing chat to apply them."
         },
         "agentLabel": "Agent",
         "modelLabel": "Model Configuration",

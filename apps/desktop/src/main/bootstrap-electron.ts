@@ -511,7 +511,6 @@ import { registerRemoteCmdIpc } from './commands/remoteCmdIpc.js';
 import {
   resolvePreferredSystemLocale,
   resolveSystemLocale,
-  type SupportedLocale,
 } from '../shared/locale.js';
 import {
   IM_DEFAULT_SETTINGS,
@@ -2494,7 +2493,11 @@ const registerIpcHandlers = () => {
     MAKER_IPC_INVOKE.IM_DEFAULT_SETTINGS_SET,
     async (_e, patch: unknown, rawChannel: unknown) => {
       const channel = parseImDefaultSettingsChannel(rawChannel);
-      writeImDefaultSettingsPatch(parseImDefaultSettingsPatch(patch), channel);
+      const parsedPatch = parseImDefaultSettingsPatch(patch);
+      if (channel === 'wechat' && parsedPatch.permissionMode === 'bypassPermissions') {
+        throwIpcError('INVALID_PARAMS', 'personal WeChat does not support full access');
+      }
+      writeImDefaultSettingsPatch(parsedPatch, channel);
       return imDefaultSettingsWire(channel);
     },
   );

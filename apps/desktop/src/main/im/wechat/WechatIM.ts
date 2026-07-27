@@ -56,6 +56,7 @@ export type WechatBotPhase =
 
 export interface WechatBotState {
   phase: WechatBotPhase;
+  bound: boolean;
   connectedAt?: number;
   lastInboundAt?: number;
   queuedTasks: number;
@@ -119,7 +120,8 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   readonly #statusHandlers = new Set<(status: IMStatus) => void>();
   readonly #messageHandlers = new Set<(event: IMMessageEvent) => void>();
   readonly #activeTasks = new Map<string, ActiveTask>();
-  #state: WechatBotState = { phase: 'disconnected', queuedTasks: 0 };
+  #state: Omit<WechatBotState, 'bound'> = { phase: 'disconnected', queuedTasks: 0 };
+  #hasBinding = false;
   #store: WechatTaskStore | null = null;
   #turnRuntime: TurnRuntime | null = null;
   #epoch: {
@@ -144,16 +146,18 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   }
 
   getState(): WechatBotState {
-    return { ...this.#state };
+    return { ...this.#state, bound: this.#hasBinding };
   }
 
   async init(): Promise<void> {
     if (this.#store) return;
     const active = await this.#readActiveBindingWithoutKey();
     if (!active) {
+      this.#hasBinding = false;
       this.#setState({ phase: 'disconnected', queuedTasks: 0 });
       return;
     }
+    this.#hasBinding = true;
     const key = this.#readDataKey();
     const credentials = this.#readCredentials(active.bindingEpoch);
     if (!key || !credentials) {
@@ -179,6 +183,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     this.#store?.destroy();
     this.#store = null;
     this.#activeTasks.clear();
+    this.#hasBinding = false;
     this.#setState({ phase: 'disconnected', queuedTasks: 0 });
   }
 
@@ -256,6 +261,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     this.host.secrets.remove(DATA_KEY_NAME);
     store.destroy();
     this.#store = null;
+    this.#hasBinding = false;
     this.#setState({ phase: 'disconnected', queuedTasks: 0 });
   }
 
@@ -464,6 +470,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       this.host.secrets.remove(`${CREDENTIAL_PREFIX}${bindingEpoch}`);
       throw new Error('WECHAT_BINDING_EPOCH_STALE');
     }
+    this.#hasBinding = true;
     await this.#stopEpoch();
     if (previous) {
       await store.closeBindingEpoch(previous.bindingEpoch, this.#now());
@@ -1114,7 +1121,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     return this.#deps.isAccountGenerationCurrent(generation);
   }
 
-  #setState(state: WechatBotState): void {
+  #setState(state: Omit<WechatBotState, 'bound'>): void {
     this.#state = state;
     this.host.ipc.broadcast('wechatBot:state-changed', this.getState());
     const status = this.getStatus();

@@ -370,6 +370,8 @@ const fanOutFeishuBotConflict = createIpcFanOut('feishuBot:conflict');
 const fanOutFeishuBotRegistrationStatus = createIpcFanOut('feishuBot:registration-status');
 // Discord Bot：本机凭证模式；这里只暴露 @cindy/im DiscordIM 的 transport 状态。
 const fanOutDiscordBotStatusChange = createIpcFanOut('discordBot:status-change');
+// Personal WeChat: main owns auth/polling and broadcasts a credential-free state snapshot.
+const fanOutWechatBotStateChange = createIpcFanOut('wechatBot:state-changed');
 const fanOutVoiceInputEvent = createIpcFanOut('voice-input:event');
 const fanOutVoiceInputGlobalShortcutTrigger = createIpcFanOut('voice-input:global-shortcut-trigger');
 const fanOutVoiceInputGlobalOverlayCommand = createIpcFanOut('voice-input:global-overlay-command');
@@ -1464,6 +1466,47 @@ contextBridge.exposeInMainWorld('electronAPI', {
     checkSessionAuth: (): Promise<DiscordBotSessionAuthCheckWire> =>
       ipcRenderer.invoke('discordBot:check-session-auth'),
     onStatusChange: fanOutDiscordBotStatusChange,
+  },
+
+  // ── Personal WeChat (Settings → IM Bot → Personal) ──
+  // Renderer receives state only. Authorization URLs and credentials never
+  // cross preload; main opens the Tencent page in the system browser.
+  wechatBot: {
+    getState: (): Promise<{
+      phase:
+        | 'disconnected'
+        | 'authorizing'
+        | 'waiting_confirmation'
+        | 'connected'
+        | 'reconnecting'
+        | 'needs_reauth'
+        | 'disabled_by_policy'
+        | 'error';
+      bound: boolean;
+      connectedAt?: number;
+      lastInboundAt?: number;
+      queuedTasks: number;
+      errorCode?: string;
+    }> => ipcRenderer.invoke('wechatBot:get-state'),
+    authorize: (): Promise<{ started: true }> => ipcRenderer.invoke('wechatBot:authorize'),
+    cancelAuthorization: (): Promise<{ ok: true }> =>
+      ipcRenderer.invoke('wechatBot:cancel-authorization'),
+    unbind: (): Promise<{ ok: true }> => ipcRenderer.invoke('wechatBot:unbind'),
+    getChannelSettings: (): Promise<{
+      version: 1;
+      workingDir: string | null;
+      workingDirAvailable: boolean;
+    }> => ipcRenderer.invoke('wechatBot:get-channel-settings'),
+    chooseWorkingDirectory: (): Promise<{
+      canceled: boolean;
+      state: { version: 1; workingDir: string | null; workingDirAvailable: boolean };
+    }> => ipcRenderer.invoke('wechatBot:choose-working-directory'),
+    resetWorkingDirectory: (): Promise<{
+      version: 1;
+      workingDir: string | null;
+      workingDirAvailable: boolean;
+    }> => ipcRenderer.invoke('wechatBot:reset-working-directory'),
+    onStateChange: fanOutWechatBotStateChange,
   },
 
   // Renderer → main 的 "用户已登录 + localDb 已就绪" 信号。LocalDbGate 在

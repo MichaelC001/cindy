@@ -1494,6 +1494,89 @@
       },
       "bind": "绑定"
     },
+    "wechatBot": {
+      "title": "个人微信",
+      "description": "扫码连接个人微信，在微信私聊中与 {{appName}} 工作。",
+      "statusAria": "个人微信状态：{{status}}",
+      "status": {
+        "disconnected": "未连接",
+        "authorizing": "准备授权…",
+        "waitingConfirmation": "等待微信确认…",
+        "connected": "已连接",
+        "reconnecting": "重新连接中…",
+        "needsReauth": "需要重新授权",
+        "disabled": "暂不可用",
+        "error": "连接失败"
+      },
+      "intro": "连接后，你发给该微信连接的私聊消息会进入本机 Cindy。授权网页由腾讯提供，页面中可能显示 OpenClaw。",
+      "errorNote": "本次连接未完成。请确认网络正常后重新扫码；Cindy 不会在连接失败时保存明文凭证。",
+      "disabledNote": "此版本的个人微信连接已因兼容性策略暂停。已保存的对话和设置不会被删除。",
+      "permission": {
+        "label": "权限模式",
+        "hint": "仅影响 /new 后的新上下文。高风险操作仍会要求你回到 Cindy 桌面端确认。",
+        "fullAccessDisabled": "个人微信首版不支持 Full Access，避免无法在微信内确认的操作被直接执行。"
+      },
+      "authorization": {
+        "title": "微信授权",
+        "rebindTitle": "将新的 Cindy 连接到微信",
+        "description": "即将跳转到腾讯提供的网页完成授权。扫码绑定后，即可在微信中与 Cindy 对话。",
+        "rebindDescription": "当前微信已有连接。继续扫码可能解除该微信原有的 Cindy 或 OpenClaw 连接。",
+        "confirm": "去授权",
+        "cancel": "取消",
+        "steps": {
+          "1": "点击「去授权」，在系统浏览器打开微信绑定页。",
+          "2": "使用微信 App 扫码，并在微信页面确认连接。",
+          "3": "绑定成功后回到 Cindy，连接状态会自动更新。",
+          "4": "授权页由腾讯提供，页面中可能显示 OpenClaw。"
+        }
+      },
+      "waiting": {
+        "heading": "等待你在微信中确认",
+        "note": "请在系统浏览器完成扫码和确认。成功后无需手动刷新；如果不想继续，可以取消本次授权。",
+        "cancel": "取消授权"
+      },
+      "bound": {
+        "heading": "个人微信已连接",
+        "attentionHeading": "个人微信需要处理",
+        "notes": {
+          "disconnected": "连接已保存，当前尚未启动。",
+          "authorizing": "正在准备新的微信授权。",
+          "waiting_confirmation": "正在等待微信扫码确认。",
+          "connected": "微信私聊消息会直接进入本机 Cindy，消息不经过 Cindy 服务端转发。",
+          "reconnecting": "本机正在恢复与微信的连接，无需重新扫码。",
+          "needs_reauth": "微信授权已失效或被新的连接替换，请重新扫码。",
+          "disabled_by_policy": "连接因当前版本的兼容性策略暂停；凭证和对话仍保留。",
+          "error": "连接暂时失败。可以重新扫码，或解绑后稍后再试。"
+        }
+      },
+      "actions": {
+        "connect": "连接微信",
+        "rebind": "重新连接",
+        "unbind": "解绑"
+      },
+      "workingDir": {
+        "title": "新对话工作目录",
+        "hint": "微信首次对话或发送 /new 后使用。更改不会移动当前上下文。",
+        "managed": "使用 Cindy 管理的专用目录",
+        "reset": "恢复默认",
+        "unavailable": "已选目录当前不可访问；新对话将暂时使用 Cindy 管理的专用目录。"
+      },
+      "unbind": {
+        "title": "解绑个人微信？",
+        "description": "解绑会停止收发、删除本机微信凭证并清理未完成任务。已创建的 Cindy 对话、历史消息和已保存附件会保留。",
+        "confirm": "解绑",
+        "cancel": "取消"
+      },
+      "toasts": {
+        "authorizeFailed": "无法开始微信授权，请稍后重试",
+        "cancelFailed": "取消微信授权失败",
+        "unbound": "个人微信已解绑",
+        "unbindFailed": "解绑失败，请稍后重试",
+        "workingDirSaved": "微信新对话工作目录已更新",
+        "workingDirReset": "微信新对话已恢复使用默认目录",
+        "workingDirFailed": "更新工作目录失败，请重新选择"
+      }
+    },
     "discordBot": {
       "title": "Discord 机器人",
       "description": "绑定你自建的 Discord Bot，在 Discord 私聊里连接 {{appName}}。",
@@ -2215,15 +2298,16 @@
       },
       "tips": {
         "cindy": "Cindy 是官方提供的共享机器人：无需申请任何凭证，连接 Slack 后 @Cindy 即可直接派活。",
-        "personal": "个人机器人用你自己申请的凭证接入飞书 / Discord：机器人完全归你，需要自行创建应用并填写配置。",
-        "personalFeishuOnly": "个人机器人用你自己申请的凭证接入飞书：机器人完全归你，需要自行创建应用并填写配置。"
+        "personal": "个人连接包括微信扫码，以及使用自有凭证接入飞书 / Discord；各渠道独立保存新对话配置。",
+        "personalFeishuOnly": "个人连接包括微信扫码，以及使用自有凭证接入飞书；各渠道独立保存新对话配置。"
       },
       "defaults": {
         "title": "新对话配置",
         "channelDescriptions": {
           "feishu": "飞书新对话会使用这组 Agent 和模型；已有私聊发送 /new 后应用。",
           "slack": "Slack 新 thread 会使用这组 Agent 和模型。",
-          "discord": "Discord 新对话会使用这组 Agent 和模型；已有私聊发送 /new 后应用。"
+          "discord": "Discord 新对话会使用这组 Agent 和模型；已有私聊发送 /new 后应用。",
+          "wechat": "微信新对话会使用这组 Agent、模型和权限模式；已有私聊发送 /new 后应用。"
         },
         "agentLabel": "Agent",
         "modelLabel": "模型配置",

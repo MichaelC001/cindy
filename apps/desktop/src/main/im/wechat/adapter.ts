@@ -1,16 +1,12 @@
-import fs from 'node:fs';
-
 import type { RichChannelIM } from '@cindy/im';
 
-import { ownerScopedImUserDataPath } from '../ownerScopedStorage';
 import type { ImChannelAdapter, ImOrchestratorConfig } from '../shared/types';
 import { ui } from '../discord/uiText';
+import { resolveWechatWorkingDir } from './channelSettings';
 import { sessionIdFor, type WechatIM } from './WechatIM';
 
 function ensureWorkingDir(botId: string): string {
-  const dir = ownerScopedImUserDataPath('im-working-dir', `wechat-${botId}`);
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  return resolveWechatWorkingDir(botId);
 }
 
 export function buildWechatAdapter(

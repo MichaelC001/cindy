@@ -52,7 +52,7 @@
  * the logged-in user's DbClient; a later login reconnects saved credentials.
  */
 
-import { ipcMain, BrowserWindow, type IpcMainEvent } from 'electron';
+import { ipcMain, BrowserWindow, dialog, type IpcMainEvent } from 'electron';
 import { and, eq, like, ne, sql } from 'drizzle-orm';
 
 import { getDbClient } from '../localDb/client/current';
@@ -79,6 +79,11 @@ import { getUpdateStatus } from '../updateService';
 
 import { createLogger } from '../logger';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer';
+import {
+  readWechatChannelSettings,
+  resetWechatWorkingDir,
+  writeWechatWorkingDir,
+} from './wechat/channelSettings';
 
 export { im, feishuIm, discordIm, wechatIm } from './host';
 
@@ -185,6 +190,38 @@ export function startImOrchestrators(): void {
       await wechatIm.unbind();
       return { ok: true };
     });
+  });
+  ipcMain.handle('wechatBot:get-channel-settings', (event) => {
+    assertTrustedAppRendererEvent(event);
+    return readWechatChannelSettings();
+  });
+  ipcMain.handle('wechatBot:choose-working-directory', async (event) => {
+    assertTrustedAppRendererEvent(event);
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || owner.isDestroyed()) throw new Error('WECHAT_SETTINGS_WINDOW_UNAVAILABLE');
+    const result = await dialog.showOpenDialog(owner, {
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || !result.filePaths[0]) {
+      return { canceled: true as const, state: readWechatChannelSettings() };
+    }
+    try {
+      return {
+        canceled: false as const,
+        state: writeWechatWorkingDir(result.filePaths[0]),
+      };
+    } catch {
+      log.warn('failed to save user-picked personal WeChat working directory');
+      throw new Error('WECHAT_WORKING_DIR_UPDATE_FAILED');
+    }
+  });
+  ipcMain.handle('wechatBot:reset-working-directory', (event) => {
+    assertTrustedAppRendererEvent(event);
+    try {
+      return resetWechatWorkingDir();
+    } catch {
+      throw new Error('WECHAT_WORKING_DIR_UPDATE_FAILED');
+    }
   });
 
   // bindingStore.preload() 故意不在这里跑 —— 它要 DbClient, 而 localDb 在
