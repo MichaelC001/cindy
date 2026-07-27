@@ -612,6 +612,16 @@ export class RsbWebviewAutomation {
     request: BrowserActRequest,
   ): Promise<RsbActResult> {
     return withDebugger(wc, async (send) => {
+      // DOM focus alone is not enough for an embedded <webview>: Chromium's
+      // Input domain routes keyboard and mouse events through the currently
+      // focused RenderWidgetHost. If Cindy's chat composer still owns the
+      // Electron focus, those events land in the composer even though
+      // Runtime.callFunctionOn focused an element inside the guest document.
+      // Activate the guest before every real input action so CDP dispatches to
+      // the WebContents that supplied the snapshot/ref.
+      const focusGuest = (): void => {
+        wc.focus();
+      };
       const resolveTarget = async (
         ref = request.ref,
         selector = request.selector,
@@ -629,11 +639,13 @@ export class RsbWebviewAutomation {
 
       switch (request.kind) {
         case 'click': {
+          focusGuest();
           const point = await centerOfNode(send, await resolveTarget());
           await dispatchClick(send, point.x, point.y, request);
           return { tabId, kind: request.kind, ...point };
         }
         case 'clickCoords': {
+          focusGuest();
           const x = finiteNonNegative(request.x, 'clickCoords.x');
           const y = finiteNonNegative(request.y, 'clickCoords.y');
           await dispatchClick(send, x, y, request);
@@ -641,6 +653,7 @@ export class RsbWebviewAutomation {
         }
         case 'type':
         case 'fill': {
+          focusGuest();
           const target = await resolveTarget();
           await focusNode(send, target, true);
           if (request.kind === 'fill') {
@@ -676,6 +689,7 @@ export class RsbWebviewAutomation {
           return { tabId, kind: request.kind, textLength: request.text.length };
         }
         case 'press': {
+          focusGuest();
           if (request.ref || request.selector) {
             await focusNode(send, await resolveTarget());
           }
@@ -686,6 +700,7 @@ export class RsbWebviewAutomation {
           return { tabId, kind: request.kind, key: request.key };
         }
         case 'hover': {
+          focusGuest();
           const point = await centerOfNode(send, await resolveTarget());
           await send('Input.dispatchMouseEvent', {
             type: 'mouseMoved',
@@ -696,6 +711,7 @@ export class RsbWebviewAutomation {
           return { tabId, kind: request.kind, ...point };
         }
         case 'drag': {
+          focusGuest();
           const start = await centerOfNode(
             send,
             await resolveTarget(request.startRef, undefined),

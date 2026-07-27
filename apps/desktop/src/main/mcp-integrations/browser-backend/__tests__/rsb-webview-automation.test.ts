@@ -8,6 +8,7 @@ interface DebuggerHarness {
   sendCommand: ReturnType<typeof vi.fn>;
   attach: ReturnType<typeof vi.fn>;
   detach: ReturnType<typeof vi.fn>;
+  focus: ReturnType<typeof vi.fn>;
 }
 
 function debuggerHarness(
@@ -21,9 +22,11 @@ function debuggerHarness(
   const detach = vi.fn(() => {
     attached = false;
   });
+  const focus = vi.fn();
   const sendCommand = vi.fn(handler);
   const wc = {
     getURL: () => 'https://example.test/form',
+    focus,
     debugger: {
       isAttached: vi.fn(() => attached),
       attach,
@@ -31,7 +34,7 @@ function debuggerHarness(
       sendCommand,
     },
   } as unknown as WebContents;
-  return { wc, sendCommand, attach, detach };
+  return { wc, sendCommand, attach, detach, focus };
 }
 
 function automation(): RsbWebviewAutomation {
@@ -184,6 +187,12 @@ describe('RsbWebviewAutomation act', () => {
     expect(harness.sendCommand).toHaveBeenCalledWith(
       'Input.insertText',
       { text: 'hello@example.test' },
+    );
+    expect(harness.focus).toHaveBeenCalledTimes(1);
+    expect(harness.focus.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.sendCommand.mock.invocationCallOrder.find(
+        (_order, index) => harness.sendCommand.mock.calls[index]?.[0] === 'Input.insertText',
+      ) ?? Number.POSITIVE_INFINITY,
     );
     expect(harness.sendCommand).toHaveBeenCalledWith(
       'Input.dispatchKeyEvent',

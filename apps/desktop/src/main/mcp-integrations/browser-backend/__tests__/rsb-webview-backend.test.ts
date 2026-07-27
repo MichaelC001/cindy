@@ -472,6 +472,7 @@ describe('RsbWebviewBackend — act:evaluate', () => {
       return {};
     });
     Object.assign(wc, {
+      focus: vi.fn(),
       debugger: {
         isAttached: vi.fn(() => true),
         attach: vi.fn(),
