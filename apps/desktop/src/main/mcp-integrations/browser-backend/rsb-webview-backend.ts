@@ -547,9 +547,10 @@ export class RsbWebviewBackend implements BrowserBackend {
 
     return this.withTabPin(tabId, async () => {
       await this.tryObserveNetwork(wc, tabId);
-      await this.dialogs.observe(wc);
-      const pendingDialog = this.dialogs.pending(wc);
+      const opening = await this.tryWatchPageDialog(wc, tabId);
+      const pendingDialog = opening ? this.dialogs.pending(wc) : undefined;
       if (pendingDialog) {
+        opening?.cancel();
         return actionOk(req.action, {
           tabId,
           kind: inner.kind,
@@ -557,12 +558,11 @@ export class RsbWebviewBackend implements BrowserBackend {
         });
       }
 
-      const opening = this.dialogs.watchOpening(wc);
       const actionStartedAt = Date.now();
       const runAction = async () => {
-        const dialogBeforeStart = this.dialogs.pending(wc);
+        const dialogBeforeStart = opening ? this.dialogs.pending(wc) : undefined;
         if (dialogBeforeStart) {
-          opening.cancel();
+          opening?.cancel();
           return {
             tabId,
             kind: inner.kind,
@@ -570,6 +570,7 @@ export class RsbWebviewBackend implements BrowserBackend {
           };
         }
         const actionPromise = this.automation.act(tabId, wc, inner);
+        if (!opening) return actionPromise;
         const outcome = await Promise.race([
           actionPromise.then((value) => ({ type: 'action' as const, value })),
           opening.opened.then((dialog) => ({ type: 'dialog' as const, dialog })),
@@ -804,6 +805,21 @@ export class RsbWebviewBackend implements BrowserBackend {
     });
     if (this.activity.length > 200) {
       this.activity.splice(0, this.activity.length - 200);
+    }
+  }
+
+  private async tryWatchPageDialog(
+    wc: WebContents,
+    tabId: string,
+  ): Promise<ReturnType<RsbWebviewDialogs['watchOpening']> | undefined> {
+    try {
+      await this.dialogs.observe(wc);
+      return this.dialogs.watchOpening(wc);
+    } catch (err) {
+      // Dialog capture enriches an action but should not make the action fail
+      // when another debugger client owns the guest or Page.enable is refused.
+      this.opts.logger.warn('RSB page dialog observation unavailable', { tabId, err });
+      return undefined;
     }
   }
 

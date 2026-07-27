@@ -950,12 +950,17 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
     uploadRoot?: string;
     resourceUrl?: string;
     onDialogHandled?: () => void;
+    pageEnableError?: Error;
   }) {
     let attached = false;
     const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
     const sessionListeners = new Map<string, Set<(...args: unknown[]) => void>>();
     const sendCommand = vi.fn(async (method: string) => {
-      if (method === 'Network.enable' || method === 'Page.enable') return {};
+      if (method === 'Network.enable') return {};
+      if (method === 'Page.enable') {
+        if (options?.pageEnableError) throw options.pageEnableError;
+        return {};
+      }
       if (method === 'Accessibility.enable') return {};
       if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
       if (method === 'Runtime.evaluate') {
@@ -1038,6 +1043,7 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
       [{ sessionId: 's1', tabId: 't1', webContentsId: 101 }],
       new Map([['t1', wc]]),
     );
+    const backendLogger = logger();
     const backend = new RsbWebviewBackend({
       registry,
       getActiveSessionId: () => 's1',
@@ -1046,14 +1052,14 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
         ? async () => [options.uploadRoot!]
         : undefined,
       bridge: { getHostWebContents: () => null, logger: logger() },
-      logger: logger(),
+      logger: backendLogger,
     });
     const emit = (method: string, params: Record<string, unknown>) => {
       for (const listener of listeners.get('message') ?? []) {
         listener({}, method, params);
       }
     };
-    return { backend, emit, sendCommand, downloadURL, wc };
+    return { backend, emit, sendCommand, downloadURL, wc, backendLogger };
   }
 
   it('validates upload paths before assigning files to the page input', async () => {
@@ -1180,6 +1186,42 @@ describe('RsbWebviewBackend — uploads and page dialogs', () => {
     } finally {
       await env.backend.dispose();
       await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('continues a page action when dialog observation is unavailable', async () => {
+    const env = buildPageEnv({
+      pageEnableError: new Error('another debugger client owns the page'),
+    });
+    const automation = (env.backend as unknown as {
+      automation: {
+        act: (
+          tabId: string,
+          wc: WebContents,
+          request: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+      };
+    }).automation;
+    vi.spyOn(automation, 'act').mockResolvedValue({
+      tabId: 't1',
+      kind: 'click',
+    });
+
+    try {
+      const result = await env.backend.call({
+        action: 'act',
+        targetId: 't1',
+        request: { kind: 'click', targetId: 't1', ref: 'button-1' },
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.data).toMatchObject({ tabId: 't1', kind: 'click' });
+      expect(env.backendLogger.warn).toHaveBeenCalledWith(
+        'RSB page dialog observation unavailable',
+        expect.objectContaining({ tabId: 't1' }),
+      );
+    } finally {
+      await env.backend.dispose();
     }
   });
 
