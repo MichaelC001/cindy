@@ -1152,7 +1152,7 @@ export function createTurnRunner(
     // 全空,实时也看不到(scheduler / hook-control 两条 headless 链路同款老坑,
     // 先例见 scheduler-host/runner.ts 与 hook-control/session-runner.ts)。
     // assistant 文本自此由 messagePersistBroadcaster 单点落库,本模块不再自写
-    // (见 handleTurnDoneAsync)。wireSessionToIpcExternal 内部用 wiredSessionIds
+    // (见 handleTurnDoneAsync)。wireSessionToIpcExternal 内部用 wiredSessionsById
     // 守重,重复调安全。下方 setInteractionListener 会把 wire 装上的 desktop
     // interaction listener 覆盖回渠道卡片版,顺序不能颠倒。
     wireSessionToIpcExternal(makerSession);

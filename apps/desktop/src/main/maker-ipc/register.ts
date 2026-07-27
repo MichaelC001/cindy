@@ -1474,13 +1474,21 @@ export function takePendingInteractionsForSession(
   return taken;
 }
 
+type WiredSession = NonNullable<ReturnType<Maker['getSession']>>;
+
+interface WiredSessionRegistration {
+  session: WiredSession;
+  disposers: Array<() => void>;
+}
+
 /**
- * 标记已经 wire 过 IPC 转发的 session, 避免 lazy-create 路径或多个调用方
+ * 记录已经 wire 过 IPC 转发的 session 实例，避免 lazy-create 路径或多个调用方
  * (renderer IPC handler / scheduler runner / feishu 接管 / future MCP server) 重复挂 listener。
  *
- * 进程级单例 —— register.ts 模块只 load 一次, 此 Set 在 closeSession 时按 id 清理。
+ * deferred agent switch 会保留业务 id 但替换 Session 实例；此时必须解绑旧实例并完整
+ * wire 新实例，不能只按 id 去重。
  */
-const wiredSessionIds = new Set<string>();
+const wiredSessionsById = new Map<string, WiredSessionRegistration>();
 
 /**
  * SDK result 事件的 total_cost_usd 是 session 累计 (不是 per-turn) ——
@@ -2350,14 +2358,17 @@ async function handleSilentStopTurnEnd(
 
 export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void {
   if (!session) return;
-  if (wiredSessionIds.has(session.id)) {
-    // Deferred agent switch may replace the Session object while retaining the
-    // business id. Event wiring remains idempotent, but the new instance still
-    // needs its own central interaction listener/Desktop fallback.
+  const existing = wiredSessionsById.get(session.id);
+  if (existing?.session === session) {
     installDesktopInteractionListener(session);
     return;
   }
-  wiredSessionIds.add(session.id);
+  if (existing) {
+    for (const dispose of existing.disposers) dispose();
+    existing.session.setInteractionListener(null);
+  }
+  const registration: WiredSessionRegistration = { session, disposers: [] };
+  wiredSessionsById.set(session.id, registration);
 
   // session-agent-switch:登记本会话当前引擎,broadcaster / user 行落库据此逐行
   // stamp messages.agent_kind(切换后历史行的 agent_meta 必须按写入时引擎解析)。
@@ -2366,15 +2377,15 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   // 订阅槽①旁听 tap(独立监听,叠加在主转发之外互不干扰):AgentEvent →
   // did-turn-*。资格(用户主会话)与自动化轮次过滤都在 tap 内部,这里零逻辑。
   const ghostSessionTap = createGhostSessionTap(session.id);
-  session.onEvent((event: AgentEvent) => {
+  registration.disposers.push(session.onEvent((event: AgentEvent) => {
     ghostSessionTap.handleEvent(
       event as { type: string; data?: unknown; source?: string; turnOrigin?: { kind?: string } },
     );
-  });
+  }));
 
   // 转发事件到所有 window。interaction_dismissed 单独走专用 channel,
   // 让 renderer chat store 不必扫所有 vendor-raw 找它。
-  session.onEvent((event: AgentEvent) => {
+  registration.disposers.push(session.onEvent((event: AgentEvent) => {
     const broadcastEvent = redactEventForRenderer(event);
     if (event.type === 'interaction_dismissed') {
       const data = event.data as { requestId?: unknown; reason?: unknown };
@@ -3140,8 +3151,9 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         });
       }
     }
-  });
-  session.onStatusChange((status) => {
+  }));
+  registration.disposers.push(session.onStatusChange((status) => {
+    if (wiredSessionsById.get(session.id)?.session !== session) return;
     broadcastToAllWindows(MAKER_PUSH.STATUS_CHANGED, { sessionId: session.id, status });
     if (status === 'closed') {
       cleanupPendingInteractionsForSession(session.id, 'session_closed');
@@ -3151,7 +3163,9 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       deferredCodexRestartHolder?.onSessionSettled();
       agentInputCoordinatorHolder?.onExternalTurnSettled(session.id);
       gitSnapshotCoordinator?.onSessionClosed(session.id);
-      wiredSessionIds.delete(session.id);
+      wiredSessionsById.delete(session.id);
+      for (const dispose of registration.disposers) dispose();
+      session.setInteractionListener(null);
       clearOrcaMcpHydrated(session.id);
       knownNonOrcaSessionIds.delete(session.id);
       lastReportedCostUsdBySession.delete(session.id);
@@ -3164,7 +3178,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       clearSessionPersistState(session.id);
       handleAgentIslandSessionClosedAfterCleanup(session.id);
     }
-  });
+  }));
 
   // 注入 interaction listener (permission/ask/plan 三合一,renderer 按 kind 弹不同 UI)
   installDesktopInteractionListener(session);
@@ -3739,7 +3753,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
   });
 
   // ── Session 生命周期 ────────────────────────────────────────────────────
-  // wiredSessionIds + lastReportedCostUsdBySession + sessionTurnActivityTracker 都在模块顶层,
+  // wiredSessionsById + lastReportedCostUsdBySession + sessionTurnActivityTracker 都在模块顶层,
   // 让 scheduler runner / feishu 接管 / future MCP 等绕过 IPC 的调用方也能复用同一份 wire 逻辑。
 
   type CreateOpts = MakerSessionCreateOpts;

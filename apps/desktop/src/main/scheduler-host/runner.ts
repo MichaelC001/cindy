@@ -766,7 +766,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // assistant text / tool_use / tool_result 等落库到 messages 表。
     // 不 wire → renderer 收不到事件 → messages 永远空（修复 Phase 6 之前 bug：
     // 调度跑出来的 session 在 UI 里一片空白，msg_count=0，但 schedule_runs.status=success）。
-    // wireSessionToIpc 内部按 session.id 幂等，并发 fire 同 session 不会重复挂。
+    // wireSessionToIpc 内部按 Session 实例幂等；同 id 换实例时会先解绑旧实例。
     wireSessionToIpc(session);
 
     // 4.5.0 abort listener:scheduler 在 user delete/pause 时会 abort ctx.signal,

@@ -1,8 +1,8 @@
 import type { RichChannelIM } from '@cindy/im';
 
 import type { ImChannelAdapter, ImOrchestratorConfig } from '../shared/types';
-import { ui } from '../discord/uiText';
 import { resolveWechatWorkingDir } from './channelSettings';
+import { ui } from './uiText';
 import { sessionIdFor, type WechatIM } from './WechatIM';
 
 function ensureWorkingDir(botId: string): string {

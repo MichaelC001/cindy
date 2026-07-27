@@ -37,6 +37,12 @@ function mediaBase(
   };
 }
 
+function optionalByteLength(value: unknown): number | undefined {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
 function decodeQuote(item: IlinkMessageItem) {
   const ref = item.ref_msg;
   if (!ref) return undefined;
@@ -78,10 +84,7 @@ function decodeItemMedia(item: IlinkMessageItem): WechatMediaRef | null {
       return {
         ...mediaBase("file", item.file_item?.media),
         fileName: item.file_item?.file_name,
-        byteLength:
-          typeof item.file_item?.len === "string"
-            ? Number(item.file_item.len) || undefined
-            : undefined,
+        byteLength: optionalByteLength(item.file_item?.len),
         md5Hex: item.file_item?.md5,
       };
     case MessageItemType.VIDEO:

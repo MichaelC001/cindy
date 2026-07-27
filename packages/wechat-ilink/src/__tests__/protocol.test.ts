@@ -95,6 +95,28 @@ describe("pure protocol utilities", () => {
     ).toMatchObject({ messageId: "3", media: [] });
   });
 
+  it("preserves a legitimate zero-byte file length", () => {
+    expect(
+      decodeInboundMessage({
+        message_id: 4,
+        from_user_id: "user",
+        to_user_id: "bot",
+        context_token: "ctx",
+        item_list: [
+          {
+            type: 4,
+            file_item: {
+              file_name: "empty.txt",
+              len: "0",
+            },
+          },
+        ],
+      }),
+    ).toMatchObject({
+      media: [{ kind: "file", fileName: "empty.txt", byteLength: 0 }],
+    });
+  });
+
   it("decodes quoted text and media without inventing prior history", () => {
     expect(
       decodeInboundMessage({
