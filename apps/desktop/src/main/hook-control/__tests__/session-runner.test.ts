@@ -174,9 +174,19 @@ function makeFakeSession(id: string) {
         h.eventCbs.delete(id);
       };
     },
+    setInteractionListener(listener: (req: unknown) => Promise<unknown>) {
+      h.interactionListeners.set(id, listener);
+    },
     send: vi.fn(
-      async (_msg: unknown, opts: { onAccepted?: () => Promise<void> }): Promise<unknown> => {
+      async (
+        _msg: unknown,
+        opts: {
+          beforeProviderStart?: () => Promise<void> | void;
+          onAccepted?: () => Promise<void>;
+        },
+      ): Promise<unknown> => {
         h.headlessDuringSend.push(isHeadlessGhostSetupTurn(id));
+        await opts.beforeProviderStart?.();
         await opts.onAccepted?.();
         h.headlessAfterAccepted.push(isHeadlessGhostSetupTurn(id));
         // 收口: 模拟 agent 立刻完成本 turn
@@ -606,7 +616,17 @@ describe('进度快照(turn.progress 链路)', () => {
           h.eventCbs.delete(id);
         };
       },
-      send: vi.fn(async (_msg: unknown, opts: { onAccepted?: () => Promise<void> }) => {
+      setInteractionListener(listener: (req: unknown) => Promise<unknown>) {
+        h.interactionListeners.set(id, listener);
+      },
+      send: vi.fn(async (
+        _msg: unknown,
+        opts: {
+          beforeProviderStart?: () => Promise<void> | void;
+          onAccepted?: () => Promise<void>;
+        },
+      ) => {
+        await opts.beforeProviderStart?.();
         await opts.onAccepted?.();
         return {};
       }),
@@ -760,14 +780,21 @@ describe('交互卡链路(interaction listener 覆盖)', () => {
       setInteractionListener(listener: (req: unknown) => Promise<unknown>) {
         h.interactionListeners.set(id, listener);
       },
-      send: vi.fn(async (_msg: unknown, opts: { onAccepted?: () => Promise<void> }) => {
+      send: vi.fn(async (
+        _msg: unknown,
+        opts: {
+          beforeProviderStart?: () => Promise<void> | void;
+          onAccepted?: () => Promise<void>;
+        },
+      ) => {
+        await opts.beforeProviderStart?.();
         await opts.onAccepted?.();
         return {};
       }),
     };
   }
 
-  it('ask 请求 -> 发卡回调 -> 按钮决策回流 resolve; 收口后归还桌面 listener', async () => {
+  it('ask 请求 -> 中央 Router 发卡 -> 按钮决策回流 resolve; 收口后释放 route', async () => {
     fakeMaker.createSession.mockImplementationOnce(async (opts: { id?: string }) =>
       makeInteractiveSession(opts.id ?? 'sess-x'),
     );
@@ -788,7 +815,7 @@ describe('交互卡链路(interaction listener 覆盖)', () => {
     );
     await new Promise((r) => setTimeout(r, 0));
 
-    // hook listener 已覆盖桌面版
+    // Session listener 始终由中央 Router 持有。
     const listener = h.interactionListeners.get('sess-new')!;
     expect(listener).toBeTypeOf('function');
 
@@ -811,12 +838,12 @@ describe('交互卡链路(interaction listener 覆盖)', () => {
       answers: { '继续重构吗?': '先停' },
     });
 
-    // 正常收口: 无未决交互, 不发 cancel, 桌面 listener 归还
+    // 正常收口: 无未决交互, 不发 cancel；无需覆盖/归还 listener。
     h.eventCbs.get('sess-new')!({ type: 'done', data: null });
     const outcome = await p;
     expect(outcome.status).toBe('ok');
     expect(cancels).toHaveLength(0);
-    expect(h.installDesktopInteractionListener).toHaveBeenCalledTimes(1);
+    expect(h.installDesktopInteractionListener).not.toHaveBeenCalled();
   });
 
   it('permission 请求出三按钮卡, 按钮回流 resolve(允许一次)', async () => {

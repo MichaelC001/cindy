@@ -18,7 +18,7 @@
  */
 
 import type { AgentKind, Effort, PermissionMode } from '@cindy/maker-core';
-import type { ChannelIM, IMUnsupportedEntry } from '@cindy/im';
+import type { ChannelIM, ImOutputDriver, IMUnsupportedEntry } from '@cindy/im';
 
 /** 渠道名 — 同时是 sessions.source 列值与 IdentityKey.channel 的值域。 */
 export type ImChannelName = 'feishu' | 'slack' | 'discord';
@@ -83,6 +83,8 @@ export interface ImChannelAdapter {
   channel: ImChannelName;
   /** 收发能力(@cindy/im ChannelIM 契约)。 */
   im: ChannelIM;
+  /** Terminal output strategy; existing channels use rich-card. */
+  output: ImOutputDriver;
   config: ImOrchestratorConfig;
   ui: ImUiTextPack;
   sessions: ImSessionNamespace;

@@ -325,6 +325,7 @@ import {
   readOrcaWorkerOutputReadOnly,
 } from './orcaDiagnostics.js';
 import { createMakerSendTransaction } from './makerSendTransaction.js';
+import { installDesktopInteractionHandler } from './interactionRouter.js';
 import { registerMakerMessageDeleteHandler } from './messageDeleteHandler.js';
 import { normalizeUserMessage, materializeQueuedOssAttachments } from './normalizeAttachments.js';
 import { AGENT_ISLAND_DISPLAY_CONFIG } from '../agent-island/displayConfig.js';
@@ -2126,22 +2127,19 @@ export function setGoalAskAnswerObserver(
 }
 
 /**
- * 把 desktop 版的 interaction listener 装到一个 session 上 — 行为: broadcast
+ * 把 Desktop fallback handler 登记到 session 级中央 InteractionRouter — 行为:broadcast
  * INTERACTION_REQUEST 给所有 window, 等 renderer 通过 RESOLVE_INTERACTION IPC
  * 回 decision。permission 10 分钟超时兜底为 deny; ask/plan 不超时，必须等
  * 用户提交、停止任务或关闭 session。
  *
- * 抽出来 export 是为了 feishu /ctr 接管流程的 detach 路径能"还原" desktop
- * listener: 接管期间 setInteractionListener 是 single-listener 语义, 被 feishu
- * 版覆盖了, detach 后必须主动调一次 install... 把 desktop 版重新挂回去,
- * 否则 desktop renderer 永远收不到 permission 弹窗。
- *
- * 幂等: setInteractionListener 是覆盖式写, 重复调安全。
+ * Router 在 Session 实例生命周期内只安装一次 listener。Feishu/Discord/Slack
+ * turn 通过 beforeProviderStart 登记临时 route，终态只释放自己的 lease，
+ * 不再覆盖或“还原” Desktop listener。重复调用只更新 Desktop fallback。
  */
 export function installDesktopInteractionListener(
   session: { id: string; setInteractionListener: (l: ((req: InteractionRequest) => Promise<InteractionDecision>) | null) => void },
 ): void {
-  session.setInteractionListener(async (req: InteractionRequest) => {
+  installDesktopInteractionHandler(session, async (req: InteractionRequest) => {
     const agentIslandInteractionEpoch = shouldNotifyAgentIslandForSession(session.id)
       ? getAgentIslandService()?.captureInteractionEpoch(session.id) ?? null
       : null;
@@ -2352,7 +2350,13 @@ async function handleSilentStopTurnEnd(
 
 export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void {
   if (!session) return;
-  if (wiredSessionIds.has(session.id)) return;
+  if (wiredSessionIds.has(session.id)) {
+    // Deferred agent switch may replace the Session object while retaining the
+    // business id. Event wiring remains idempotent, but the new instance still
+    // needs its own central interaction listener/Desktop fallback.
+    installDesktopInteractionListener(session);
+    return;
+  }
   wiredSessionIds.add(session.id);
 
   // session-agent-switch:登记本会话当前引擎,broadcaster / user 行落库据此逐行

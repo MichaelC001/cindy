@@ -248,6 +248,11 @@ export type ImOutputDriver =
 `kind: 'chunked-text'`。`turnRunner` 必须按 `kind` 完成穷尽分支，不能通过 boolean
 capability 后继续无条件调用卡片 API。
 
+该 OutputDriver 只负责 Desktop 直连 IM 的输出差异。生产 Slack 仍走
+`main/hook-control` + 外部 hook server，不迁入 `@cindy/im`；Slack 与直连 IM
+共享的是 session 级 InteractionRouter、发送前安全屏障和 accepted/terminal 契约，
+不是 transport 或消息队列实现。
+
 该类型改造与 `turnRunner` output 分流放在**同一个 commit**，确保每个 commit 独立
 typecheck。微信输出能力：
 
@@ -1209,7 +1214,7 @@ refactor(im): centralize output and interaction routing
 - awaited `beforeProviderStart` 安全屏障；
 - external queue 模式；
 - session 级中央 `InteractionRouter`；
-- Desktop/Feishu/Discord/Slack origin 路由迁移；
+- Desktop/Feishu/Discord 与 Slack `hook-control` origin 路由迁移；
 - 现有渠道全量回归。
 
 该 commit 不接微信真实网络，但必须独立编译，且现有渠道行为不变。
