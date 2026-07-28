@@ -90,6 +90,19 @@ test("root db and guard delegate to the workspace runner", () => {
 	assert.equal(scripts["test:guard"], "node scripts/test-workspaces.mjs --tier guard");
 });
 
+test("client CI owns the complete Desktop Git integration tier", () => {
+	const workflow = fs.readFileSync(
+		path.join(ROOT, ".github", "workflows", "ci.yml"),
+		"utf8",
+	);
+	const job = workflow.match(/\n  git-integration:\n([\s\S]*)$/);
+	assert.ok(job, "client CI must define an independent git-integration job");
+	assert.match(
+		job[1],
+		/^\s{6}- name: Run Desktop Git integration tests\n\s{8}run: pnpm test:git-integration$/m,
+	);
+});
+
 test("help groups copyable desktop, binary, and Mobile workflows", async () => {
 	const { printHelp } = await import("../help.mjs");
 	const lines = [];
