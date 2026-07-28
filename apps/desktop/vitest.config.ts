@@ -18,13 +18,8 @@ const desktopTestInclude = [
   // 下的测试(如 workingDir.test.ts)从未跑过。
   'src/shared/__tests__/**/*.test.ts',
 ];
-const resourceIntensiveTestInclude = [
-  'src/main/git-review/__tests__/*.test.ts',
-  'src/main/__tests__/codexFileRewindExecutor.test.ts',
-  'src/main/__tests__/gitSnapshotService.test.ts',
-  'src/main/__tests__/projectGitBootstrap.test.ts',
-  'src/main/__tests__/snapshotFileFilter.test.ts',
-  'src/main/__tests__/worktreeIncludePatternsEngine.test.ts',
+const gitIntegrationTestInclude = [
+  'src/main/**/*.git-integration.test.ts',
 ];
 
 export default defineConfig({
@@ -97,14 +92,14 @@ export default defineConfig({
         test: {
           name: 'standard',
           include: desktopTestInclude,
-          exclude: [...resourceIntensiveTestInclude, ...cliTestExclude],
+          exclude: [...gitIntegrationTestInclude, ...cliTestExclude],
         },
       },
       {
         extends: true,
         test: {
-          name: 'resource-intensive',
-          include: resourceIntensiveTestInclude,
+          name: 'git-integration',
+          include: gitIntegrationTestInclude,
           exclude: cliTestExclude,
           globalSetup: ['src/test/vitest/desktopTestResourceLock.ts'],
         },
