@@ -125,7 +125,8 @@ describe('mobile session composer desktop-first surface', () => {
     expect(source).not.toContain('被控电脑上的文件路径');
     expect(source).toContain('testID="session.composerActivityStatus"');
     expect(source).toContain("t('session.screen.thinking')");
-    expect(source).toContain("t('session.screen.networkReconnecting', {");
+    expect(source).toContain("t('session.screen.networkReconnecting')");
+    expect(source).toContain('{reconnectAttempt.attempt}/{reconnectAttempt.maxAttempts}');
     expect(source).toContain('ArrowDown');
     expect(source).toContain('useSessionRunStatus');
     expect(source).toContain('remoteSessionRunStatus.tokenUsage');
@@ -144,6 +145,7 @@ describe('mobile session composer desktop-first surface', () => {
     expect(source).toContain('marginTop: spacing.lg');
     expect(source).toContain('height: 25');
     expect(source).toContain('composerActivityStatusText');
+    expect(source).toContain('composerActivityProgressText');
     expect(composerStatusCallIndex).toBeGreaterThan(-1);
     expect(composerStatusCallIndex).toBeLessThan(composerViewStart);
     expect(composerViewSource).not.toContain('<ComposerActivityStatus');

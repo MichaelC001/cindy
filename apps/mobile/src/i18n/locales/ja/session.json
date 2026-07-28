@@ -26,7 +26,7 @@
   },
   "screen": {
     "thinking": "考えています…",
-    "networkReconnecting": "接続が中断されました。再接続中（{{attempt}}/{{maxAttempts}}）…",
+    "networkReconnecting": "再接続中…",
     "composerSyncing": "セッションデータを同期中です。完了すると送信できます。",
     "composerSessionNotSynced": "この会話はまだ同期が完了していません。",
     "composerCreating": "セッションを作成中です。最初のメッセージ送信後に続けて送信できます。",

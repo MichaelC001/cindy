@@ -7941,10 +7941,7 @@ function ComposerActivityStatus({
   const elapsedText = formatComposerActivityElapsed(elapsed);
   const tokenText = formatComposerActivityTokens(tokenUsage);
   const activityText = reconnectAttempt
-    ? t('session.screen.networkReconnecting', {
-        attempt: reconnectAttempt.attempt,
-        maxAttempts: reconnectAttempt.maxAttempts,
-      })
+    ? t('session.screen.networkReconnecting')
     : t('session.screen.thinking');
 
   return (
@@ -7956,6 +7953,11 @@ function ComposerActivityStatus({
       <View style={styles.composerActivityPrimary}>
         <Sparkles color={colors.statusAccent} size={iconSize.sm} strokeWidth={iconStroke.regular} />
         <Text numberOfLines={1} style={styles.composerActivityStatusText}>{activityText}</Text>
+        {reconnectAttempt ? (
+          <Text style={[styles.composerActivityStatusText, styles.composerActivityProgressText]}>
+            {reconnectAttempt.attempt}/{reconnectAttempt.maxAttempts}
+          </Text>
+        ) : null}
       </View>
       <View style={styles.composerActivityMeta}>
         <Text style={styles.composerActivityMetaText}>{elapsedText}</Text>
@@ -8376,18 +8378,25 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   composerActivityPrimary: {
     alignItems: 'center',
+    flex: 1,
     flexDirection: 'row',
     gap: 6,
+    marginRight: spacing.sm,
     minWidth: 0,
   },
   composerActivityStatusText: {
     color: colors.statusAccent,
+    flexShrink: 1,
     fontSize: typeScale.footnote,
     fontWeight: fontWeight.medium,
     lineHeight: lineHeight.caption,
   },
+  composerActivityProgressText: {
+    flexShrink: 0,
+  },
   composerActivityMeta: {
     alignItems: 'center',
+    flexShrink: 0,
     flexDirection: 'row',
     gap: 4,
     minWidth: 0,
