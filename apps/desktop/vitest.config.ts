@@ -40,6 +40,10 @@ export default defineConfig({
   },
   test: {
     globals: true,
+    // 多个 worktree 会各自启动完整 Desktop worker 池。用同一 Git common-dir
+    // 派生的本机回环锁串行这些测试进程，避免 8-worker 池跨 worktree 相乘；
+    // 进程退出后监听端口由操作系统释放，不会留下 stale lock 文件。
+    globalSetup: ['src/test/vitest/desktopTestResourceLock.ts'],
     // Main-process tests do real IO (loopback HTTP servers, git subprocesses,
     // heavy module imports through the vite-node transform). On Windows those
     // are markedly slower and, under the full desktop suite's worker-pool

@@ -2,10 +2,11 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.setConfig({ testTimeout: process.platform === 'win32' ? 60_000 : 30_000 });
 
+import { TestDirectoryTemplate } from '../../../test/vitest/testDirectoryTemplate';
 import { readDiffs, readFileDiff } from '../diffReader';
 import { runGit } from '../gitRunner';
 import { applyFileBatch, applyHunkSelection, GitReviewStageError } from '../stageOps';
@@ -13,10 +14,8 @@ import { readStatus } from '../statusReader';
 import type { DiffSelection, FileDiff, ReviewDiffReadOptions, ReviewFileTarget, ReviewScope } from '../types';
 
 let repoPath: string;
-let repoTemplatePath: string;
 
-async function createRepoTemplate(): Promise<string> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'xdt-git-review-stage-template-'));
+const repoTemplate = new TestDirectoryTemplate('xdt-git-review-stage-', async (dir) => {
   await runGit(['init'], { cwd: dir });
   await runGit(['config', 'user.email', 'test@xdt.local'], { cwd: dir });
   await runGit(['config', 'user.name', 'XDT Test'], { cwd: dir });
@@ -26,14 +25,7 @@ async function createRepoTemplate(): Promise<string> {
   await fs.writeFile(path.join(dir, 'file.txt'), 'one\ntwo\nthree\n');
   await runGit(['add', 'file.txt'], { cwd: dir });
   await runGit(['commit', '--no-gpg-sign', '-m', 'seed'], { cwd: dir });
-  return dir;
-}
-
-async function copyRepoTemplate(): Promise<string> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'xdt-git-review-stage-'));
-  await fs.cp(repoTemplatePath, dir, { recursive: true });
-  return dir;
-}
+});
 
 function scope(): ReviewScope {
   return {
@@ -122,12 +114,8 @@ async function tryCreateDirSymlink(target: string, linkPath: string): Promise<bo
   }
 }
 
-beforeAll(async () => {
-  repoTemplatePath = await createRepoTemplate();
-});
-
 beforeEach(async () => {
-  repoPath = await copyRepoTemplate();
+  repoPath = await repoTemplate.createCopy();
 });
 
 afterEach(async () => {
@@ -135,7 +123,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await fs.rm(repoTemplatePath, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  await repoTemplate.dispose();
 });
 
 describe('git-review stageOps', () => {

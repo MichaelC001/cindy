@@ -2,7 +2,7 @@ import { promises as fs, symlinkSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 // Windows 上 git 子进程明显更慢；完整 workspace 并发测试时，hunk 的多步
 // stage/unstage/discard 编排会超过 30s，给真实 Git 集成用例留足余量。
@@ -20,6 +20,7 @@ const canSymlink = (() => {
   }
 })();
 
+import { TestDirectoryTemplate } from '../../../test/vitest/testDirectoryTemplate';
 import {
   parseCommitDiffPayload,
   parseHunkPayload,
@@ -64,9 +65,7 @@ function baseDiff(patch: Partial<FileDiff> = {}): FileDiff {
   };
 }
 
-async function initRepo(): Promise<string> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'xdt-git-review-ipc-'));
-  repos.push(dir);
+const repoTemplate = new TestDirectoryTemplate('xdt-git-review-ipc-', async (dir) => {
   await runGit(['init', '-b', 'main'], { cwd: dir });
   await runGit(['config', 'user.email', 'test@xdt.local'], { cwd: dir });
   await runGit(['config', 'user.name', 'XDT Test'], { cwd: dir });
@@ -76,6 +75,11 @@ async function initRepo(): Promise<string> {
   await fs.writeFile(path.join(dir, 'seed.txt'), 'seed\n');
   await runGit(['add', 'seed.txt'], { cwd: dir });
   await runGit(['commit', '--no-gpg-sign', '-m', 'seed'], { cwd: dir });
+});
+
+async function initRepo(): Promise<string> {
+  const dir = await repoTemplate.createCopy();
+  repos.push(dir);
   return dir;
 }
 
@@ -111,6 +115,10 @@ afterEach(async () => {
   await Promise.all(repos.splice(0).map((repoPath) =>
     fs.rm(repoPath, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }),
   ));
+});
+
+afterAll(async () => {
+  await repoTemplate.dispose();
 });
 
 describe('git-review IPC payload guards', () => {

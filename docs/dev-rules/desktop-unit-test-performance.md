@@ -60,6 +60,23 @@ workers），说明存在资源争用；但墙钟仍持续下降。综合速度�
 因此分池优先按“真实 Git／子进程长尾”和“其余测试”隔离，而不是只按 node/jsdom 环境
 机械拆分。
 
+## 多 worktree 资源协调
+
+单次 Desktop 单测仍使用最多 8 workers；但同一仓库的多个 worktree 不得同时展开多个
+Desktop worker 池。`apps/desktop/vitest.config.ts` 通过全局 setup，以 Git common-dir
+派生的本机回环端口作为跨进程互斥锁：
+
+- 同一主仓的 worktree 共享 common-dir，因此 Desktop 测试排队执行。
+- 独立仓库不共享锁，不会互相阻塞。
+- 锁只监听 `127.0.0.1`，不发起业务网络请求；测试进程退出后由操作系统自动释放，不产生
+  stale lock 文件。
+- 该协调不改变单次测试的 worker 数、测试范围或覆盖率，只防止多个 worktree 把 worker
+  池相乘。
+
+真实 Git 测试的 fixture 还应优先复用 `src/test/vitest/testDirectoryTemplate.ts`：每个测试
+文件初始化一次不可变基准仓库，再为每个用例复制独立目录。不得为了提速把需要验证 Git
+index、patch、hook 或 ref 语义的集成覆盖全部 mock 掉。
+
 ## 分池评估
 
 分池把 21 个 Git／子进程长尾文件放入 `git-io`，其余文件放入 `standard`；两个池并发，
