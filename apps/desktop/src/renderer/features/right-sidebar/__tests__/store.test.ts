@@ -319,6 +319,35 @@ describe('RSB store', () => {
       expect(store.getBucket('s1').tabs).toHaveLength(0);
     });
 
+    it('upsert 成功但 setActive 失败时,并发关闭仍要发 close 删掉那一行', async () => {
+      // 半失败:DB 里已经有这一行了。addTab 会回滚 renderer cache,若关闭路径把
+      // "创建失败"一概当成"DB 里没这行"而跳过 close,DB 就留下一行孤儿 tab,
+      // 下次 hydrate / 重启冒出来。
+      let releaseUpsert: (() => void) | null = null;
+      ipc.upsert.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseUpsert = () => resolve({ ok: true });
+          }),
+      );
+      ipc.setActive.mockRejectedValueOnce(new Error('setActive boom'));
+      let createdId = '';
+      const pendingAdd = store.addTab('s1', 'web-browser', null, {
+        onOptimisticAdd: (tabId) => {
+          createdId = tabId;
+        },
+      });
+      const pendingClose = store.closeTab('s1', createdId);
+      await Promise.resolve();
+
+      releaseUpsert!();
+      await expect(pendingAdd).rejects.toThrow('setActive boom');
+      await pendingClose;
+
+      expect(ipc.close).toHaveBeenCalledWith({ id: createdId });
+      expect(store.getBucket('s1').tabs).toHaveLength(0);
+    });
+
     it('创建失败回滚时清掉 onOptimisticAdd 登记的旁路标记', async () => {
       // 没有任何 closeTab 会来清它:tab 从未存在过。不清则 DB/IPC 异常期间反复
       // 触发 popup 会让标记集合随进程生命周期无界增长。
@@ -458,6 +487,32 @@ describe('RSB store', () => {
 
       expect(store.getBucket('s1').tabs).toHaveLength(0);
       expect(store.getBucket('s1').activeTabId).toBeNull();
+    });
+
+    it('active 落库前重取 cache 现值,不用旧值盖掉并发 addTab 落的 active', async () => {
+      // closeTab 的 setActive 跨越若干 await,并发的 addTab 可能已经把新 tab 落成
+      // active。若这里还按关闭前算好的旧值写,DB 的 active 会与 cache 分叉,下次
+      // hydrate 恢复出错的激活项。
+      const a = await store.addTab('s1', 'web-browser', null);
+      let releaseClose: (() => void) | null = null;
+      ipc.close.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseClose = () => resolve({ ok: true });
+          }),
+      );
+
+      const pendingClose = store.closeTab('s1', a.id);
+      await Promise.resolve();
+      // close IPC 在途期间插入一个新 tab —— 它自己会把 active 落成 b。
+      const b = await store.addTab('s1', 'web-browser', null);
+      releaseClose!();
+      await pendingClose;
+
+      expect(store.getBucket('s1').activeTabId).toBe(b.id);
+      // 最后一次 setActive 必须是 cache 现值(b),不是关闭时算出的 null。
+      const activeCalls = ipc.setActive.mock.calls.map((c) => (c[0] as { id: string | null }).id);
+      expect(activeCalls[activeCalls.length - 1]).toBe(b.id);
     });
 
     it('前一次关闭失败不会把同 session 后续关闭拖挂', async () => {

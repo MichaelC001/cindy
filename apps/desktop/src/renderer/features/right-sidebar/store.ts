@@ -468,13 +468,18 @@ export async function addTab(
     const ipc = ipcApi();
     if (ipc && shouldPersist(sessionId)) {
       // 同步登记 in-flight 创建(与乐观插入同一 tick),并发的 closeTab 才等得到。
+      // `rowCommitted` 只跟踪 **upsert 这一步**:upsert 成功但随后的 setActive 失败
+      // 时,DB 里已经有这一行了,关闭路径必须照常发 close 把它删掉,否则 addTab
+      // 回滚了 renderer cache,DB 里却留下一行孤儿 tab,下次 hydrate / 重启就冒出来。
+      let rowCommitted = false;
       const create = (async () => {
         await ipc.upsert({ id, sessionId, kind, position, state: initialState });
+        rowCommitted = true;
         await ipc.setActive({ sessionId, id });
       })();
       const persisted = create.then(
         () => true,
-        () => false,
+        () => rowCommitted,
       );
       pendingTabCreates.set(id, persisted);
       void persisted.then(() => {
@@ -619,9 +624,10 @@ export async function closeTab(
     // 之前,拿 NOT_FOUND 把整次关闭回滚掉。
     const pendingCreate = pendingTabCreates.get(tabId);
     if (pendingCreate && !(await pendingCreate)) {
-      // 创建失败:DB 里从来没有这行(addTab 已经把它从 cache 回滚掉)。这里绝不能
-      // 再发 close —— 必然 NOT_FOUND,而下面的回滚分支会把这个幽灵 tab 写回 cache。
-      // tab 已不存在,按"关成了"收尾即可。
+      // 创建**连 upsert 都没成**:DB 里从来没有这行(addTab 已经把它从 cache 回滚
+      // 掉)。这里绝不能再发 close —— 必然 NOT_FOUND,而下面的回滚分支会把这个
+      // 幽灵 tab 写回 cache。tab 已不存在,按"关成了"收尾即可。
+      // (upsert 成功、只是 setActive 失败的半失败情形返回 true,照常走下面的 close。)
       forgetClosedTab(sessionId, tabId);
       return;
     }
@@ -630,8 +636,13 @@ export async function closeTab(
       const ipc = ipcApi();
       if (ipc && shouldPersist(sessionId)) {
         await ipc.close({ id: tabId });
-        if (nextActiveId !== prev.activeTabId) {
-          await ipc.setActive({ sessionId, id: nextActiveId });
+        // active 落库前重取一次 cache 现值:关闭队列只串行关闭之间的变更,
+        // 并发的 addTab / setActiveTab 可能已经把 active 换成别的 tab 并落库了 ——
+        // 拿关闭前算好的旧值去写会把它盖掉,DB 与 cache 分叉(下次 hydrate 恢复出
+        // 错的 active)。cache 是 renderer 侧的真相,直接对齐它即可收敛。
+        const activeNow = getBucket(sessionId).activeTabId;
+        if (activeNow !== prev.activeTabId) {
+          await ipc.setActive({ sessionId, id: activeNow });
         }
       }
       forgetClosedTab(sessionId, tabId);

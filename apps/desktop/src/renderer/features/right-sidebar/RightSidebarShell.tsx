@@ -364,11 +364,12 @@ export function RightSidebarShell({
         isAudible: false,
       };
       void (async () => {
-        if (targetSessionId !== sessionId) {
-          // 跨 session 写 bucket 前必须先水合(store 契约:未水合先写会把 DB 里
-          // 既有 tab 永久挡在本 renderer 外,见 rsbBrowserBridge.handleTabOpRequest)。
-          await ensureHydrated(targetSessionId);
-        }
+        // 写 bucket 前一律先水合(含当前 session):store 契约要求先 hydrated 再写 ——
+        // 未水合就写,`setBucket` 会以 hydrated:true 为 merge base(store.ts 的 cache
+        // miss 分支),`ensureHydrated` 之后就早退,DB 里既有的 tab 被永久挡在本
+        // renderer 外(丢 tab)。Shell 刚 mount、list IPC 还在途时 popup 就可能到达,
+        // 所以当前 session 也不能省。ensureHydrated 幂等且并发去重,命中缓存即返回。
+        await ensureHydrated(targetSessionId);
         // popup 来源标记必须在乐观插入的同一 tick 登记(onOptimisticAdd),不能等
         // addTab resolve:持久化 IPC 在途期间 React 已可能 mount webview 并加载完
         // callback 页,快速 window.close 会赶在登记前到达且 close 事件不重发。
