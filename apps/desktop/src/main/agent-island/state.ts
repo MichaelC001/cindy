@@ -590,7 +590,6 @@ export function applyAgentIslandEvent(
   }
 
   if (event.type === 'error') {
-    clearAssistantStream(session);
     const data = asRecord(event.data);
     const isTerminal = typeof data?.isTerminal === 'boolean'
       ? data.isTerminal
@@ -598,6 +597,7 @@ export function applyAgentIslandEvent(
         ? !data.willRetry
         : true;
     if (!isTerminal) return true;
+    clearAssistantStream(session);
     session.running = false;
     session.phase = 'error';
     session.interactionKind = undefined;
