@@ -62,16 +62,21 @@ workers），说明存在资源争用；但墙钟仍持续下降。综合速度�
 
 ## 多 worktree 资源协调
 
-单次 Desktop 单测仍使用最多 8 workers；但同一仓库的多个 worktree 不得同时展开多个
-Desktop worker 池。`apps/desktop/vitest.config.ts` 通过全局 setup，以 Git common-dir
-派生的本机回环端口作为跨进程互斥锁：
+单次 Desktop 单测仍使用最多 8 workers。测试按资源特征分为两个互补项目：
 
-- 同一主仓的 worktree 共享 common-dir，因此 Desktop 测试排队执行。
+- `standard`：普通单测，保持跨 worktree 并行。
+- `resource-intensive`：真实 Git、index、patch、ref、hook 等长尾测试，通过全局 setup
+  获取以 Git common-dir 派生的本机回环端口锁。
+
+因此同一仓库的多个 worktree 可以并行完成普通单测，但不得同时展开多个重型 Git 测试层：
+
+- 同一主仓的 worktree 共享 common-dir，因此只有重型层排队执行。
 - 独立仓库不共享锁，不会互相阻塞。
 - 锁只监听 `127.0.0.1`，不发起业务网络请求；测试进程退出后由操作系统自动释放，不产生
   stale lock 文件。
-- 该协调不改变单次测试的 worker 数、测试范围或覆盖率，只防止多个 worktree 把 worker
-  池相乘。
+- 无 `.git` 的源码归档按 checkout 实际路径派生锁，不因缺少 Git 元数据而启动失败。
+- 两个项目的 include/exclude 必须互补；该协调不改变测试范围或覆盖率，只防止多个
+  worktree 把真实 Git 子进程负载相乘。
 
 真实 Git 测试的 fixture 还应优先复用 `src/test/vitest/testDirectoryTemplate.ts`：每个测试
 文件初始化一次不可变基准仓库，再为每个用例复制独立目录。不得为了提速把需要验证 Git

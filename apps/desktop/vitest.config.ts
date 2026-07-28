@@ -3,6 +3,27 @@ import path from 'node:path';
 import { desktopClientBuildEnv } from '../../scripts/shared/client-endpoint-build-env.mjs';
 
 const clientBuildEnv = desktopClientBuildEnv({ allowEnvOverride: false });
+const desktopTestInclude = [
+  'src/main/__tests__/**/*.test.ts',
+  'src/main/**/__tests__/**/*.test.ts',
+  'src/renderer/__tests__/**/*.test.ts',
+  'src/renderer/**/__tests__/**/*.test.ts',
+  // renderer 组件测试(React,tsx):按文件头 `// @vitest-environment jsdom`
+  // 切 DOM 环境;此前 include 只收 .test.ts,tsx 用例根本不会被跑。
+  'src/renderer/**/__tests__/**/*.test.tsx',
+  'src/preload/__tests__/**/*.test.ts',
+  // shared 是 main/renderer 共用的纯函数层;此前漏配导致 src/shared/__tests__
+  // 下的测试(如 workingDir.test.ts)从未跑过。
+  'src/shared/__tests__/**/*.test.ts',
+];
+const resourceIntensiveTestInclude = [
+  'src/main/git-review/__tests__/*.test.ts',
+  'src/main/__tests__/codexFileRewindExecutor.test.ts',
+  'src/main/__tests__/gitSnapshotService.test.ts',
+  'src/main/__tests__/projectGitBootstrap.test.ts',
+  'src/main/__tests__/snapshotFileFilter.test.ts',
+  'src/main/__tests__/worktreeIncludePatternsEngine.test.ts',
+];
 
 export default defineConfig({
   define: {
@@ -40,10 +61,6 @@ export default defineConfig({
   },
   test: {
     globals: true,
-    // 多个 worktree 会各自启动完整 Desktop worker 池。用同一 Git common-dir
-    // 派生的本机回环锁串行这些测试进程，避免 8-worker 池跨 worktree 相乘；
-    // 进程退出后监听端口由操作系统释放，不会留下 stale lock 文件。
-    globalSetup: ['src/test/vitest/desktopTestResourceLock.ts'],
     // Main-process tests do real IO (loopback HTTP servers, git subprocesses,
     // heavy module imports through the vite-node transform). On Windows those
     // are markedly slower and, under the full desktop suite's worker-pool
@@ -69,18 +86,26 @@ export default defineConfig({
     // Main-process code is pure Node — no DOM needed. Renderer tests (if/when
     // added) should switch to 'jsdom' via per-file `// @vitest-environment`.
     environment: 'node',
-    include: [
-      'src/main/__tests__/**/*.test.ts',
-      'src/main/**/__tests__/**/*.test.ts',
-      'src/renderer/__tests__/**/*.test.ts',
-      'src/renderer/**/__tests__/**/*.test.ts',
-      // renderer 组件测试(React,tsx):按文件头 `// @vitest-environment jsdom`
-      // 切 DOM 环境;此前 include 只收 .test.ts,tsx 用例根本不会被跑。
-      'src/renderer/**/__tests__/**/*.test.tsx',
-      'src/preload/__tests__/**/*.test.ts',
-      // shared 是 main/renderer 共用的纯函数层;此前漏配导致 src/shared/__tests__
-      // 下的测试(如 workingDir.test.ts)从未跑过。
-      'src/shared/__tests__/**/*.test.ts',
+    // 普通单测保持跨 worktree 并行；只有真实 Git 长尾项目获取共享资源锁。
+    // 两个项目的 include/exclude 互补，完整覆盖仍由根级 include 与 test-workspaces
+    // manifest 门禁共同保证。
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'standard',
+          include: desktopTestInclude,
+          exclude: resourceIntensiveTestInclude,
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'resource-intensive',
+          include: resourceIntensiveTestInclude,
+          globalSetup: ['src/test/vitest/desktopTestResourceLock.ts'],
+        },
+      },
     ],
   },
 });

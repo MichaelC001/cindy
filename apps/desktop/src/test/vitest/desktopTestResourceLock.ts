@@ -24,7 +24,15 @@ function delay(durationMs: number): Promise<void> {
 
 async function resolveGitCommonDir(repoRoot: string): Promise<string> {
   const dotGitPath = path.join(repoRoot, '.git');
-  const dotGitStat = await fs.stat(dotGitPath);
+  let dotGitStat;
+  try {
+    dotGitStat = await fs.stat(dotGitPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // Source archives and exported checkouts may not carry Git metadata.
+    // They still get a stable per-checkout lock instead of failing test setup.
+    return fs.realpath(repoRoot);
+  }
   if (dotGitStat.isDirectory()) return fs.realpath(dotGitPath);
 
   const gitDirLine = (await fs.readFile(dotGitPath, 'utf8')).trim();
