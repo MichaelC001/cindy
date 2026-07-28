@@ -566,6 +566,92 @@ describe('RSB store', () => {
       expect(store.getBucket('s1').tabs.map((t) => t.id)).toEqual([a.id]);
     });
 
+    it('close 落库后同步 active 前,等新 active tab 的 INSERT 落定再 setActive', async () => {
+      // close 在途时并发 addTab 使新 tab 成为 active:它的 upsert 未提交前就发
+      // setActive 会撞 [NOT_FOUND](main 端还会先清掉全 session 的 active 位),
+      // 并把"close 已成功"错误地拖进回滚分支复活已删 tab。
+      const a = await store.addTab('s1', 'web-browser', null);
+      ipc.setActive.mockClear();
+      let releaseClose!: () => void;
+      ipc.close.mockImplementationOnce(
+        () => new Promise((resolve) => { releaseClose = () => resolve({ ok: true }); }),
+      );
+      let releaseUpsert!: () => void;
+      ipc.upsert.mockImplementationOnce(
+        () => new Promise((resolve) => { releaseUpsert = () => resolve({ ok: true }); }),
+      );
+
+      const close = store.closeTab('s1', a.id);
+      await Promise.resolve();
+      const pendingAdd = store.addTab('s1', 'web-browser', null); // 成为 active,INSERT 挂起
+      await Promise.resolve();
+      releaseClose();
+      // 给 close 内部若干 tick 走到 active 同步点:INSERT 未落定前不得发任何 setActive。
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+      expect(ipc.setActive).not.toHaveBeenCalled();
+
+      releaseUpsert();
+      const b = await pendingAdd;
+      await close;
+      expect(ipc.setActive).toHaveBeenCalledWith({ sessionId: 's1', id: b.id });
+      expect(store.getBucket('s1').tabs.map((t) => t.id)).toEqual([b.id]);
+    });
+
+    it('close 落库后 setActive 失败只降级为警告,不复活已删 tab', async () => {
+      const a = await store.addTab('s1', 'web-browser', null);
+      const b = await store.addTab('s1', 'web-browser', null);
+      await store.setActiveTab('s1', a.id);
+      // 关 active tab → close 成功后需要 setActive(替代者 b);让它失败。
+      ipc.setActive.mockRejectedValueOnce(new Error('boom'));
+      await expect(store.closeTab('s1', a.id)).resolves.toBeUndefined();
+      // tab 删除已落库,绝不能因 active 同步失败复活;active 漂移由用户下次点击收敛。
+      expect(store.getBucket('s1').tabs.map((t) => t.id)).toEqual([b.id]);
+    });
+
+    it('孤儿行清理对非 NOT_FOUND 失败按 overload 节奏重试,不再静默吞掉', async () => {
+      // 创建失败(非 FK)→ addTab 回滚 cache;in-flight 的 close 走孤儿清理分支。
+      // 清理 close 首次撞 overload:必须重试(默认 mock 第二次成功),不能吞掉——
+      // 吞掉意味着 state 写队列可能已写进 DB 的孤儿行永远没人清,重启复活。
+      let rejectUpsert!: (e: Error) => void;
+      ipc.upsert.mockImplementationOnce(
+        () => new Promise((_resolve, reject) => { rejectUpsert = (e) => reject(e); }),
+      );
+      let createdId = '';
+      const pendingAdd = store.addTab('s1', 'web-browser', null, {
+        onOptimisticAdd: (id) => { createdId = id; },
+      });
+      const close = store.closeTab('s1', createdId);
+      await Promise.resolve();
+      ipc.close.mockRejectedValueOnce(new Error('db worker RPC queue overloaded'));
+
+      rejectUpsert(new Error('boom'));
+      await expect(pendingAdd).rejects.toThrow('boom');
+      await close;
+      expect(ipc.close).toHaveBeenCalledTimes(2);
+      expect(store.getBucket('s1').tabs).toHaveLength(0);
+    });
+
+    it('孤儿行清理重试仍失败时向上抛,不静默', async () => {
+      let rejectUpsert!: (e: Error) => void;
+      ipc.upsert.mockImplementationOnce(
+        () => new Promise((_resolve, reject) => { rejectUpsert = (e) => reject(e); }),
+      );
+      let createdId = '';
+      const pendingAdd = store.addTab('s1', 'web-browser', null, {
+        onOptimisticAdd: (id) => { createdId = id; },
+      });
+      const close = store.closeTab('s1', createdId);
+      await Promise.resolve();
+      ipc.close.mockRejectedValue(new Error('db worker RPC queue overloaded'));
+
+      rejectUpsert(new Error('boom'));
+      await expect(pendingAdd).rejects.toThrow('boom');
+      await expect(close).rejects.toThrow('overloaded');
+      // 1 次首发 + 3 次重试。
+      expect(ipc.close).toHaveBeenCalledTimes(4);
+      ipc.close.mockResolvedValue({ ok: true }); // 还原默认,防污染后续用例
+    });
+
     it('close 失败的回滚只插回被关的 tab,不覆盖 in-flight 期间并发的 addTab/setActive', async () => {
       // addTab / setActiveTab 有意不进 close 队列:close 的 IPC 在途期间它们可能
       // 已把新 tab 写进 cache 和 DB。整快照回滚会把并发 tab 从 cache 抹掉(DB 里

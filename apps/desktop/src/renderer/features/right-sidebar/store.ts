@@ -167,6 +167,13 @@ function isDbWorkerQueueOverloadedError(err: unknown): boolean {
   return err instanceof Error && err.message.includes('db worker RPC queue overloaded');
 }
 
+/** main 端 rightSidebarTabs 对不存在的行抛 `[NOT_FOUND] tab <id> not found`
+ *  (ipcValidate.throwIpcError 的 message 前缀会透传到 renderer 的 invoke reject)。
+ *  孤儿行清理用它区分"本来就没有"(=成功)与"清理没做成"(=必须重试/上抛)。 */
+function isTabRowMissingError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('[NOT_FOUND]');
+}
+
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -631,12 +638,33 @@ export async function closeTab(
       //
       // 但"通常"不等于"一定":state 写队列同样走 `ipc.upsert`(还带 overload 重试),
       // 乐观插入后入队的某次 patch 可能反倒把这一行写进了 DB。所以先等 state 写落定,
-      // 再发一次 **best-effort** close 兜掉这种孤儿行 —— 失败无所谓(NOT_FOUND 就是
-      // "本来就没有"),吞掉即可,绝不触发回滚。
+      // 再发一次清理 close 兜掉这种孤儿行。失败分两类:
+      //  - `[NOT_FOUND]` = "本来就没有",清理目标不存在即成功,吞掉;
+      //  - 其它(DB worker 不可用/过载)= **清理没做成**,孤儿行可能留在 SQLite,
+      //    吞掉会让它在下次 hydrate / 重启时复活。按 overload 节奏有限重试,
+      //    终失败向上抛(cache 里 tab 已被 addTab 回滚,本分支不碰 cache,
+      //    不存在"复活失败 tab"的问题)——调用方至少拿到真实结果与日志留痕。
       await settleTabStateWrites(sessionId, tabId);
       const ipc = ipcApi();
       if (ipc && shouldPersist(sessionId)) {
-        await ipc.close({ id: tabId }).catch(() => undefined);
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            await ipc.close({ id: tabId });
+            break;
+          } catch (cleanupErr) {
+            if (isTabRowMissingError(cleanupErr)) break;
+            if (attempt < STATE_WRITE_OVERLOAD_RETRY_DELAYS_MS.length) {
+              await wait(STATE_WRITE_OVERLOAD_RETRY_DELAYS_MS[attempt]);
+              continue;
+            }
+            log.error('closeTab: orphan-row cleanup failed after retries', {
+              sessionId,
+              tabId,
+              err: cleanupErr,
+            });
+            throw cleanupErr;
+          }
+        }
       }
       forgetClosedTab(sessionId, tabId);
       return;
@@ -646,13 +674,36 @@ export async function closeTab(
       const ipc = ipcApi();
       if (ipc && shouldPersist(sessionId)) {
         await ipc.close({ id: tabId });
-        // active 落库前重取一次 cache 现值:关闭队列只串行关闭之间的变更,
-        // 并发的 addTab / setActiveTab 可能已经把 active 换成别的 tab 并落库了 ——
-        // 拿关闭前算好的旧值去写会把它盖掉,DB 与 cache 分叉(下次 hydrate 恢复出
-        // 错的 active)。cache 是 renderer 侧的真相,直接对齐它即可收敛。
-        const activeNow = getBucket(sessionId).activeTabId;
-        if (activeNow !== prev.activeTabId) {
-          await ipc.setActive({ sessionId, id: activeNow });
+        // —— close 已落库:从这里起任何失败都不得进入下面的回滚分支(把已删的
+        // tab 插回 cache 会与 DB 反向分叉)。active 同步单独 catch 兜底。
+        try {
+          // active 落库前重取一次 cache 现值:关闭队列只串行关闭之间的变更,
+          // 并发的 addTab / setActiveTab 可能已经把 active 换成别的 tab 并落库了 ——
+          // 拿关闭前算好的旧值去写会把它盖掉,DB 与 cache 分叉(下次 hydrate 恢复出
+          // 错的 active)。cache 是 renderer 侧的真相,直接对齐它即可收敛。
+          let activeNow = getBucket(sessionId).activeTabId;
+          if (activeNow !== prev.activeTabId) {
+            // 并发 addTab 可能刚把新 tab 设为 active 而它的 INSERT 还在途:直接
+            // setActive 会撞 [NOT_FOUND](main 端还会先清掉全 session 的 active 位)。
+            // 等它的创建落定;等待期间 active 可能又变,落定后重取现值。
+            const pendingActive = activeNow ? pendingTabCreates.get(activeNow) : undefined;
+            if (pendingActive) {
+              await pendingActive.catch(() => undefined);
+              activeNow = getBucket(sessionId).activeTabId;
+            }
+            if (activeNow !== prev.activeTabId) {
+              await ipc.setActive({ sessionId, id: activeNow });
+            }
+          }
+        } catch (activeErr) {
+          // active 同步失败只是轻微视图态漂移(main 端 setActive 本就两步非事务,
+          // 中间态语义为"无激活 tab",用户重点一下即收敛);tab 删除已成功落库,
+          // 绝不能为它回滚。
+          log.warn('closeTab: post-close setActive failed (ignored)', {
+            sessionId,
+            tabId,
+            err: activeErr,
+          });
         }
       }
       forgetClosedTab(sessionId, tabId);
