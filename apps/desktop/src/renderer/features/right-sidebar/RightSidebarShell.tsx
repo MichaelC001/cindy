@@ -381,8 +381,18 @@ export function RightSidebarShell({
           // 根本不开始加载,后台 agent 的登录流程原地卡死(与 main 端 open
           // tab-op 的 eagerSpawnAndReport 同理)。
           await eagerSpawnAndReport(targetSessionId, newTab.id, url);
+          // 物化期间 tab 可能已经没了:OAuth callback 页在 dom-ready 前就
+          // window.close()(guest 自关路径会把最后一个 tab 关掉并请求收起侧栏),
+          // 或用户手动关了它。此时再无条件请求 'open' 会把刚写的"收起"存档翻回
+          // "展开",用户切回该 session 只看到一个空侧栏。
+          if (!getBucket(targetSessionId).tabs.some((t) => t.id === newTab.id)) return;
           // 只写它的折叠存档,用户切回去时侧栏已展开。
-          requestRightSidebarVisibility('open', { sessionId: targetSessionId });
+          // userInitiated:false —— popup 由 guest 页面脚本催生,不是用户当次手势;
+          // detached 形态下不得 show+focus 抢走用户前台(与 agent tab-op open 一致)。
+          requestRightSidebarVisibility('open', {
+            sessionId: targetSessionId,
+            userInitiated: false,
+          });
         }
       })().catch((err) => {
         log.error('rsb popup → addTab failed', { sessionId: targetSessionId, url, err });

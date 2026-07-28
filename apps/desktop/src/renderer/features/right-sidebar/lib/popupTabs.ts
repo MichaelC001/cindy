@@ -8,8 +8,16 @@
  * `window.close()` 会被忽略——不区分来源会让任意网页有能力关掉用户正在用的
  * tab。本模块就是那个"script-opened"标记。
  *
- * 纯 renderer 内存态,不持久化:重启后丢失意味着旧 callback 页需要手关一次,
- * 可接受;换来的是零 DB/schema 面积。
+ * 纯 renderer 内存态,不持久化。已知失效边界(全部同一种降级):标记只活在**当前
+ * renderer**里,所以 app 重启、以及侧边栏宿主迁移(内嵌 ↔ 独立子窗口,MainLayout
+ * 会 releaseAll + 让新 renderer 重新水合同一批 tab)之后,旧 popup tab 会被当成
+ * 普通 tab —— 它后来的 `window.close()` 被忽略,用户手关一次即可(等于本修复前
+ * 的行为)。
+ *
+ * 为什么接受:这个判定是**安全方向**的判定,失效方向是 fail-closed(少关一个
+ * tab),而不是"让任意网页能关用户的 tab"。要消除它就得把 provenance 持久化进
+ * tab state / DB,为一个"迁移窗口内正好有 popup 在授权"的边角场景增加 schema 与
+ * 迁移面积,不划算。
  */
 
 const popupSpawnedTabIds = new Set<string>();

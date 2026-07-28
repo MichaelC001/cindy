@@ -30,7 +30,13 @@ import {
   subscribeTabResourceEvent,
 } from '../rsbBrowserBridge';
 import { _resetPopupTabsForTests, markPopupSpawnedTab } from '../popupTabs';
-import { _resetStore, addTab, ensureHydrated, getBucket } from '../../store';
+import {
+  _resetStore,
+  addTab,
+  ensureHydrated,
+  getBucket,
+  setTabCloseInterceptor,
+} from '../../store';
 
 interface FakeIpcApi {
   report: ReturnType<typeof vi.fn>;
@@ -244,6 +250,40 @@ describe('rsbBrowserBridge — initialization & teardown', () => {
     await vi.waitFor(() => {
       expect(getBucket('sess-lru').tabs).toHaveLength(0);
     });
+  });
+
+  it('同 session 两个 popup 同时自关时串行处理,不互相覆盖乐观删除', async () => {
+    installFakeIpc();
+    initRsbBrowserBridge();
+
+    await ensureHydrated('sess-both');
+    const first = await addTab('sess-both', 'web-browser', { url: 'https://a.example' });
+    const second = await addTab('sess-both', 'web-browser', { url: 'https://b.example' });
+    markPopupSpawnedTab(first.id);
+    markPopupSpawnedTab(second.id);
+    const firstEntry = browserWebviewPool.acquire(first.id);
+    const secondEntry = browserWebviewPool.acquire(second.id);
+    // close interceptor 让 closeTab 在"抓完 bucket 快照"和"写回 cache"之间真的
+    // 让出一次 microtask —— 真实场景里这个让出点来自 interceptor /
+    // plugin.onBeforeClose / 持久化 IPC,并发窗口就开在这里。
+    for (const id of [first.id, second.id]) {
+      setTabCloseInterceptor(id, async () => {
+        await Promise.resolve();
+        return true;
+      });
+    }
+
+    // 两个 OAuth 流几乎同时收尾。closeTab 在入口抓 bucket 快照、await 后才落盘,
+    // 并发跑会让后完成的那条把对方已删的 tab 写回 cache(或回滚掉两次删除)。
+    firstEntry.webview.dispatchEvent(new Event('close'));
+    secondEntry.webview.dispatchEvent(new Event('close'));
+
+    await vi.waitFor(() => {
+      expect(getBucket('sess-both').tabs).toHaveLength(0);
+    });
+    // 复活检测:再多跑几个 microtask/timer tick,确认没有 tab 被写回。
+    await new Promise((r) => setTimeout(r, 10));
+    expect(getBucket('sess-both').tabs).toHaveLength(0);
   });
 
   it('guest window.close() on a NON-popup tab is ignored (script-opened-only 语义)', async () => {

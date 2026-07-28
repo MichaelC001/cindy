@@ -26,12 +26,14 @@ import { BROWSER_PARTITION } from '../../shared/webviewPartition';
 import { getEffectiveAppShortcuts, type AppShortcutId } from '../../shared/appShortcuts';
 import {
   DEFERRED_POPUP_ROUTE_TIMEOUT_MS,
+  POPUP_OPENER_WAIT_TIMEOUT_MS,
   RSB_BROWSER_POPUP_CHANNEL,
   applyGhostWebviewHardening,
   applyWebviewHardening,
   installDeferredPopupRouter,
   isGuestShortcutKeyDownType,
   resolveGuestShortcutAction,
+  setRsbPopupOpenerResolver,
 } from '../webview-security';
 
 describe('applyWebviewHardening', () => {
@@ -201,6 +203,7 @@ describe('applyGhostWebviewHardening(意识面板 webview)', () => {
 describe('installDeferredPopupRouter', () => {
   afterEach(() => {
     vi.useRealTimers();
+    setRsbPopupOpenerResolver(null);
   });
 
   function makePopupHarness() {
@@ -273,17 +276,20 @@ describe('installDeferredPopupRouter', () => {
     expect(popupWindow.close).toHaveBeenCalledTimes(1);
   });
 
-  it('carries opener attribution through to the routed payload when provided', () => {
+  it('carries opener attribution through to the routed payload when resolvable', () => {
     // popup 归属修复:payload 带 openerTabId / openerSessionId 时,renderer 端
     // 才能把 popup tab 落进发起方 session 的 bucket,而不是用户正在看的 session。
     vi.useFakeTimers();
     const { childContents, hostContents, popupWindow } = makePopupHarness();
+    setRsbPopupOpenerResolver((id) =>
+      id === 42 ? { tabId: 'tab-1', sessionId: 'session-a' } : null,
+    );
 
     installDeferredPopupRouter(
       hostContents,
       popupWindow as unknown as BrowserWindow,
       'foreground-tab',
-      { openerTabId: 'tab-1', openerSessionId: 'session-a' },
+      42,
     );
 
     childContents.emit('will-navigate', {}, 'https://accounts.example.com/oauth');
@@ -293,6 +299,82 @@ describe('installDeferredPopupRouter', () => {
       disposition: 'foreground-tab',
       openerTabId: 'tab-1',
       openerSessionId: 'session-a',
+    });
+  });
+
+  it('defers routing until the opener lands in the registry', async () => {
+    // guest 页面 head 里的同步脚本能在 renderer 的 did-attach report 落库前就
+    // window.open() —— 同步反查必然落空。此时必须等 registry 收到记录再路由,
+    // 否则 popup 会落进"用户正在看的 session"。
+    const { childContents, hostContents, popupWindow } = makePopupHarness();
+    let registered: { tabId: string; sessionId: string } | null = null;
+    setRsbPopupOpenerResolver((id) => (id === 42 ? registered : null));
+
+    installDeferredPopupRouter(
+      hostContents,
+      popupWindow as unknown as BrowserWindow,
+      'foreground-tab',
+      42,
+    );
+
+    childContents.emit('will-navigate', {}, 'https://accounts.example.com/oauth');
+    // 反查还落空 —— 中转窗口已收掉,但 popup 尚未路由给 renderer。
+    expect(hostContents.send).not.toHaveBeenCalled();
+    expect(popupWindow.close).toHaveBeenCalledTimes(1);
+
+    // report 到达 main(registry 有记录了)→ 等待循环下一轮命中。
+    registered = { tabId: 'tab-1', sessionId: 'session-a' };
+    await vi.waitFor(() => expect(hostContents.send).toHaveBeenCalledTimes(1));
+    expect(hostContents.send).toHaveBeenCalledWith(RSB_BROWSER_POPUP_CHANNEL, {
+      url: 'https://accounts.example.com/oauth',
+      disposition: 'foreground-tab',
+      openerTabId: 'tab-1',
+      openerSessionId: 'session-a',
+    });
+  });
+
+  it('routes without attribution once the opener wait times out', async () => {
+    // 永久落空(guest 不属于任何已上报的 RSB tab)时不能把 popup 一直扣着 ——
+    // 有界等待到点后照常路由,只是没有 opener 字段(回落到旧行为)。
+    vi.useFakeTimers();
+    const { childContents, hostContents, popupWindow } = makePopupHarness();
+    setRsbPopupOpenerResolver(() => null);
+
+    installDeferredPopupRouter(
+      hostContents,
+      popupWindow as unknown as BrowserWindow,
+      'foreground-tab',
+      42,
+    );
+
+    childContents.emit('will-navigate', {}, 'https://accounts.example.com/oauth');
+    expect(hostContents.send).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(POPUP_OPENER_WAIT_TIMEOUT_MS + 50);
+
+    expect(hostContents.send).toHaveBeenCalledWith(RSB_BROWSER_POPUP_CHANNEL, {
+      url: 'https://accounts.example.com/oauth',
+      disposition: 'foreground-tab',
+    });
+  });
+
+  it('routes synchronously when no opener resolver is installed', () => {
+    // 启动早期 / 无 RSB bridge 的环境:没有可等的东西,等待只会白白延迟 popup。
+    vi.useFakeTimers();
+    const { childContents, hostContents, popupWindow } = makePopupHarness();
+
+    installDeferredPopupRouter(
+      hostContents,
+      popupWindow as unknown as BrowserWindow,
+      'foreground-tab',
+      42,
+    );
+
+    childContents.emit('will-navigate', {}, 'https://accounts.example.com/oauth');
+
+    expect(hostContents.send).toHaveBeenCalledWith(RSB_BROWSER_POPUP_CHANNEL, {
+      url: 'https://accounts.example.com/oauth',
+      disposition: 'foreground-tab',
     });
   });
 });

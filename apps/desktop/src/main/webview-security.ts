@@ -297,9 +297,12 @@ export function setRsbPopupOpenerResolver(resolver: RsbPopupOpenerResolver | nul
   popupOpenerResolver = resolver;
 }
 
-function resolvePopupOpener(
-  webContentsId: number,
-): { openerTabId: string; openerSessionId: string } | null {
+interface ResolvedPopupOpener {
+  openerTabId: string;
+  openerSessionId: string;
+}
+
+function resolvePopupOpener(webContentsId: number): ResolvedPopupOpener | null {
   if (!popupOpenerResolver) return null;
   try {
     const record = popupOpenerResolver(webContentsId);
@@ -308,6 +311,62 @@ function resolvePopupOpener(
   } catch {
     return null;
   }
+}
+
+/**
+ * 反查落空时的有界等待:renderer 的 report 与 guest 的 window.open 是两条不同
+ * sender 的 IPC,到达 main 的顺序没有硬保证。renderer 已在 `did-attach`(导航
+ * 提交前)就上报,但那条 report 可能还在途,而 guest 页面 head 里的同步脚本已经
+ * 调了 `window.open()` —— 此刻同步反查必然落空,payload 缺 openerSessionId,
+ * popup 就会落进"用户正在看的 session"。
+ *
+ * 所以 main 侧不能"尽力反查一次就发":反查落空时把 popup 的路由推迟到 registry
+ * 收到该 guest 的记录(或超时)之后。等待只发生在落空分支,命中时零延迟。
+ */
+export const POPUP_OPENER_WAIT_TIMEOUT_MS = 1_000;
+const POPUP_OPENER_WAIT_INTERVAL_MS = 25;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+async function waitForPopupOpener(webContentsId: number): Promise<ResolvedPopupOpener | null> {
+  const deadline = Date.now() + POPUP_OPENER_WAIT_TIMEOUT_MS;
+  for (;;) {
+    const opener = resolvePopupOpener(webContentsId);
+    if (opener) return opener;
+    if (Date.now() >= deadline) return null;
+    await delay(POPUP_OPENER_WAIT_INTERVAL_MS);
+  }
+}
+
+/**
+ * 把一个 popup 路由给 host renderer,尽最大努力带上 opener 归属。
+ *
+ * `openerWebContentsId` 缺省或反查钩子未注入(启动早期 / 单测)时同步直发 ——
+ * 没有可等的东西,等待只会白白延迟 popup。命中同步反查也直发。只有"钩子在、
+ * 但这个 guest 还没进 registry"这一种情况才走有界等待(见上方注释)。
+ */
+function routeBrowserPopup(
+  hostContents: WebContents,
+  openerWebContentsId: number | undefined,
+  payload: RsbBrowserPopupPayload,
+): void {
+  if (openerWebContentsId === undefined || !popupOpenerResolver) {
+    sendBrowserPopup(hostContents, payload);
+    return;
+  }
+  const opener = resolvePopupOpener(openerWebContentsId);
+  if (opener) {
+    sendBrowserPopup(hostContents, { ...payload, ...opener });
+    return;
+  }
+  void waitForPopupOpener(openerWebContentsId).then((late) => {
+    sendBrowserPopup(hostContents, { ...payload, ...(late ?? {}) });
+  });
 }
 
 function isInitialBlankPopupUrl(url: string): boolean {
@@ -331,11 +390,16 @@ function sendBrowserPopup(
   hostContents.send(RSB_BROWSER_POPUP_CHANNEL, payload);
 }
 
+/**
+ * @param openerWebContentsId 发起 popup 的 guest webContentsId。归属反查推迟到
+ *   真实 URL 出现时才做(此时距 guest 上报又过了一段时间,命中率更高),缺省则
+ *   照常路由、只是没有 opener 归属字段。
+ */
 export function installDeferredPopupRouter(
   hostContents: WebContents,
   popupWindow: BrowserWindow,
   disposition: string,
-  opener?: { openerTabId: string; openerSessionId: string } | null,
+  openerWebContentsId?: number,
 ): void {
   let routed = false;
   const closeTimer = setTimeout(() => {
@@ -351,10 +415,12 @@ export function installDeferredPopupRouter(
     if (routed || !isRoutablePopupUrl(url)) return;
     routed = true;
     cleanup();
-    sendBrowserPopup(hostContents, { url, disposition, ...(opener ?? {}) });
+    // 先收掉隐藏窗口再路由 —— routeBrowserPopup 在归属反查落空时会有界等待,
+    // 不能让这个不可见的中转 BrowserWindow 跟着一起多活那段时间。
     if (!popupWindow.isDestroyed()) {
       popupWindow.close();
     }
+    routeBrowserPopup(hostContents, openerWebContentsId, { url, disposition });
   };
 
   const childContents = popupWindow.webContents;
@@ -446,10 +512,9 @@ export function installWebviewHardener(): void {
       }
       guestContents.setWindowOpenHandler((details) => {
         if (isRoutablePopupUrl(details.url)) {
-          sendBrowserPopup(contents, {
+          routeBrowserPopup(contents, guestContents.id, {
             url: details.url,
             disposition: details.disposition,
-            ...(resolvePopupOpener(guestContents.id) ?? {}),
           });
           return { action: 'deny' };
         }
@@ -475,12 +540,7 @@ export function installWebviewHardener(): void {
         return { action: 'deny' };
       });
       guestContents.on('did-create-window', (popupWindow, details) => {
-        installDeferredPopupRouter(
-          contents,
-          popupWindow,
-          details.disposition,
-          resolvePopupOpener(guestContents.id),
-        );
+        installDeferredPopupRouter(contents, popupWindow, details.disposition, guestContents.id);
       });
       // 拦截 webview guest 内的"浏览器级"快捷键 —— Electron webview 是独立
       // webContents,guest 触发的 keydown 不冒泡到 host 的 window,host renderer

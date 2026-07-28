@@ -168,6 +168,31 @@ export function forceKillBrowserTab(tabId: string): Promise<void> {
 }
 
 /**
+ * guest 自关的 per-session 串行队列。
+ *
+ * `store.closeTab` 在入口抓一份 bucket 快照,await 完 interceptor / IPC 才算数,
+ * 失败还会用这份快照**整体**回滚。同一 session 里两个 popup 几乎同时
+ * `window.close()` 时,两条并发 closeTab 各拿到一份"还含着对方"的旧快照:后完成
+ * 的那条会把已经删掉的 tab 写回 cache;若它的 setActive 指向已被前一条删掉的
+ * tab,IPC 报错又会把两次乐观删除一起回滚 —— cache 与 DB 从此不一致。
+ *
+ * UI 的多 tab 关闭路径(handleCloseAll / closeAllTabs)本来就是逐个 await 串行
+ * 的,这里给自动路径补上同样的纪律:同 session 排队,跨 session 并行。
+ */
+const guestCloseQueues = new Map<string, Promise<void>>();
+
+function enqueueGuestClose(sessionId: string, task: () => Promise<void>): Promise<void> {
+  const prev = guestCloseQueues.get(sessionId) ?? Promise.resolve();
+  const next = prev.then(task).catch(() => undefined);
+  guestCloseQueues.set(sessionId, next);
+  // 队尾自清 —— 不把已完成的 promise(及其闭包)长期挂在 map 上。
+  void next.then(() => {
+    if (guestCloseQueues.get(sessionId) === next) guestCloseQueues.delete(sessionId);
+  });
+  return next;
+}
+
+/**
  * Bind the renderer ↔ main bridge. Returns a teardown function that's safe to
  * call multiple times.
  *
@@ -212,7 +237,9 @@ export function initRsbBrowserBridge(): () => void {
     if (!isPopupSpawnedTab(tabId)) return;
     const sessionId = findSessionIdByTabId(tabId);
     if (!sessionId) return;
-    void (async () => {
+    void enqueueGuestClose(sessionId, async () => {
+      // 队列内重取:排在前面的自关可能已经把这个 tab 关掉了(或它已被用户关掉)。
+      if (!getBucket(sessionId).tabs.some((t) => t.id === tabId)) return;
       const beforeCount = getBucket(sessionId).tabs.length;
       await storeCloseTab(sessionId, tabId);
       // closeTab 可能被 close interceptor 拦下(tab 留在 bucket)——此时既不清
@@ -228,7 +255,7 @@ export function initRsbBrowserBridge(): () => void {
       if (beforeCount > 0 && afterCount === 0) {
         requestRightSidebarVisibility('close', { sessionId });
       }
-    })().catch(() => undefined);
+    });
   });
 
   // Main → pool pin sync. Main owns the pin authority; renderer pool only
@@ -603,5 +630,6 @@ export function _resetRsbBrowserBridgeForTests(): void {
   lastReportedWebContentsId.clear();
   pendingKillCauses.clear();
   resourceEventListeners.clear();
+  guestCloseQueues.clear();
   currentForegroundTabId = null;
 }
