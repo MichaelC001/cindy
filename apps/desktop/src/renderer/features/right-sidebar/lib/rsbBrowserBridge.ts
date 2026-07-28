@@ -195,7 +195,9 @@ export function initRsbBrowserBridge(): () => void {
   const unsubRelease = browserWebviewPool.onRelease((tabId) => {
     const reported = lastReportedWebContentsId.get(tabId);
     lastReportedWebContentsId.delete(tabId);
-    unmarkPopupSpawnedTab(tabId);
+    // 注意:这里**不能**清 popup 标记 —— pool release ≠ tab 关闭。LRU 淘汰 /
+    // 宿主迁移只销毁 webview 实例,tab 仍在 store;重新激活后 OAuth callback 的
+    // window.close() 仍要能命中标记自关。标记随 tab 关闭清理(见 guestClose)。
     void api
       .release(reported === undefined ? { tabId } : { tabId, webContentsId: reported })
       .catch(() => undefined);
@@ -213,6 +215,15 @@ export function initRsbBrowserBridge(): () => void {
     void (async () => {
       const beforeCount = getBucket(sessionId).tabs.length;
       await storeCloseTab(sessionId, tabId);
+      // closeTab 可能被 close interceptor 拦下(tab 留在 bucket)——此时既不清
+      // 标记也不动资源,保持"没关成"的完整语义。
+      const stillPresent = getBucket(sessionId).tabs.some((t) => t.id === tabId);
+      if (stillPresent) return;
+      unmarkPopupSpawnedTab(tabId);
+      // 后台自关(BrowserTabBody 未挂载)没有 unmount cleanup 兜底,必须显式
+      // release:销毁 guest webContents、经 onRelease 链同步 main 端 TabRegistry。
+      // 前台场景 TabBody 的关闭路径先 release 过也没关系 —— release 幂等。
+      browserWebviewPool.release(tabId);
       const afterCount = getBucket(sessionId).tabs.length;
       if (beforeCount > 0 && afterCount === 0) {
         requestRightSidebarVisibility('close', { sessionId });
@@ -533,8 +544,23 @@ async function eagerSpawnAndReport(
     const finish = () => {
       if (settled) return;
       settled = true;
+      entry.webview.removeEventListener('did-attach', onAttach);
       entry.webview.removeEventListener('dom-ready', onReady);
       resolve();
+    };
+    // 早期上报:did-attach 在导航提交前就触发,此时 getWebContentsId 已可取。
+    // 只等 dom-ready 会留一个竞态窗口 —— 页面 head 里的同步脚本能在 dom-ready
+    // 之前 window.open(),那时 registry 还没有本 tab 的记录,popup 的 opener
+    // 反查落空、归属丢失。这里提早把映射送进 main,把窗口压缩到"IPC 在途"的
+    // 毫秒级(guest 脚本要跑起来至少要等导航提交,晚于 did-attach)。
+    // report 幂等(同 tabId 重报只是替换记录),与下面 dom-ready 的兜底上报共存。
+    const onAttach = () => {
+      try {
+        const webContentsId = entry.webview.getWebContentsId();
+        void reportRsbBrowserTab({ sessionId, tabId, webContentsId });
+      } catch {
+        /* attach 尚未完成到可取 id —— dom-ready 兜底。 */
+      }
     };
     const onReady = () => {
       try {
@@ -551,6 +577,7 @@ async function eagerSpawnAndReport(
       }
       finish();
     };
+    entry.webview.addEventListener('did-attach', onAttach);
     entry.webview.addEventListener('dom-ready', onReady);
     // 8s fallback so a broken site / network failure doesn't make the
     // backend op hang forever. Tab persists in the bucket; user switching

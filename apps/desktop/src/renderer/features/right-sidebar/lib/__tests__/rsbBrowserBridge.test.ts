@@ -216,6 +216,33 @@ describe('rsbBrowserBridge — initialization & teardown', () => {
 
     await vi.waitFor(() => {
       expect(getBucket('sess-oauth').tabs).toHaveLength(0);
+      // 后台自关没有 BrowserTabBody unmount cleanup 兜底,bridge 必须显式释放
+      // pool entry(销毁 guest webContents + 同步 main 端 registry)。放进
+      // waitFor:closeTab 的乐观更新先于 release 落地,分开断言会撞时序。
+      expect(browserWebviewPool.peek(tab.id)).toBeNull();
+    });
+  });
+
+  it('pool release (LRU 淘汰) 不清 popup 标记 —— tab 重建后仍能自关', async () => {
+    installFakeIpc();
+    initRsbBrowserBridge();
+
+    await ensureHydrated('sess-lru');
+    const tab = await addTab('sess-lru', 'web-browser', { url: 'https://cb.example' });
+    markPopupSpawnedTab(tab.id);
+    browserWebviewPool.acquire(tab.id);
+
+    // 模拟 LRU 淘汰:webview 实例销毁,但 tab 仍在 store bucket 里。
+    browserWebviewPool.release(tab.id);
+    expect(getBucket('sess-lru').tabs).toHaveLength(1);
+
+    // 用户切回该 tab → webview 重建,callback 页重新加载后 window.close()。
+    // 若 release 误清了标记,这次自关会被忽略、空 tab 再次残留。
+    const revived = browserWebviewPool.acquire(tab.id);
+    revived.webview.dispatchEvent(new Event('close'));
+
+    await vi.waitFor(() => {
+      expect(getBucket('sess-lru').tabs).toHaveLength(0);
     });
   });
 

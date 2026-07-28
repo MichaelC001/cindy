@@ -24,7 +24,12 @@ export function isPopupSpawnedTab(tabId: string): boolean {
   return popupSpawnedTabIds.has(tabId);
 }
 
-/** tab 关闭 / 池释放后清除登记,避免 tabId 复用误命中(cuid 实际不复用,防御性)。 */
+/**
+ * tab **真正从 store 关闭**后清除登记。清理时机必须跟 tab 生命周期而不是
+ * webview 实例生命周期:pool release(LRU 淘汰 / 宿主迁移)只销毁 webview,
+ * tab 仍在 bucket,标记必须保留——否则重建后的 callback 页 window.close()
+ * 会被误判为普通 tab 而失效。
+ */
 export function unmarkPopupSpawnedTab(tabId: string): void {
   popupSpawnedTabIds.delete(tabId);
 }

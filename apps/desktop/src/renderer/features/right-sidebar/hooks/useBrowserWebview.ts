@@ -248,6 +248,19 @@ export function useBrowserWebview(
         // the hook on a webContentsId we can't get.
       }
     };
+    // did-attach 早期上报:dom-ready 之前页面 head 同步脚本就可能 window.open(),
+    // 那时 registry 若还没本 tab 的记录,popup 的 opener 反查落空、归属丢失。
+    // did-attach 在导航提交前触发且 getWebContentsId 已可取,提早送映射进 main。
+    // report 幂等,与 dom-ready 的兜底上报共存。
+    const onDidAttach = () => {
+      if (!sessionId) return;
+      try {
+        const webContentsId = entry.webview.getWebContentsId();
+        void reportRsbBrowserTab({ sessionId, tabId, webContentsId });
+      } catch {
+        /* attach in-flight —— dom-ready 兜底。 */
+      }
+    };
     // did-fail-load:404 / 网络错误 / SSL 错误,Electron 不会自动停 loading 态;
     // 显式翻 isLoading=false,UI 才能从"加载中"复位。errorCode -3 = ABORTED。
     // 如果 ABORTED 发生在还没收到真实导航事件时,要把 URL 从乐观 target
@@ -319,6 +332,7 @@ export function useBrowserWebview(
     entry.webview.addEventListener('did-redirect-navigation', onRedirect);
     entry.webview.addEventListener('did-start-loading', onStartLoading);
     entry.webview.addEventListener('did-stop-loading', onStopLoading);
+    entry.webview.addEventListener('did-attach', onDidAttach);
     entry.webview.addEventListener('dom-ready', onDomReady);
     entry.webview.addEventListener('did-fail-load', onFailLoad);
     entry.webview.addEventListener('audio-state-changed', onAudioState);
@@ -359,6 +373,7 @@ export function useBrowserWebview(
       entry.webview.removeEventListener('did-redirect-navigation', onRedirect);
       entry.webview.removeEventListener('did-start-loading', onStartLoading);
       entry.webview.removeEventListener('did-stop-loading', onStopLoading);
+      entry.webview.removeEventListener('did-attach', onDidAttach);
       entry.webview.removeEventListener('dom-ready', onDomReady);
       entry.webview.removeEventListener('did-fail-load', onFailLoad);
       entry.webview.removeEventListener('audio-state-changed', onAudioState);
