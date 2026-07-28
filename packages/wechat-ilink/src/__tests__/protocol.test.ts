@@ -389,12 +389,13 @@ describe("iLink HTTP boundary", () => {
       String(uploaded.ref.aesKeyBase64),
       "base64",
     );
-    expect(decodedAesKey).toHaveLength(16);
+    expect(decodedAesKey).toHaveLength(32);
     const uploadUrlRequest = calls.find(({ url }) =>
       url.endsWith("/ilink/bot/getuploadurl"),
     );
-    expect(JSON.parse(String(uploadUrlRequest?.init?.body))).toMatchObject({
-      aeskey: decodedAesKey.toString("hex"),
+    const uploadBody = JSON.parse(String(uploadUrlRequest?.init?.body));
+    expect(uploadBody).toMatchObject({
+      aeskey: decodedAesKey.toString("ascii"),
     });
 
     await expect(
