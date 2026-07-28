@@ -997,6 +997,10 @@ interface ElectronAPI {
     list: () => Promise<LocalThemesResult>;
     write: (req: LocalThemeWriteRequest) => Promise<LocalThemeWriteResult>;
     openDir: () => Promise<LocalThemeOpenDirResult>;
+    /** 导入 VSCode / Obsidian 主题文件；对话框与读文件都在 main 侧。 */
+    importExternal: () => Promise<
+      import('../shared/theme-import/types').LocalThemeImportResult
+    >;
   };
 
   /** RSB terminal tab —— PTY 后端 + xterm.js,详见 shared/terminal-bridge.ts 注释。 */
@@ -2134,6 +2138,19 @@ interface ElectronAPI {
   readImageBytes: (params: {
     url: string;
   }) => Promise<{ base64: string; mimeType: string }>;
+
+  /**
+   * 附件卡缩略图:本机文件走系统缩略图服务(macOS QuickLook / Windows Shell)。
+   * 路径越界 / 不是文件 / stat 失败 → 整体回 null;文件在但出不了图(系统不支持、
+   * 超时、排不上并发名额)→ `dataUrl` 为 null,调用方回落自绘文件图标。
+   * `byteSize` 是复核那一刻的当前大小,用来刷新卡片上「类型 · 大小」的快照值。
+   */
+  getFileThumbnail: (params: {
+    path: string;
+    size: number;
+    /** 显式复核:跳过正缓存重新生成(负缓存仍尊重)。焦点复核时传 true。 */
+    revalidate?: boolean;
+  }) => Promise<{ dataUrl: string | null; byteSize: number } | null>;
 
   /**
    * markdown-monorepo-resolve: smart relative-path resolver. Tries direct
@@ -3513,12 +3530,14 @@ interface ElectronAPI {
     // 模型供应商目录（只读）—— 内置目录元数据 + 各供应商实时连接状态。
     listProviders: () => Promise<{ providers: import('@cindy/model-providers').ProviderView[] }>;
 
-    // 自定义供应商配置 CRUD（密钥另走通用 safeStorage IPC，不经这里）。
+    // 自定义供应商配置 CRUD（配置与 runtime 密钥均由 main 原子排队）。
     createCustomProvider: (
       config: import('@cindy/model-providers').CustomProviderConfig,
+      keys: Partial<Record<'claude-code' | 'codex', string>>,
     ) => Promise<{ ok: true }>;
     updateCustomProvider: (
       config: import('@cindy/model-providers').CustomProviderConfig,
+      keys: Partial<Record<'claude-code' | 'codex', string>>,
     ) => Promise<{ ok: true }>;
     deleteCustomProvider: (providerId: string) => Promise<{ ok: true }>;
     /** 自定义供应商创建模板（目录 presets 段，纯 UI 模板数据）。 */
@@ -3533,6 +3552,7 @@ interface ElectronAPI {
               agent: 'claude-code' | 'codex';
               baseUrl: string;
               modelId: string;
+              authMethod: 'apiKey' | 'oauth' | 'none';
               wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;
               requestPath?: string;
               apiKey?: string | null;
@@ -3550,6 +3570,7 @@ interface ElectronAPI {
     fetchProviderModels: (input: {
       agent: 'claude-code' | 'codex';
       baseUrl: string;
+      authMethod: 'apiKey' | 'oauth' | 'none';
       modelsUrl?: string | null;
       apiKey?: string | null;
       headers?: Record<string, string>;
@@ -3595,9 +3616,15 @@ interface ElectronAPI {
     /** 自定义 MCP 变更广播订阅（返回 off）。 */
     onMcpChanged: (cb: () => void) => () => void;
     /** 通用 OAuth 供应商（目录 auth.oauth 描述符驱动）登录 / 登出 / 取消。 */
-    providerOAuthLogin: (providerId: string) => Promise<{ ok: boolean; reason?: string }>;
+    providerOAuthLogin: (
+      providerId: string,
+      options?: { ownerId?: string },
+    ) => Promise<{ ok: boolean; reason?: string }>;
     providerOAuthLogout: (providerId: string) => Promise<{ ok: true }>;
-    providerOAuthCancel: (providerId: string) => Promise<{ ok: true }>;
+    providerOAuthCancel: (
+      providerId: string,
+      options?: { releaseOwner?: boolean; ownerId?: string },
+    ) => Promise<{ ok: true }>;
     onProviderOAuthProgress: (
       cb: (progress: {
         providerId: string;
@@ -4271,14 +4298,27 @@ interface ElectronAPI {
     /* ── Agent 鉴权 (取代老 codex.auth.*) ── */
     auth: {
       getState: (agentKind: 'claude-code' | 'codex') => Promise<CodexAuthState>;
-      triggerLogin: (agentKind: 'claude-code' | 'codex') => Promise<CodexAuthState>;
-      cancelLogin: (agentKind: 'claude-code' | 'codex') => Promise<void>;
+      triggerLogin: (
+        agentKind: 'claude-code' | 'codex',
+        options?: { mode?: 'browser' | 'device-code'; ownerId?: string },
+      ) => Promise<CodexAuthState>;
+      cancelLogin: (
+        agentKind: 'claude-code' | 'codex',
+        options?: { releaseOwner?: boolean; ownerId?: string },
+      ) => Promise<void>;
       logout: (agentKind: 'claude-code' | 'codex') => Promise<void>;
       onStateChanged: (
         cb: (s: { agentKind: 'claude-code' | 'codex' } & CodexAuthState) => void,
       ) => () => void;
       onLoginProgress: (
-        cb: (p: { agentKind: 'claude-code' | 'codex'; phase: string; detail?: string }) => void,
+        cb: (p: {
+          agentKind: 'claude-code' | 'codex';
+          phase: string;
+          mode?: 'browser' | 'device-code';
+          detail?: string;
+          verificationUrl?: string;
+          userCode?: string;
+        }) => void,
       ) => () => void;
     };
 

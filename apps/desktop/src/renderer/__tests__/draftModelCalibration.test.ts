@@ -33,13 +33,20 @@ function provider(
   connected: boolean,
   models: Record<string, CatalogModel[]>,
 ): ProviderView {
+  const agents = Object.keys(models);
   return {
     id,
     name: id,
     source: 'builtin',
-    agents: Object.keys(models),
+    agents,
     models,
-    routing: {},
+    // Provider availability now requires an enabled runtime, not only an entry in `agents`.
+    routing: Object.fromEntries(
+      agents.map((agent) => [
+        agent,
+        { upstream: 'https://provider.test', authStrategy: 'none' },
+      ]),
+    ),
     auth: { method: 'oauth' },
     connected,
   } as unknown as ProviderView;

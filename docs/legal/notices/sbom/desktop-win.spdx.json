@@ -3,9 +3,9 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "cindy-desktop-win",
-  "documentNamespace": "https://cindy.app/spdx/desktop-win/dd06b094b7badb83b588021ebe31cbfcb1f7d9f04f11928c79ce25738939dec0",
+  "documentNamespace": "https://cindy.app/spdx/desktop-win/ce1be7eb8491943fe65d6e6cde3b22c6b5cba437a6692a63582e116ce015fe07",
   "creationInfo": {
-    "created": "2026-07-27T10:42:13Z",
+    "created": "2026-07-27T21:02:23Z",
     "creators": [
       "Tool: scripts/generate-third-party-notices.mjs"
     ]
@@ -46,6 +46,16 @@
       "SPDXID": "SPDXRef-Package-e01faf6cc0ab33f1",
       "versionInfo": "41.2.0",
       "downloadLocation": "https://github.com/electron/electron",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "name": "LiteLLM mascot SVG path (adapted)",
+      "SPDXID": "SPDXRef-Package-5cfa9bdbf62d839b",
+      "versionInfo": "adapted",
+      "downloadLocation": "https://github.com/BerriAI/litellm-docs/blob/main/static/img/logo.svg",
       "filesAnalyzed": false,
       "licenseConcluded": "MIT",
       "licenseDeclared": "MIT",
@@ -16384,6 +16394,23 @@
       ]
     },
     {
+      "name": "silk-wasm",
+      "SPDXID": "SPDXRef-Package-1f5626585935f113",
+      "versionInfo": "3.7.1",
+      "downloadLocation": "https://github.com/idranme/silk-wasm",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/silk-wasm@3.7.1"
+        }
+      ]
+    },
+    {
       "name": "simple-concat",
       "SPDXID": "SPDXRef-Package-21d7a09ca81c30af",
       "versionInfo": "1.0.1",
@@ -17798,6 +17825,11 @@
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
       "relatedSpdxElement": "SPDXRef-Package-e01faf6cc0ab33f1"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-5cfa9bdbf62d839b"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
@@ -22618,6 +22650,11 @@
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
       "relatedSpdxElement": "SPDXRef-Package-0540e3a65d43c022"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-1f5626585935f113"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",

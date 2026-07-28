@@ -35,6 +35,7 @@ import type { MemoryStatus, MemorySetResult, MemoryResetResult } from './types/m
 import type { ConsumeAccountRateLimitResetCreditParams } from './types/account-rate-limits.js';
 import type { SessionStorage, SessionMeta } from './interfaces/session-storage.js';
 import type { Logger } from './interfaces/logger.js';
+import type { AuthLoginOptions } from './interfaces/auth-adapter.js';
 import type { MakerMemoryManager } from './memory/manager.js';
 
 /**
@@ -677,7 +678,7 @@ export class Maker {
     return this.requireAgent(agentKind).getAuthState();
   }
 
-  async triggerAgentLogin(agentKind: AgentKind, opts?: { onProgress?: (msg: string) => void }) {
+  async triggerAgentLogin(agentKind: AgentKind, opts?: AuthLoginOptions) {
     return this.requireAgent(agentKind).triggerLogin(opts);
   }
 

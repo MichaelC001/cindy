@@ -105,7 +105,10 @@ export function createProviderService(deps: ProviderServiceDeps): ProviderServic
       // 无鉴权供应商无需任何登录或密钥：只要目录声明有效，就可立即参与模型选择。
       // 该规则与 source 无关，覆盖远端目录下发的 built-in/self-hosted 条目。
       if (p.auth.method === 'none') {
-        connected[p.id] = true;
+        connected[p.id] = p.agents.some((agent) => {
+          const routing = p.routing[agent];
+          return routing !== undefined && routing.disabled !== true;
+        });
       }
       // 通用 OAuth 供应商（带 auth.oauth 描述符，内置目录下发或用户自建皆同）：
       // 连接态 = 本机是否有凭证 blob（登录过才算连接）。

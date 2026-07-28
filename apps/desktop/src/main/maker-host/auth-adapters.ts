@@ -21,7 +21,13 @@ import { promises as fsp, existsSync } from 'node:fs';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import type { AuthAdapter, AuthAdapterOptions, AuthState } from '@cindy/maker-core';
+import type {
+  AgentLoginMode,
+  AuthAdapter,
+  AuthAdapterOptions,
+  AuthLoginOptions,
+  AuthState,
+} from '@cindy/maker-core';
 import { getCachedBinaryStatus, isVettedAgentBinaryPath } from '../agent-binaries/index.js';
 import { createLogger } from '../logger.js';
 import { prepareCodexGlobalSkillsLinks } from './codex-global-skills.js';
@@ -40,6 +46,7 @@ import {
   writeInvalidatedSystemCodexAuthMarker,
 } from './codex-auth-invalidation.js';
 import {
+  codexLoginArgs,
   requireCodexOAuthLoginState,
   resolveCodexLoginCleanupPreflight,
   resolveCodexLoginExitState,
@@ -531,12 +538,25 @@ export class DesktopClaudeAuthAdapter implements AuthAdapter {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /** Codex AuthAdapter —— OAuth 子进程登录 + auth.json 读状态; getAuthEnv 仅注入 CODEX_HOME。 */
+type PendingCodexLogin = {
+  mode: AgentLoginMode;
+  promise: Promise<AuthState>;
+  progressListeners: Set<NonNullable<AuthLoginOptions['onProgress']>>;
+  progressHistory: string[];
+  progressHistoryChars: number;
+  cancelled: boolean;
+};
+
+const MAX_COALESCED_LOGIN_PROGRESS_CHARS = 64 * 1024;
+
 export class DesktopCodexAuthAdapter implements AuthAdapter {
   private currentLoginProc: ChildProcess | null = null;
-  /** 多窗口 / 重复点击共用同一条登录流程，避免两个 codex login 同时写 auth.json。 */
-  private pendingLogin: Promise<AuthState> | null = null;
+  /** 同模式重复点击共用流程；切换登录模式时先取消旧流程再串行启动新流程。 */
+  private pendingLogin: PendingCodexLogin | null = null;
+  /** logout 全流程的线性化点；其间新登录排队到凭证清理和解绑全部完成之后。 */
+  private logoutOperation: Promise<void> | null = null;
   private loginAborted = false;
-  /** 只在 CLI 尚未成功退出时接受取消；进入凭证 finalize 后成功线性化，迟到取消不再翻转结果。 */
+  /** CLI 和凭证 finalize 都未收口时接受取消；成功结果返回后才关闭窗口。 */
   private loginCancellationOpen = false;
   /**
    * logout() 成功后回调 —— 由 maker-host 注入本地 Codex host 收割。
@@ -982,19 +1002,87 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     }
   }
 
-  triggerLogin(opts?: { onProgress?: (msg: string) => void }): Promise<AuthState> {
-    if (this.pendingLogin) return this.pendingLogin;
-    const run = this.runTriggerLogin(opts).finally(() => {
-      if (this.pendingLogin === run) {
-        this.pendingLogin = null;
-        this.loginCancellationOpen = false;
+  triggerLogin(opts?: AuthLoginOptions): Promise<AuthState> {
+    const mode = opts?.mode ?? 'browser';
+    if (this.pendingLogin) {
+      if (this.pendingLogin.mode === mode && !this.pendingLogin.cancelled) {
+        if (opts?.onProgress && !this.pendingLogin.progressListeners.has(opts.onProgress)) {
+          this.pendingLogin.progressListeners.add(opts.onProgress);
+          for (const message of this.pendingLogin.progressHistory) {
+            try {
+              opts.onProgress(message);
+            } catch {
+              /* 一个 IPC listener 失败不能阻断其它窗口或登录流程。 */
+            }
+          }
+        }
+        return this.pendingLogin.promise;
       }
+      const previous = this.pendingLogin.promise;
+      if (!this.pendingLogin.cancelled) this.cancelLogin();
+      const waits = [previous, ...(this.logoutOperation ? [this.logoutOperation] : [])];
+      const barrier = Promise.all(waits.map((operation) => operation.catch(() => undefined)));
+      return this.startTrackedLogin(opts, barrier);
+    }
+    return this.startTrackedLogin(opts, this.logoutOperation ?? undefined);
+  }
+
+  private startTrackedLogin(
+    opts?: AuthLoginOptions,
+    waitFor?: Promise<unknown>,
+  ): Promise<AuthState> {
+    const mode = opts?.mode ?? 'browser';
+    const operation: PendingCodexLogin = {
+      mode,
+      promise: null as unknown as Promise<AuthState>,
+      progressListeners: new Set(opts?.onProgress ? [opts.onProgress] : []),
+      progressHistory: [],
+      progressHistoryChars: 0,
+      cancelled: false,
+    };
+    const emitProgress = (message: string): void => {
+      operation.progressHistory.push(message);
+      operation.progressHistoryChars += message.length;
+      while (
+        operation.progressHistoryChars > MAX_COALESCED_LOGIN_PROGRESS_CHARS
+        && operation.progressHistory.length > 1
+      ) {
+        operation.progressHistoryChars -= operation.progressHistory.shift()?.length ?? 0;
+      }
+      for (const listener of operation.progressListeners) {
+        try {
+          listener(message);
+        } catch {
+          /* 一个 IPC listener 失败不能阻断其它窗口或登录流程。 */
+        }
+      }
+    };
+    const start = (): Promise<AuthState> => {
+      if (operation.cancelled) {
+        return Promise.resolve({ authenticated: false, errorReason: 'login_cancelled' });
+      }
+      return this.runTriggerLogin(
+        { ...opts, mode, onProgress: emitProgress },
+        () => operation.cancelled,
+      );
+    };
+    const execution = waitFor
+      ? waitFor.catch(() => undefined).then(start)
+      : start();
+    const run = execution.finally(() => {
+      if (this.pendingLogin?.promise !== run) return;
+      this.pendingLogin = null;
+      this.loginCancellationOpen = false;
     });
-    this.pendingLogin = run;
+    operation.promise = run;
+    this.pendingLogin = operation;
     return run;
   }
 
-  private async runTriggerLogin(opts?: { onProgress?: (msg: string) => void }): Promise<AuthState> {
+  private async runTriggerLogin(
+    opts?: AuthLoginOptions,
+    isCancelled: () => boolean = () => false,
+  ): Promise<AuthState> {
     this.ensureInvalidationMarkerLoaded();
     this.loginAborted = false;
     this.loginCancellationOpen = true;
@@ -1026,7 +1114,9 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
 
     // spawn codex login。POSIX 建独立进程组，取消/超时时连同回调 server 一起收割。
     return new Promise<AuthState>((resolve) => {
-      const proc = spawn(binaryPath, ['login'], {
+      const mode: AgentLoginMode = opts?.mode ?? 'browser';
+      const proc = spawn(binaryPath, codexLoginArgs(mode), {
+        shell: false,
         env: { ...process.env, CODEX_HOME: this.codexHome },
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
@@ -1039,13 +1129,14 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
 
       const stderrTail: string[] = [];
       proc.stdout?.on('data', (chunk: Buffer) => {
-        opts?.onProgress?.(`stdout:${String(chunk).trim()}`);
+        // data chunk 边界不等于文本边界；保留原始空白，IPC 层会分流累积后解析。
+        opts?.onProgress?.(`stdout:${String(chunk)}`);
       });
       proc.stderr?.on('data', (chunk: Buffer) => {
-        const s = String(chunk).trim();
-        stderrTail.push(s);
+        const raw = String(chunk);
+        stderrTail.push(raw.trim());
         if (stderrTail.length > 5) stderrTail.shift();
-        opts?.onProgress?.(`stderr:${s}`);
+        opts?.onProgress?.(`stderr:${raw}`);
       });
 
       const complete = (state: AuthState): void => {
@@ -1068,8 +1159,7 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
         // cancel 可能重复终止已退出进程，或把成功结果错误翻成 cancelled。
         if (timeout) clearTimeout(timeout);
         if (this.currentLoginProc === proc) this.currentLoginProc = null;
-        const cancelled = this.loginAborted;
-        this.loginCancellationOpen = false;
+        const cancelled = this.loginAborted || isCancelled();
         const exitState = resolveCodexLoginExitState({
           cancelled,
           timedOut,
@@ -1085,7 +1175,10 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
           : timedOut
             ? { authenticated: false, errorReason: 'login_timeout' }
             : undefined;
-        void this.finishSuccessfulCodexLogin(noOAuthFallback).then(complete, (err: unknown) => {
+        void this.finishSuccessfulCodexLogin(
+          noOAuthFallback,
+          () => this.loginAborted || isCancelled(),
+        ).then(complete, (err: unknown) => {
           complete({
             authenticated: false,
             errorReason: `login_finalize_error:${err instanceof Error ? err.message : String(err)}`,
@@ -1100,7 +1193,22 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     });
   }
 
-  private async finishSuccessfulCodexLogin(noOAuthFallback?: AuthState): Promise<AuthState> {
+  private async finishSuccessfulCodexLogin(
+    noOAuthFallback?: AuthState,
+    isCancelled: () => boolean = () => false,
+  ): Promise<AuthState> {
+    const cancelFinalization = (): Promise<AuthState> | null => {
+      if (!isCancelled()) return null;
+      // The CLI may already have written a valid token. A late Cancel must establish the same
+      // durable disconnected boundary as logout, otherwise the next state read can resurrect it.
+      return this.disconnectCodexOAuth().then(() => ({
+        authenticated: false,
+        errorReason: 'login_cancelled',
+      }));
+    };
+    const cancelledBeforeFinalize = cancelFinalization();
+    if (cancelledBeforeFinalize) return cancelledBeforeFinalize;
+
     // 收紧 auth.json 权限 (fail-soft: 失败只打日志, 不阻塞登录成功)。
     // Win 上 chmod 0o600 在 NTFS 是 no-op,走 icacls；POSIX 用标准 0o600。
     const authPath = path.join(this.codexHome, 'auth.json');
@@ -1118,6 +1226,8 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     // 先直接校验刚由 CLI 写入的本地文件，再改变 invalidation / reconcile 状态。否则 CLI
     // 即使 exit 0 但没产出 access_token，也会把原来的 token_invalidated 内存态提前清掉。
     const localOAuthState = requireCodexOAuthLoginState(await this.readLocalCodexAuthState());
+    const cancelledAfterLocalRead = cancelFinalization();
+    if (cancelledAfterLocalRead) return cancelledAfterLocalRead;
     if (!localOAuthState.authenticated) return noOAuthFallback ?? localOAuthState;
 
     // 系统文件仍是被判坏 / 被用户主动断开的原凭证时继续 suppress，避免覆盖新登录。
@@ -1132,11 +1242,15 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     } else {
       await this.reconcileWithSystemCodexAfterLogin();
     }
+    const cancelledAfterReconcile = cancelFinalization();
+    if (cancelledAfterReconcile) return cancelledAfterReconcile;
     // `codex login` 的成功必须由真实 access_token 证明；绝不能被 XD Gateway fallback 冒充。
     bindNativeProviderAuth('openai');
     const state = requireCodexOAuthLoginState(
       await this.readState({ skipReconcile: true, credentialMode: 'oauth-bearer' }),
     );
+    const cancelledAfterStateRead = cancelFinalization();
+    if (cancelledAfterStateRead) return cancelledAfterStateRead;
     if (!state.authenticated) return state;
 
     // 真正拿到 OAuth 后才重启本地 codex host；失败只记日志，不翻转登录结果。
@@ -1147,25 +1261,53 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
         log.warn('onLoginSuccess threw', { error: (e as Error).message });
       }
     }
+    const cancelledAfterHostRestart = cancelFinalization();
+    if (cancelledAfterHostRestart) return cancelledAfterHostRestart;
     return state;
   }
 
   /** Codex OAuth 子进程 abort —— 用户在浏览器授权流半路反悔时调。 */
   cancelLogin(): void {
-    // 设置 abort 标志覆盖 assets prepare 阶段；CLI 成功 exit 后取消窗口已关闭。
-    if (!this.pendingLogin || !this.loginCancellationOpen) return;
+    // 设置 abort 标志覆盖 assets prepare、CLI 和凭证 finalize 阶段。
+    if (!this.pendingLogin) return;
+    this.pendingLogin.cancelled = true;
+    if (!this.loginCancellationOpen) return;
     this.loginAborted = true;
     if (this.currentLoginProc) terminateCodexLoginProcess(this.currentLoginProc);
   }
 
-  async logout(opts?: { preserveInvalidatedReason?: boolean }): Promise<void> {
+  logout(opts?: { preserveInvalidatedReason?: boolean }): Promise<void> {
+    if (this.logoutOperation) {
+      // 登录可能在第一次 logout 之后排队、等待同一个 barrier。后来的 logout 仍代表更新的
+      // 用户意图，必须把这份 queued login 标成 cancelled，不能只复用旧 Promise 后让它启动。
+      this.cancelLogin();
+      return this.logoutOperation;
+    }
+    const run = this.runLogout(opts).finally(() => {
+      if (this.logoutOperation === run) this.logoutOperation = null;
+    });
+    this.logoutOperation = run;
+    return run;
+  }
+
+  private async runLogout(opts?: { preserveInvalidatedReason?: boolean }): Promise<void> {
     this.ensureInvalidationMarkerLoaded();
     // 登出与在途登录串行：先取消并等它完全收口，防迟到的 auth.json 在登出后复活账号。
-    const pendingLogin = this.pendingLogin;
+    const pendingLogin = this.pendingLogin?.promise;
     if (pendingLogin) {
       this.cancelLogin();
       await pendingLogin.catch(() => undefined);
     }
+    await this.disconnectCodexOAuth(opts);
+  }
+
+  /**
+   * 建立 durable Codex 断开边界并清理 host/cache。
+   * 调用方负责先处理 pendingLogin；登录 finalize 自身取消时不能等待自己的 Promise。
+   */
+  private async disconnectCodexOAuth(
+    opts?: { preserveInvalidatedReason?: boolean },
+  ): Promise<void> {
     let durableDisconnectCommitted = false;
     if (!opts?.preserveInvalidatedReason) {
       const systemAuthPath = getSystemCodexAuthPath();

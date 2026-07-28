@@ -123,14 +123,20 @@ export function buildRegistry(
   });
 }
 
+/** 该供应商的指定 runtime 是否可参与选择 / 路由。 */
+function hasEnabledAgentRuntime(provider: Provider, agent: AgentKind): boolean {
+  const routing = provider.routing?.[agent];
+  return provider.agents.includes(agent) && routing !== undefined && routing.disabled !== true;
+}
+
 /** 该 agent 兼容的所有供应商（不论连接与否）—— 供应商页「可用」列表用。 */
 export function providersForAgent(views: ProviderView[], agent: AgentKind): ProviderView[] {
-  return views.filter((p) => p.agents.includes(agent));
+  return views.filter((p) => hasEnabledAgentRuntime(p, agent));
 }
 
 /** 该 agent 已连接的供应商 —— 模型选择器「来源栏」用。 */
 export function connectedProvidersForAgent(views: ProviderView[], agent: AgentKind): ProviderView[] {
-  return views.filter((p) => p.connected && p.agents.includes(agent));
+  return views.filter((p) => p.connected && hasEnabledAgentRuntime(p, agent));
 }
 
 /** 该供应商是否在某 agent 下提供某 model id。 */
@@ -162,7 +168,7 @@ export function sourcesForModel(
   return views.filter(
     (p) =>
       (!onlyConnected || p.connected) &&
-      p.agents.includes(agent) &&
+      hasEnabledAgentRuntime(p, agent) &&
       providerOffersModel(p, modelId, agent),
   );
 }
@@ -260,6 +266,6 @@ export function resolveRoute(
   const model = getModel(provider, modelId, agent);
   if (!model) return null;
   const routing = provider.routing[agent];
-  if (!routing) return null;
+  if (!routing || routing.disabled) return null;
   return { provider, model, routing };
 }

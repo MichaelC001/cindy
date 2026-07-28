@@ -558,16 +558,19 @@ function GenericOAuthHeader({
   const [loggingIn, setLoggingIn] = useState(false);
   const connected = provider.connected;
   const deviceFlow = provider.auth.oauth?.flow === 'device-code';
-  const { deviceCode, clearDeviceCode, beginOwnedLogin } = useProviderOAuthDeviceCode(
-    deviceFlow ? provider.id : null,
+  const { deviceCode, clearDeviceCode, beginOwnedLogin, cancelOwnedLogin } = useProviderOAuthDeviceCode(
+    provider.id,
+    { observeProgress: deviceFlow },
   );
 
   const handleLogin = useCallback(async () => {
     clearDeviceCode();
     setLoggingIn(true);
-    const finishOwnedLogin = beginOwnedLogin();
+    const ownedLogin = beginOwnedLogin();
     try {
-      const r = await window.electronAPI.maker.providerOAuthLogin(provider.id);
+      const r = await window.electronAPI.maker.providerOAuthLogin(provider.id, {
+        ownerId: ownedLogin.ownerId,
+      });
       if (r.ok) {
         toast.success(t('settings.providers.genericOAuth.toast.loggedIn', { name: provider.name }));
         onChanged();
@@ -581,7 +584,7 @@ function GenericOAuthHeader({
     } catch {
       toast.error(t('settings.providers.genericOAuth.toast.loginFailed', { name: provider.name }));
     } finally {
-      finishOwnedLogin();
+      ownedLogin.finish();
       setLoggingIn(false);
     }
   }, [beginOwnedLogin, clearDeviceCode, onChanged, provider.id, provider.name, t]);
@@ -630,7 +633,7 @@ function GenericOAuthHeader({
       }
       onClick={() => {
         if (loggingIn) {
-          void window.electronAPI.maker.providerOAuthCancel(provider.id);
+          cancelOwnedLogin();
           clearDeviceCode();
           setLoggingIn(false);
         } else {
@@ -849,8 +852,9 @@ function CustomProviderHeader({
   const [loggingIn, setLoggingIn] = useState(false);
   const isOAuth = provider.auth.method === 'oauth' && !!provider.auth.oauth;
   const deviceFlow = provider.auth.oauth?.flow === 'device-code';
-  const { deviceCode, clearDeviceCode, beginOwnedLogin } = useProviderOAuthDeviceCode(
-    deviceFlow ? provider.id : null,
+  const { deviceCode, clearDeviceCode, beginOwnedLogin, cancelOwnedLogin } = useProviderOAuthDeviceCode(
+    isOAuth ? provider.id : null,
+    { observeProgress: deviceFlow },
   );
   const handleOAuthClick = useCallback(async () => {
     if (provider.connected) {
@@ -867,16 +871,18 @@ function CustomProviderHeader({
       return;
     }
     if (loggingIn) {
-      void window.electronAPI.maker.providerOAuthCancel(provider.id);
+      cancelOwnedLogin();
       clearDeviceCode();
       setLoggingIn(false);
       return;
     }
     clearDeviceCode();
     setLoggingIn(true);
-    const finishOwnedLogin = beginOwnedLogin();
+    const ownedLogin = beginOwnedLogin();
     try {
-      const r = await window.electronAPI.maker.providerOAuthLogin(provider.id);
+      const r = await window.electronAPI.maker.providerOAuthLogin(provider.id, {
+        ownerId: ownedLogin.ownerId,
+      });
       if (r.ok)
         toast.success(t('settings.providers.genericOAuth.toast.loggedIn', { name: provider.name }));
       else if (r.reason !== 'login_cancelled') {
@@ -887,10 +893,10 @@ function CustomProviderHeader({
     } catch {
       toast.error(t('settings.providers.genericOAuth.toast.loginFailed', { name: provider.name }));
     } finally {
-      finishOwnedLogin();
+      ownedLogin.finish();
       setLoggingIn(false);
     }
-  }, [beginOwnedLogin, clearDeviceCode, loggingIn, provider.connected, provider.id, provider.name, t]);
+  }, [beginOwnedLogin, cancelOwnedLogin, clearDeviceCode, loggingIn, provider.connected, provider.id, provider.name, t]);
 
   const trailing = (
     <div className="flex shrink-0 items-center gap-1">
@@ -1266,10 +1272,16 @@ export function ProvidersSection() {
         for (const agent of p.agents) {
           const rt = config.runtimes[agent];
           if (!rt?.baseUrl) continue;
-          const apiKey = await readCustomProviderKey(p.id, agent);
+          const authMethod =
+            p.auth.method === 'none' ? 'none'
+              : p.auth.method === 'oauth' ? 'oauth'
+                : 'apiKey';
+          const apiKey =
+            authMethod === 'apiKey' ? await readCustomProviderKey(p.id, agent) : null;
           const r = await window.electronAPI.maker.fetchProviderModels({
             agent,
             baseUrl: rt.baseUrl,
+            authMethod,
             modelsUrl: rt.modelsUrl ?? null,
             apiKey,
             ...(rt.headers ? { headers: rt.headers } : {}),
@@ -1347,14 +1359,14 @@ export function ProvidersSection() {
 
   return (
     <div className="flex flex-col gap-[14px]">
-      <div className="flex flex-col gap-1.5">
+      <div className="flex flex-col gap-1">
         <h2
-          className="text-18 font-semibold leading-[1.2]"
+          className="text-16 font-medium leading-[1.2]"
           style={{ color: 'var(--settings-section-title)' }}
         >
           {t('settings.providers.title')}
         </h2>
-        <p className="text-13 leading-snug" style={{ color: 'var(--settings-section-desc)' }}>
+        <p className="text-13 leading-[1.5]" style={{ color: 'var(--settings-section-desc)' }}>
           {t('settings.providers.subtitle')}
         </p>
       </div>

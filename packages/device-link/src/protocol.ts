@@ -99,7 +99,15 @@ export interface LinkOpenPayload {
   controllerName: string;
   protocolVersion: number;
   appVersion: string;
+  /**
+   * 控制端支持的端到端可选能力（append-only）。旧控制端缺省为空集；
+   * 被控端只有在能力明确声明时才发送对应的新 wire 字段。
+   */
+  capabilities?: string[];
 }
+
+/** 控制端能安全消费完整 ProviderLogoKind（含 #527 新增品牌）的 maker:provider:list 投影。 */
+export const CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2 = 'provider-logo-kinds-v2';
 
 export interface LinkAcceptPayload {
   appVersion: string;

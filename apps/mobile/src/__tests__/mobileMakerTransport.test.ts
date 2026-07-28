@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { REMOTE_INVOKE_ALLOWLIST } from '@cindy/device-link';
+import {
+  CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
+  REMOTE_INVOKE_ALLOWLIST,
+} from '@cindy/device-link';
 import {
   createMobileMakerTransport,
   MOBILE_MAKER_CHANNELS,
@@ -209,7 +212,9 @@ describe('mobile maker transport', () => {
     expect(calls).toEqual([{
       deviceId: 'dev-1',
       channel: 'maker:provider:list',
-      args: [],
+      args: [{
+        capabilities: [CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2],
+      }],
     }]);
   });
 

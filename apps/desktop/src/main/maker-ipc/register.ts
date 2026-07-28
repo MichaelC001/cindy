@@ -399,6 +399,7 @@ import {
 import { getActiveCatalog, setDiscoveredProviderModels } from '../maker-host/active-catalog.js';
 import { testProviderConnection } from '../maker-host/provider-diagnostics.js';
 import { fetchProviderModels } from '../maker-host/provider-model-fetch.js';
+import { beginProviderRouteMutation } from '../maker-host/provider-route.js';
 import {
   getAnthropicModelDiscoveryFailure,
   refreshAnthropicModelsFromHttp,
@@ -413,15 +414,24 @@ import {
   deriveModelsDiscoveryUrl,
   discoverGenericOAuthModels,
   logoutGenericOAuth,
+  removeGenericOAuthCredentialsReversibly,
   runGenericOAuthLogin,
 } from '../maker-host/generic-oauth.js';
 import {
   getCustomProvider,
   mergeDiscoveredModelsIntoConfig,
-  updateCustomProvider,
+  updateCustomProviderIfUnchanged,
 } from '../maker-host/custom-provider-store.js';
+import {
+  readCustomProviderKeyForMutation,
+  removeCustomProviderKey,
+  storeCustomProviderKey,
+} from '../secrets/providerSecretStore.js';
 import { setSessionEffort, setSessionFastMode } from '../maker-host/session-effort-store.js';
-import { getModelVisibilityMirrorSnapshot, setModelVisibilityMirror } from '../maker-host/model-visibility-mirror.js';
+import {
+  getModelVisibilityMirrorSnapshot,
+  syncModelVisibilityMirror,
+} from '../maker-host/model-visibility-mirror.js';
 import { setClaudeProxySessionIdResolver } from '../maker-host/anthropic-compat-proxy-host.js';
 import {
   clearClaudeSessionBackgroundActivity,
@@ -3484,6 +3494,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     listProviders: (opts) => getDesktopProviderService().listProviders(opts),
     getModelVisibilityOverrides: () => getModelVisibilityMirrorSnapshot(),
     refreshCatalog: () => refreshCustomProvidersIntoCatalog(),
+    beginRouteMutation: (providerId) => beginProviderRouteMutation(providerId),
     broadcastChanged: () => broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {}),
     listPresets: () => getActiveCatalog().presets ?? [],
     testConnection: (input) => testProviderConnection(input),
@@ -3505,10 +3516,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     scanLocalCli: () => scanLocalCliAuth(createLocalCliScanDeps()),
     // 通用 OAuth（目录 auth.oauth 描述符驱动）：login 成功后 best-effort 拉动态模型发现
     // (additions-only merge 进 active-catalog) 并广播 PROVIDER_CHANGED 让 UI 刷新连接态。
-    oauthLogin: async (providerId) => {
+    oauthLogin: async (providerId, isCurrent) => {
       const provider = getActiveCatalog().providers.find((p) => p.id === providerId);
       const oauth = provider?.auth.oauth;
       if (!provider || !oauth) throw new Error(`provider '${providerId}' has no oauth descriptor`);
+      let rollbackCredentials: (() => boolean) | undefined;
       const result = await runGenericOAuthLogin(
         { id: provider.id, name: provider.name },
         oauth,
@@ -3518,9 +3530,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
               providerId,
               ...progress,
             }),
+          onCredentialPersisted: (rollback) => {
+            rollbackCredentials = rollback;
+          },
         },
       );
-      if (result.ok) {
+      if (result.ok && isCurrent()) {
         // 授权成功后按 agent 自动发现模型（与内置订阅体验统一,用户不必手填模型）:
         // 发现端点 = 描述符显式声明 ?? 由该 runtime 的 baseUrl 推导（…/v1/models）。
         // 自定义供应商的发现结果 additions-only 持久化进配置（重启后仍在）;内置供应商走
@@ -3529,22 +3544,29 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
           const fetched = new Map<string, { id: string; name: string }[] | null>();
           let customChanged = false;
           for (const agent of provider.agents) {
+            if (!isCurrent()) break;
             const upstream = provider.routing[agent]?.upstream;
             const url = oauth.modelsDiscoveryUrl ?? (upstream ? deriveModelsDiscoveryUrl(upstream) : null);
             if (!url) continue;
             // 去重键含 agent:发现请求头按 wire 分派(cc 带 anthropic-version),同 URL 不同 wire 不能共用响应。
             const key = `${agent}\n${url}`;
             if (!fetched.has(key)) fetched.set(key, await discoverGenericOAuthModels(providerId, oauth, url, agent));
+            if (!isCurrent()) break;
             const models = fetched.get(key);
             if (!models || models.length === 0) continue;
             if (provider.source === 'user') {
               const cfg = await getCustomProvider(providerId);
-              const nextCfg = cfg ? mergeDiscoveredModelsIntoConfig(cfg, agent, models) : null;
-              if (nextCfg) {
-                await updateCustomProvider(providerId, nextCfg);
-                customChanged = true;
+              if (!isCurrent()) break;
+              if (cfg) {
+                const nextCfg = mergeDiscoveredModelsIntoConfig(cfg, agent, models);
+                if (nextCfg) {
+                  const applied = await updateCustomProviderIfUnchanged(providerId, cfg, nextCfg);
+                  if (!isCurrent()) break;
+                  if (applied) customChanged = true;
+                }
               }
             } else {
+              if (!isCurrent()) break;
               setDiscoveredProviderModels(
                 providerId,
                 agent,
@@ -3560,19 +3582,28 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
               );
             }
           }
-          if (customChanged) await refreshCustomProvidersIntoCatalog();
+          if (customChanged && isCurrent()) await refreshCustomProvidersIntoCatalog();
         } catch {
           /* 发现失败保持纯静态目录，不影响登录结果 */
         }
-        broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
+        if (isCurrent()) broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
       }
-      return result;
+      return {
+        ...result,
+        ...(rollbackCredentials ? { rollbackCredentials } : {}),
+      };
     },
+    readCustomProviderKeyForMutation,
+    storeCustomProviderKey,
+    removeCustomProviderKey,
     oauthLogout: async (providerId) => {
-      logoutGenericOAuth(providerId);
+      if (!logoutGenericOAuth(providerId)) {
+        throw new Error('failed to remove generic OAuth credentials');
+      }
     },
     oauthCancel: (providerId) => cancelGenericOAuthLogin(providerId),
-    clearOAuthCredentials: (providerId) => logoutGenericOAuth(providerId),
+    removeOAuthCredentials: (providerId) =>
+      removeGenericOAuthCredentialsReversibly(providerId),
   });
 
   // 自定义 MCP 服务器 CRUD —— CRUD 成功后刷新两个 agent 的 mcpProviders 数组
@@ -4235,7 +4266,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       return clientId;
     },
     applyResumeFallbackAtomically: applyAgentSwitchResumeFallbackAtomically,
-    setPendingHandoff: (sessionId, handoff) => agentHandoffPending.set(sessionId, handoff),
+    setPendingHandoff: (sessionId, handoff, expectedGeneration) =>
+      agentHandoffPending.set(sessionId, handoff, expectedGeneration),
+    readPendingHandoffGeneration: (sessionId) => agentHandoffPending.readGeneration(sessionId),
     bootstrapSwitchedSession: async (sessionId) => {
       // 切换已提交,从 DB 行(新引擎值)重建 live session。resumeSessionId 直接取
       // 行上的 sdk_session_id:切换事务在有停泊绑定时已把它落成停泊 id(Phase 2
@@ -4299,7 +4332,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     hasBackgroundActivity: getClaudeSessionBackgroundActivity,
     closeSession: (sessionId) => maker.closeSession(sessionId),
     commitDeletion: commitMessageDeletion,
-    setPendingHandoff: (sessionId, handoff) => agentHandoffPending.set(sessionId, handoff),
+    setPendingHandoff: (sessionId, handoff, expectedGeneration) =>
+      agentHandoffPending.set(sessionId, handoff, expectedGeneration),
+    readPendingHandoffGeneration: (sessionId) => agentHandoffPending.readGeneration(sessionId),
     onCommitted: (
       { sessionId, deletedClientIds, updatedAt, preview, messageCount },
       requestedClientId,
@@ -6974,21 +7009,44 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     });
     const projection = inputCoordinator.clearSession(sid, clearBoundary);
     silentStopAutoResumeGuard.noteSessionReset(sid);
+    // 丢弃缓存的待注入交接 / fork 来源标记:它们是按 clear 之前的历史算出来的,
+    // DB 侧的 cleared_at 抑制拦不住已经落进 registry 内存的那一份(首发被拒后
+    // 缓存仍在),下次 send 会把旧血缘灌进用户刚显式清空的上下文。
+    //
+    // 用 invalidate(留 null 墓碑)而不是 clear(删条目):删条目会让后续 send 回落到
+    // DB 重建,把旧交接捞回来再缓存住。墓碑同步生效,窗口内的 send 立刻拿到 null;
+    // clear 纪元则要等下面 cleared_at 落库之后才推进。
+    agentHandoffPending.invalidate(sid);
     getAgentIslandService()?.notifyQueueEmptied(sid);
     // 清上下文后,active 目标失去其依据(objective 引用的内容已被抹掉)→ 一并清除目标。
     goalClearObserver?.(sid);
-    if (remoteInvoke) {
-      const clearBoundaryMs =
-        typeof clearBoundary === 'number'
-          ? clearBoundary
-          : new Date(clearBoundary).getTime();
-      await clearSessionContextInDb(sid, clearBoundaryMs).catch((err) => {
-        log.warn('remote clear session context persist failed', {
-          sessionId: sid,
-          err: err instanceof Error ? err.message : String(err),
-        });
+    // cleared_at 在 handler 内**同步**落库,本地与远程同一口径。
+    //
+    // 过去本地路径只靠 renderer 事后 fire-and-forget 写这一列,于是 handler 返回到那次
+    // 写入落库之间有个窗口:此刻启动的引擎切换 / 消息删除会读到**尚未标记 clear**的
+    // DB 历史,却又拿到 clear 之后的纪元——纪元校验因此形同虚设,基于已清空历史算出的
+    // 交接会盖掉刚立的墓碑。在这里同步写掉,那个窗口就不存在了;renderer 之后若再写一次
+    // 也是同值幂等。
+    const clearBoundaryMs =
+      typeof clearBoundary === 'number'
+        ? clearBoundary
+        : new Date(clearBoundary).getTime();
+    try {
+      await clearSessionContextInDb(sid, clearBoundaryMs);
+    } catch (err) {
+      // 落库失败不阻断 /clear:内存墓碑已经立了,这一次以及后续 send 都拿不到旧交接。
+      // 残余风险是 DB 里没有 cleared_at,进程重启后 findPendingAgentHandoff 可能把
+      // clear 之前的交接重建出来——renderer 侧随后还会写一次同值(sdkSessionId + clearedAt),
+      // 那是这里的第二次机会。用 error 级别,便于事后从日志确认是否走到过这条路。
+      log.error('clear session context persist failed', {
+        sessionId: sid,
+        remoteInvoke,
+        err: err instanceof Error ? err.message : String(err),
       });
     }
+    // 落库尝试结束后封边界:重立墓碑(清掉这段 await 里用 clear 前纪元挤进来的那份)
+    // + 推进纪元(挡住后面才写回的那批)。顺序不可颠倒,理由见 sealClearBoundary 注释。
+    agentHandoffPending.sealClearBoundary(sid);
     return projection;
   });
 
@@ -7226,10 +7284,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
   });
 
   // renderer → main 单向镜像「模型显示/隐藏」override(整张快照,fire-and-forget,不落盘)。
-  // main 缓存供 IM /model 派生模型列表时复用同一套可见性过滤,与应用内列表逐模型一致。
+  // main 缓存供 IM /model 与 device-link provider:list 复用同一套可见性过滤。值实变时
+  // 复用 PROVIDER_CHANGED 目录失效事件，让已连接控制端驱逐缓存并重拉 override 快照。
   // 容错存储(非对象 ⇒ 清空),无错误路径,故不需要 throwIpcError。
   ipcMain.handle(MAKER_INVOKE.MODEL_VISIBILITY_SYNC, async (_e, map: unknown) => {
-    setModelVisibilityMirror(map);
+    syncModelVisibilityMirror(map, () => {
+      broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
+    });
   });
 
   // 附加只读引用目录的运行时 closure 推送。DB 持久化由 renderer 同步调

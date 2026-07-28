@@ -33,7 +33,11 @@ export type {
 export { BUNDLED_CATALOG, BUILTIN_PROVIDERS, parseCatalog, presetDisplayName, sanitizePresets, sortPresetsForLocale } from './catalog.js';
 
 export { buildUserProvider, DEFAULT_CUSTOM_CONTEXT_WINDOW } from './user-provider.js';
-export { appendProviderRequestPath, isProviderRequestPath } from './provider-url.js';
+export {
+  appendProviderRequestPath,
+  isLoopbackProviderUrl,
+  isProviderRequestPath,
+} from './provider-url.js';
 export { findReservedOAuthExtraParam } from './provider-oauth.js';
 
 export {

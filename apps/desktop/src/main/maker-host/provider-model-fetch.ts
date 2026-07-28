@@ -11,7 +11,7 @@
  *   - fetch 可注入（单测不联网）。
  */
 
-import type { AgentKind } from '@cindy/model-providers';
+import { isLoopbackProviderUrl, type AgentKind } from '@cindy/model-providers';
 
 import {
   classifyProviderError,
@@ -29,6 +29,8 @@ const MAX_ERROR_BODY_BYTES = 16 * 1024;
 export interface ProviderModelsFetchSpec {
   agent: AgentKind;
   baseUrl: string;
+  /** 表单态鉴权方式；main IPC 用它强制 none 只访问 loopback。 */
+  authMethod?: 'apiKey' | 'oauth' | 'none';
   /** 显式列模型端点（预设 / 配置的 modelsUrl）；缺省由 baseUrl 推导 `…/v1/models`。 */
   modelsUrl?: string | null;
   /** 用户 API key；缺省 = 不注入鉴权头（端点可能靠自定义 headers 鉴权）。 */
@@ -72,7 +74,9 @@ function withoutCredentialHeaders(
 
 /** 构造列模型请求（纯函数，单测直断言）。鉴权头组合与 buildProbeRequest 同口径。 */
 export function buildModelsFetchRequest(spec: ProviderModelsFetchSpec): { url: string; init: RequestInit } {
-  const headers: Record<string, string> = spec.apiKey
+  const mustStripCredentialHeaders =
+    !!spec.apiKey || spec.authMethod === 'none' || spec.authMethod === 'oauth';
+  const headers: Record<string, string> = mustStripCredentialHeaders
     ? withoutCredentialHeaders(spec.headers)
     : { ...(spec.headers ?? {}) };
   if (spec.agent === 'claude-code') {
@@ -110,6 +114,19 @@ export async function fetchProviderModels(
   spec: ProviderModelsFetchSpec,
   fetchImpl: typeof fetch = outboundFetch,
 ): Promise<ProviderModelsFetchResult> {
+  if (
+    spec.authMethod === 'none'
+    && (
+      !isLoopbackProviderUrl(spec.baseUrl)
+      || (!!spec.modelsUrl?.trim() && !isLoopbackProviderUrl(spec.modelsUrl.trim()))
+    )
+  ) {
+    return {
+      ok: false,
+      code: 'UNKNOWN',
+      detail: 'no-auth provider model discovery requires loopback URLs',
+    };
+  }
   const { url, init } = buildModelsFetchRequest(spec);
   let res: Response;
   try {

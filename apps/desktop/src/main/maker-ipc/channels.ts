@@ -380,8 +380,8 @@ export const MAKER_INVOKE = {
    */
   PROVIDER_LIST: 'maker:provider:list',
   /**
-   * 自定义模型供应商 CRUD（配置入 localDb，密钥另走通用 safe-storage IPC）。
-   * create/update 入参 = CustomProviderConfig；delete 入参 = providerId。
+   * 自定义模型供应商 CRUD（配置入 localDb；update 的 runtime 密钥与配置原子排队）。
+   * create/update 入参 = config + runtimeKeys；delete 入参 = providerId。
    * 成功后 main 重算 active-catalog 并广播 PROVIDER_CHANGED（见 MAKER_PUSH）。
    */
   PROVIDER_CUSTOM_CREATE: 'maker:provider:custom:create',

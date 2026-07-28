@@ -13,6 +13,7 @@ import { readCachedGenericOAuthAccessToken } from '../maker-host/generic-oauth.j
 import { outboundUndiciFetch as undiciFetch } from '../maker-host/outbound-fetch.js';
 import { claudeUpstreamEndpoint } from '../maker-host/runtime-configs.js';
 import { getActiveCatalog } from '../maker-host/active-catalog.js';
+import { isProviderRouteMutationInProgress } from '../maker-host/provider-route.js';
 import { effectiveXdGatewayBaseUrl } from '../model-access/effectiveEndpoint.js';
 import { readCustomProviderKey } from '../secrets/providerSecretStore.js';
 import { getUtilityModelChainProfiles } from './UtilityModelSelection.js';
@@ -235,6 +236,19 @@ async function requestExplicitProviderText(
       }],
     };
   }
+  if (isProviderRouteMutationInProgress(provider.id)) {
+    return {
+      ok: false,
+      reason: 'all_candidates_failed',
+      attempts: [{
+        providerId: provider.id,
+        model,
+        transport,
+        status: 'failed',
+        reason: 'request_failed',
+      }],
+    };
+  }
   if (!model) {
     return {
       ok: false,
@@ -262,7 +276,7 @@ async function requestExplicitProviderText(
     };
   }
 
-  if (provider.source !== 'user') {
+  if (provider.id === 'xd' || provider.id === 'anthropic' || provider.id === 'openai' || provider.id === 'xai') {
     return requestBuiltinProviderText(prompt, {
       provider,
       agentKind,
@@ -274,6 +288,19 @@ async function requestExplicitProviderText(
   }
 
   const routing = provider.routing[agentKind];
+  if (routing?.disabled) {
+    return {
+      ok: false,
+      reason: 'no_candidate',
+      attempts: [{
+        providerId: provider.id,
+        model,
+        transport,
+        status: 'skipped',
+        reason: 'endpoint_missing',
+      }],
+    };
+  }
   if (
     routing?.authStrategy !== 'api-key-header'
     && routing?.authStrategy !== 'oauth-token'

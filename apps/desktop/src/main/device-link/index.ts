@@ -15,6 +15,7 @@ import { app, BrowserWindow } from 'electron';
 import WebSocket from 'ws';
 import {
   DeviceLinkClient,
+  CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
   DL_SUBSCRIBE_CHANNEL,
   DL_UNSUBSCRIBE_CHANNEL,
   type DeviceLinkConnectionIssue,
@@ -50,6 +51,7 @@ import { keepAwakeController } from './power-blocker';
 import {
   wireInboundDispatch,
   setControllersChangedListener,
+  setRemoteInvokeBusyChangedListener,
   dropAllControllers,
   handleControllerOffline,
 } from './dispatch';
@@ -214,7 +216,12 @@ function wsUrl(): string {
   return deviceLinkApiBase().replace(/^http/, 'ws') + WS_PATH;
 }
 
-export function initDeviceLinkService(): void {
+/** Host integrations that consume device-link lifecycle state. */
+export interface DeviceLinkServiceOptions {
+  onUpdateRelaunchBusyChanged?: (busy: boolean) => void;
+}
+
+export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): void {
   // 「保持电脑唤醒」按持久化偏好在启动时应用(与登录 / relay 无关,幂等)。
   const initialKeepAwake = readDeviceLinkSettings().keepAwake;
   keepAwakeController.apply(initialKeepAwake);
@@ -306,13 +313,25 @@ export function initDeviceLinkService(): void {
     }
   });
 
+  let updateRelaunchControllersBusy = false;
+  let remoteInvokeBusy = false;
+  const notifyUpdateRelaunchBusy = (): void => {
+    options.onUpdateRelaunchBusyChanged?.(updateRelaunchControllersBusy || remoteInvokeBusy);
+  };
+
+  // 先注册远程活动监听，再接线入站帧；否则首个 subscribe / invoke 可能落在空窗期。
+  setControllersChangedListener((controllers, updateRelaunchControllers) => {
+    broadcast(DEVICE_LINK_PUSH.CONTROLLED_STATE, { controllers });
+    updateRelaunchControllersBusy = updateRelaunchControllers.length > 0;
+    notifyUpdateRelaunchBusy();
+  });
+  setRemoteInvokeBusyChangedListener((busy) => {
+    remoteInvokeBusy = busy;
+    notifyUpdateRelaunchBusy();
+  });
+
   // 被控端:接线入站隧道(link-open / invoke / link-close → 本机 handler dispatch)
   wireInboundDispatch(client);
-
-  // 被控端可见性:控制端集合变化 → 广播给 renderer 状态条
-  setControllersChangedListener((controllers) => {
-    broadcast(DEVICE_LINK_PUSH.CONTROLLED_STATE, { controllers });
-  });
 
   // busy presence:每 5s 探一次本机是否有 turn 在跑,变化才上报(dedupe by value)
   startBusyReporting();
@@ -428,6 +447,7 @@ export function initDeviceLinkService(): void {
     // 已由上面 stop() 的 onDemote 执行过一次,linkTornDown 标记拦截重复清理。
     teardownActiveLink();
     setControllersChangedListener(null);
+    setRemoteInvokeBusyChangedListener(null);
     client = null;
   });
 
@@ -737,6 +757,7 @@ export async function openRemoteLink(deviceId: string): Promise<LinkAcceptPayloa
     controllerName: deviceName(),
     protocolVersion: 1,
     appVersion: app.getVersion(),
+    capabilities: [CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2],
   });
   openLinkInFlight.set(deviceId, request);
   const cleanup = (): void => {
@@ -786,7 +807,11 @@ export async function remoteSubscribe(
   if (!client) throw new Error('[DEVICE_LINK_NOT_CONNECTED] device-link client not initialized');
   return client.invoke(deviceId, {
     channel: DL_SUBSCRIBE_CHANNEL,
-    args: [{ topics, controllerName: deviceName() }],
+    args: [{
+      topics,
+      controllerName: deviceName(),
+      capabilities: [CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2],
+    }],
   });
 }
 

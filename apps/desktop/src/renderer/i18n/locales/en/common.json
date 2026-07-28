@@ -356,10 +356,20 @@
       "localThemes": {
         "title": "Local themes",
         "export": "Create local copy",
+        "import": "Import VSCode / Obsidian theme",
         "openDir": "Open themes folder",
         "refresh": "Refresh",
         "exportSuccess": "Created {{file}}. Replace the example image paths, save, then click \"Refresh\".",
         "exportFailed": "Export failed: {{error}}",
+        "importSuccess": "Imported {{name}} ({{themeCount}} variant(s)). Pick it in the theme list above.",
+        "importPartial": "Imported {{name}} ({{themeCount}} variant(s)). {{skipped}} semantic colors stay unchanged per spec, {{unresolved}} values could not be read, and {{derived}} roles were approximated from nearby colors.",
+        "importFailed": "Import failed: {{error}}",
+        "importUnsupported": "This file is not a recognizable VSCode or Obsidian theme.",
+        "importUsesInclude": "This VSCode theme inherits colors via \"include\" and cannot be imported standalone.",
+        "importNotAFile": "Select a file, not a folder.",
+        "importTooLarge": "File is too large to import as a theme.",
+        "importWriteError": "Could not save the theme. Check disk space and permissions.",
+        "importInternalError": "The file could not be read or processed. Try selecting it again.",
         "openDirFailed": "Failed to open folder: {{error}}",
         "refreshed": "Local themes refreshed"
       },
@@ -654,6 +664,12 @@
       "analyticsSaveFailed": "Failed to save usage statistics settings",
       "debugLogLabel": "Debug logs",
       "debugLogDescription": "When enabled, emits verbose debug logs: main/maker logger raised to debug level; new Claude Code sessions also log API request URL/status/latency, Node-level DNS/TCP/TLS handshake timing, and SDK internals. Output is large — turn off after troubleshooting. Always on in dev mode.",
+      "legal": {
+        "termsOfServiceLabel": "Terms of Service",
+        "privacyPolicyLabel": "Privacy Policy",
+        "viewDocument": "View {{document}}",
+        "openFailed": "Unable to open the document. Check your system browser settings."
+      },
       "social": {
         "title": "Connect with Cindy",
         "discordLabel": "Discord",
@@ -1213,6 +1229,8 @@
           "wireProtocol": "Upstream protocol",
           "baseUrl": "Base URL",
           "baseUrlPlaceholder": "https://api.myprovider.com/v1",
+          "requestPath": "Exact request path (optional)",
+          "requestPathHelp": "Leave empty to use the standard path for the selected protocol. Enter a path beginning with / only when the provider uses a non-standard inference endpoint.",
           "apiKey": "API key",
           "apiKeyPlaceholder": "API key",
           "apiKeyEditPlaceholder": "Unchanged (saved)",
@@ -1244,8 +1262,9 @@
           "nameRequired": "Display name is required",
           "runtimeRequired": "Configure at least one runtime (its base URL and models)",
           "baseUrlInvalid": "Base URL must be a valid http(s) address",
+          "requestPathInvalid": "Begin the exact request path with a single /. Do not use fragments or . and .. path segments; percent-encode spaces and unsafe characters.",
           "modelRequired": "Add at least one model",
-          "oauthInvalid": "Incomplete OAuth config: all four fields are required and both endpoints must be https URLs"
+          "oauthInvalid": "Incomplete OAuth config: all fields are required and both endpoints must be secure https URLs"
         },
         "toast": {
           "created": "Provider added",
@@ -1287,9 +1306,17 @@
           "label": "Authentication",
           "apiKey": "API key",
           "oauth": "OAuth subscription",
-          "oauthHelp": "For subscription providers offering OAuth sign-in. After saving, click \"Authorize\" in the provider list to sign in via browser. Credentials are stored encrypted on this device only.",
+          "none": "No authentication",
+          "noneHelp": "For local or trusted self-hosted proxies. Cindy removes the CLI's subscription credentials and account headers before forwarding requests.",
+          "oauthHelp": "For providers offering OAuth sign-in. Choose a browser callback or device code flow, then authorize from the provider list. Credentials are stored encrypted on this device only.",
+          "flowLabel": "OAuth flow",
+          "flow": {
+            "authorization-code": "Browser callback (PKCE)",
+            "device-code": "Device code"
+          },
           "fields": {
             "authorizeUrl": "Authorize URL",
+            "deviceAuthorizationUrl": "Device authorization URL",
             "tokenUrl": "Token URL",
             "clientId": "Client ID",
             "scopes": "Scopes (space-separated)"
@@ -1377,14 +1404,17 @@
         "stepModels": "Choose models",
         "searchPlaceholder": "Search providers…",
         "groupSubscription": "Subscription sign-in · recommended",
-        "groupApiKey": "API key providers · presets update with the catalog",
+        "groupApiKey": "API and self-hosted proxies · presets update with the catalog",
         "groupCustom": "Custom",
         "metaOAuth": "Subscription (OAuth)",
         "metaApiKey": "API key",
+        "metaNoAuth": "Local / self-hosted · no authentication",
         "customTitle": "Custom endpoint",
         "customMeta": "Connect any OpenAI / Anthropic compatible source",
         "pickHint": "The sign-in method is defined by each provider; OAuth endpoints and base URLs come from presets — nothing to fill in by hand.",
         "oauthDesc": "Authorize your subscription in the browser — no API key needed",
+        "deviceOAuthDesc": "Authorize on the provider's verification page with a one-time device code",
+        "authorizeInBrowser": "Authorize in browser",
         "authorizeWithDeviceCode": "Use device code",
         "preparingDeviceCode": "Preparing a device code…",
         "deviceCodePrompt": "Enter this one-time device code on the verification page:",
@@ -1398,10 +1428,16 @@
         "authorizeFailed": "Failed to authorize {{name}}. Please try again",
         "nameLabel": "Display name",
         "onlyAgentNote": "This provider only supports {{agent}}",
+        "endpointLabel": "{{agent}} base URL",
+        "noAuthNote": "This proxy needs no client key; Cindy removes CLI subscription credentials before forwarding.",
         "bridgedNote": "Cindy bridge (Chat Completions)",
         "docsLink": "View setup docs",
         "fetching": "Verifying connection and fetching models…",
         "fetchFailed": "Couldn't fetch the model list — you can finish with the preset's recommended models and refresh later in details",
+        "manualModelHint": "No models were discovered. Enter the exact model ID exposed by this proxy.",
+        "manualModelLabel": "{{agent}} model ID",
+        "manualModelPlaceholder": "e.g. local-model",
+        "addManualModel": "Add model",
         "recommended": "Recommended",
         "modelsHint": "Checked models appear in the chat model picker and apply to every CLI where they're available; adjust anytime in provider details.",
         "noModelSelected": "Select at least one model",
@@ -3107,7 +3143,10 @@
       "errorBody": "Please return to {{appName}} and sign in again.",
       "returnButton": "Return to {{appName}}"
     },
-    "globalRegion": "Global",
+    "regionPill": {
+      "cn": "CN",
+      "dev": "Dev"
+    },
     "errors": {
       "fallback": "Sign-in failed. Please try again.",
       "AUTH_SERVICE_UNAVAILABLE": "The sign-in service is temporarily unavailable.",
@@ -4851,7 +4890,8 @@
       "agentSwitch": {
         "label": "Switched from {{from}} to {{to}}",
         "toggleHint": "View handoff context",
-        "handoffTitle": "Handoff — the context summary sent to the new engine at switch time (never shown in your messages)",
+        "handoffTitle": "Handoff — the context summary sent to the new engine at switch time (not part of the chat transcript; shown only here)",
+        "handoffTitleEnglishSource": "Handoff — the context summary sent to the new engine at switch time (not part of the chat transcript; shown only here)",
         "resumedBadge": "session resumed"
       }
     },
@@ -6426,6 +6466,9 @@
       "identityGithubUser": "Submitting identity: GitHub user @{{login}} (you)",
       "identityPlatform": "Submitting identity: Cindy platform (GitHub App {{login}})",
       "envLine": "Attached automatically on submit: client {{appVersion}} · {{platform}} {{arch}} · UI language {{uiLanguage}}",
+      "regionLine": "Build region: {{region}}",
+      "regionCodeCn": "CN",
+      "regionCodeDev": "Dev",
       "submit": "Submit",
       "cancel": "Cancel"
     },
