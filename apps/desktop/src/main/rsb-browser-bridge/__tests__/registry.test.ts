@@ -74,6 +74,26 @@ describe('TabRegistry — report / lookup / release', () => {
     expect(registry.listBySession('s2')).toHaveLength(0);
   });
 
+  it('findByWebContentsId reverse-looks-up the owning tab record', () => {
+    const { registry, wcMap } = buildRegistry();
+    wcMap.set(101, fakeWc(101));
+    wcMap.set(102, fakeWc(102));
+    registry.report({ sessionId: 's1', tabId: 't1', webContentsId: 101 });
+    registry.report({ sessionId: 's2', tabId: 't2', webContentsId: 102 });
+
+    expect(registry.findByWebContentsId(101)).toEqual({
+      sessionId: 's1',
+      tabId: 't1',
+      webContentsId: 101,
+    });
+    expect(registry.findByWebContentsId(102)?.sessionId).toBe('s2');
+    expect(registry.findByWebContentsId(999)).toBeNull();
+
+    // release 后反查同步失联 —— popup 路由不能拿到 stale 归属。
+    registry.release('t1');
+    expect(registry.findByWebContentsId(101)).toBeNull();
+  });
+
   it('release drops the record and detaches the destroyed listener', () => {
     const { registry, wcMap } = buildRegistry();
     const wc = fakeWc(101);

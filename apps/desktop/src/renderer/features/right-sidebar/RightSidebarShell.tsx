@@ -54,6 +54,8 @@ import type { TabKindHostContext, TabKindId, TabState } from './types';
 // getTabKind 查 registry。
 import './plugins';
 import { initRsbBrowserBridge } from './lib/rsbBrowserBridge';
+import { markPopupSpawnedTab } from './lib/popupTabs';
+import { requestRightSidebarVisibility } from './lib/sidebarCommands';
 
 const log = createLogger('rightSidebar.shell');
 /**
@@ -339,11 +341,19 @@ export function RightSidebarShell({
   // target=_blank / window.location 跨 host 时,把 popup URL 路由到一个新的
   // web-browser RSB tab(对齐 Codex `main-cC-d0ezP.js:48849` 的 foreground/
   // background-tab 智能路由,简化版:都开前台 tab)。
-  // 注:sessionId 为 null 时(刚 mount 还没拿到 session)推上来的 popup 暂时丢弃 ——
-  // RSB 自身在没 sessionId 时也不显示,用户也看不到 webview,实际不会触发 popup。
+  //
+  // 归属:优先 payload 的 openerSessionId(main 按发起方 guest 的 webContentsId
+  // 从 TabRegistry 反查)。agent 在后台 session 操作的 eager-spawn webview 也会
+  // 触发 popup——没有 opener 归属时它会落进"用户正在看的 session",串会话;有
+  // openerSessionId 时落进 opener 的 bucket,跨 session 场景只写存档不动当前 UI
+  // (交给 MainLayout 的 visibility 分支)。
+  // 已知边界:本订阅随 Shell 的 sessionId 存在——用户在草稿页等无 session 路由
+  // 时推上来的 popup 仍被丢弃(与修复前行为一致,丢弃优于落错 session)。要消除
+  // 这个盲区需要把订阅挪到窗口级常驻位置,留作 follow-up。
   useEffect(() => {
     if (!sessionId) return;
-    const off = window.electronAPI.onRsbBrowserPopup(({ url }) => {
+    const off = window.electronAPI.onRsbBrowserPopup(({ url, openerSessionId }) => {
+      const targetSessionId = openerSessionId ?? sessionId;
       // 给新 tab 一份完整 default state,只把 url 替换成 popup URL;hydrateState
       // 会把缺字段补回默认。background-tab disposition 暂不区分,统一前台打开;
       // 日后要支持后台 tab 时再按 disposition 分支选 setActive。
@@ -353,8 +363,20 @@ export function RightSidebarShell({
         favicon: null,
         isAudible: false,
       };
-      void addTab(sessionId, 'web-browser', initialState).catch((err) => {
-        log.error('rsb popup → addTab failed', { sessionId, url, err });
+      void (async () => {
+        if (targetSessionId !== sessionId) {
+          // 跨 session 写 bucket 前必须先水合(store 契约:未水合先写会把 DB 里
+          // 既有 tab 永久挡在本 renderer 外,见 rsbBrowserBridge.handleTabOpRequest)。
+          await ensureHydrated(targetSessionId);
+        }
+        const newTab = await addTab(targetSessionId, 'web-browser', initialState);
+        markPopupSpawnedTab(newTab.id);
+        if (targetSessionId !== sessionId) {
+          // 目标 session 不在前台:只写它的折叠存档,用户切回去时侧栏已展开。
+          requestRightSidebarVisibility('open', { sessionId: targetSessionId });
+        }
+      })().catch((err) => {
+        log.error('rsb popup → addTab failed', { sessionId: targetSessionId, url, err });
       });
     });
     return off;

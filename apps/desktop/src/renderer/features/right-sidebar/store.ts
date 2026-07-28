@@ -341,6 +341,19 @@ export function getBucket(sessionId: string | null | undefined): TabBucket {
   return cache.get(sessionId) ?? EMPTY_BUCKET;
 }
 
+/**
+ * 按 tabId 反查所属 sessionId(只扫已水合进本 renderer 的 bucket)。
+ * guest 自关(window.close)路径用:pool 的 close 事件只带 tabId,要落到
+ * closeTab(sessionId, tabId) 必须先找回归属。线性扫 cache —— bucket 数 =
+ * 本 renderer 摸过的 session 数,量级个位到十位,无需索引。
+ */
+export function findSessionIdByTabId(tabId: string): string | null {
+  for (const [sessionId, bucket] of cache) {
+    if (bucket.tabs.some((t) => t.id === tabId)) return sessionId;
+  }
+  return null;
+}
+
 /** 首次访问 sessionId 触发 IPC list 拉取;后续命中 cache 即 noop。dedupe 并发请求。 */
 export async function ensureHydrated(sessionId: string): Promise<void> {
   if (!sessionId) return;

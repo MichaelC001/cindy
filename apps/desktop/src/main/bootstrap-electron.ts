@@ -165,7 +165,7 @@ import { createAccountDeletionIpcHandlers } from './accountDeletionIpc';
 import * as profileEdit from './profileEdit';
 import { uploadPublicAsset } from './ossPublicUpload';
 import { removeRefs as removeMediaRefs } from './cindy-media/ledger';
-import { installWebviewHardener } from './webview-security';
+import { installWebviewHardener, setRsbPopupOpenerResolver } from './webview-security';
 import {
   installSelectionContextMenu,
   setSelectionContextMenuLocale,
@@ -1076,6 +1076,12 @@ registerRsbBrowserBridgeIpc({
   registry: getRsbBrowserBridge(),
   getHostWebContents: () => rsbWindowController.getHostWebContents(),
   logger: createLogger('rsb-browser-bridge-bootstrap'),
+});
+// popup opener 反查:webview-security 的 popup 路由据此把 window.open 的目标
+// tab 归属到发起方 tab 的 session(而不是用户正在看的 session)。
+setRsbPopupOpenerResolver((webContentsId) => {
+  const record = getRsbBrowserBridge().findByWebContentsId(webContentsId);
+  return record ? { tabId: record.tabId, sessionId: record.sessionId } : null;
 });
 // Tab-op result handler for the main → renderer request/response bridge —
 // RsbWebviewBackend (Phase 3) uses this to drive `open` / `focus` / `close`

@@ -271,6 +271,29 @@ describe('installDeferredPopupRouter', () => {
     });
     expect(popupWindow.close).toHaveBeenCalledTimes(1);
   });
+
+  it('carries opener attribution through to the routed payload when provided', () => {
+    // popup 归属修复:payload 带 openerTabId / openerSessionId 时,renderer 端
+    // 才能把 popup tab 落进发起方 session 的 bucket,而不是用户正在看的 session。
+    vi.useFakeTimers();
+    const { childContents, hostContents, popupWindow } = makePopupHarness();
+
+    installDeferredPopupRouter(
+      hostContents,
+      popupWindow as unknown as BrowserWindow,
+      'foreground-tab',
+      { openerTabId: 'tab-1', openerSessionId: 'session-a' },
+    );
+
+    childContents.emit('will-navigate', {}, 'https://accounts.example.com/oauth');
+
+    expect(hostContents.send).toHaveBeenCalledWith(RSB_BROWSER_POPUP_CHANNEL, {
+      url: 'https://accounts.example.com/oauth',
+      disposition: 'foreground-tab',
+      openerTabId: 'tab-1',
+      openerSessionId: 'session-a',
+    });
+  });
 });
 
 describe('resolveGuestShortcutAction', () => {

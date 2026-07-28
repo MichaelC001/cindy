@@ -1936,11 +1936,18 @@ interface ElectronAPI {
   /**
    * RSB web-browser plugin popup 路由订阅。guest webview 内 `window.open` /
    * `<a target="_blank">` / window.location 跨 host 时,main 端 webview-security
-   * setWindowOpenHandler 把 url + disposition 推过来,renderer 端 RightSidebarShell
-   * 收到后调 store.addTab 开新 web-browser tab。
+   * setWindowOpenHandler 把 url + disposition(+ opener 归属,按发起方 guest 的
+   * webContentsId 从 TabRegistry 反查)推过来,renderer 端 RightSidebarShell
+   * 收到后调 store.addTab 开新 web-browser tab——有 openerSessionId 时落进该
+   * session 的 bucket,而不是用户正在看的 session。
    */
   onRsbBrowserPopup: (
-    callback: (payload: { url: string; disposition: string }) => void,
+    callback: (payload: {
+      url: string;
+      disposition: string;
+      openerTabId?: string;
+      openerSessionId?: string;
+    }) => void,
   ) => () => void;
 
   /**

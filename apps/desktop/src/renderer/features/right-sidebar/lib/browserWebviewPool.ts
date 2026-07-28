@@ -125,6 +125,11 @@ class BrowserWebviewPoolImpl {
     webview.setAttribute('allowpopups', 'true');
     // webview 元素自身透明 —— 灰底兜底交给 wrapper 处理(见上方注释)。
     webview.setAttribute('style', 'flex:1;width:100%;height:100%;');
+    // guest `window.close()` → webview 'close' DOM 事件。监听挂在 pool 层而不是
+    // useBrowserWebview:hook 只在 tab 被用户看着时才 mount,而 OAuth callback 页
+    // 的自关可能发生在后台 tab(eager-spawn / 用户已切走)。谁来关、允不允许关
+    // 由订阅方(rsbBrowserBridge,带 popup-spawned 判定)决定,pool 只负责广播。
+    webview.addEventListener('close', () => this.fireGuestClose(tabId));
     wrapper.appendChild(webview);
     container.appendChild(wrapper);
 
@@ -216,6 +221,17 @@ class BrowserWebviewPoolImpl {
   }
 
   /**
+   * 订阅 guest 自关事件(guest 页面调 `window.close()`)。pool 只广播 tabId,
+   * "该不该真关"的裁决(popup-spawned 判定、store closeTab)在订阅方。
+   */
+  onGuestClose(listener: (tabId: string) => void): () => void {
+    this.guestCloseListeners.add(listener);
+    return () => {
+      this.guestCloseListeners.delete(listener);
+    };
+  }
+
+  /**
    * LRU 淘汰 —— 内部用。优先挑最旧的**未 pinned** entry。如果所有 entry 都
    * pinned,fallback 到挑最旧的(capacity 限制比 pin 更高优先级);理论上不会
    * 发生(pin 数远小于 POOL_CAPACITY),fallback 是防御式兜底,触发时:
@@ -239,6 +255,7 @@ class BrowserWebviewPoolImpl {
 
   private pinListeners = new Set<(tabId: string, pinned: boolean) => void>();
   private releaseListeners = new Set<(tabId: string) => void>();
+  private guestCloseListeners = new Set<(tabId: string) => void>();
 
   private firePinChange(tabId: string, pinned: boolean): void {
     for (const l of this.pinListeners) {
@@ -252,6 +269,16 @@ class BrowserWebviewPoolImpl {
 
   private fireRelease(tabId: string): void {
     for (const l of this.releaseListeners) {
+      try {
+        l(tabId);
+      } catch {
+        // listener throw must not stop the pool from advancing
+      }
+    }
+  }
+
+  private fireGuestClose(tabId: string): void {
+    for (const l of this.guestCloseListeners) {
       try {
         l(tabId);
       } catch {

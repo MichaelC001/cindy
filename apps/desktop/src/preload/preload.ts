@@ -2311,9 +2311,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onNotificationFocusSession: fanOutNotificationFocusSession,
 
   // RSB web-browser plugin popup 路由 — main 端 webview-security 推送
-  // `{ url, disposition }`,renderer 端 RightSidebarShell 订阅 → addTab。
+  // `{ url, disposition, openerTabId?, openerSessionId? }`,renderer 端
+  // RightSidebarShell 订阅 → addTab(落进 opener 所属 session 的 bucket)。
   onRsbBrowserPopup: (
-    callback: (payload: { url: string; disposition: string }) => void,
+    callback: (payload: {
+      url: string;
+      disposition: string;
+      openerTabId?: string;
+      openerSessionId?: string;
+    }) => void,
   ): (() => void) =>
     fanOutRsbBrowserPopup((payload) => {
       if (
@@ -2321,7 +2327,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
         typeof payload === 'object' &&
         typeof (payload as { url?: unknown }).url === 'string'
       ) {
-        callback(payload as { url: string; disposition: string });
+        callback(
+          payload as {
+            url: string;
+            disposition: string;
+            openerTabId?: string;
+            openerSessionId?: string;
+          },
+        );
       }
     }),
 

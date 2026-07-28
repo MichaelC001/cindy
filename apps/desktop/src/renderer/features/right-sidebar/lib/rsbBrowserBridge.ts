@@ -32,8 +32,10 @@ import {
   setActiveTab,
   getBucket,
   ensureHydrated,
+  findSessionIdByTabId,
 } from '../store';
 import { requestRightSidebarVisibility } from './sidebarCommands';
+import { isPopupSpawnedTab, unmarkPopupSpawnedTab } from './popupTabs';
 
 /** Subset of `window.electronAPI.rsbBrowserBridge` actually used here. */
 interface RsbBrowserBridgeIpcSubset {
@@ -193,9 +195,29 @@ export function initRsbBrowserBridge(): () => void {
   const unsubRelease = browserWebviewPool.onRelease((tabId) => {
     const reported = lastReportedWebContentsId.get(tabId);
     lastReportedWebContentsId.delete(tabId);
+    unmarkPopupSpawnedTab(tabId);
     void api
       .release(reported === undefined ? { tabId } : { tabId, webContentsId: reported })
       .catch(() => undefined);
+  });
+
+  // guest `window.close()` → 自动关对应 tab。只放行 popup 催生的 tab(与真实
+  // 浏览器 "script-opened 才能 script-close" 语义对齐,防任意网页关掉用户 tab)。
+  // OAuth callback 页授权完成后的标准收尾就是 window.close() —— 不接这个事件,
+  // 每次授权都残留一个空 tab。关到最后一个 tab 时联动收起侧栏,与 main 端
+  // close tab-op 的可见性策略一致。
+  const unsubGuestClose = browserWebviewPool.onGuestClose((tabId) => {
+    if (!isPopupSpawnedTab(tabId)) return;
+    const sessionId = findSessionIdByTabId(tabId);
+    if (!sessionId) return;
+    void (async () => {
+      const beforeCount = getBucket(sessionId).tabs.length;
+      await storeCloseTab(sessionId, tabId);
+      const afterCount = getBucket(sessionId).tabs.length;
+      if (beforeCount > 0 && afterCount === 0) {
+        requestRightSidebarVisibility('close', { sessionId });
+      }
+    })().catch(() => undefined);
   });
 
   // Main → pool pin sync. Main owns the pin authority; renderer pool only
@@ -245,6 +267,7 @@ export function initRsbBrowserBridge(): () => void {
 
   teardown = () => {
     unsubRelease();
+    unsubGuestClose();
     unsubPin();
     unsubUnpin();
     unsubTabOp();

@@ -269,6 +269,41 @@ export interface RsbBrowserPopupPayload {
   /** Chromium disposition:foreground-tab / background-tab / new-window / other 等。
    *  v1 不做差异化处理(都开新 RSB tab),但保留给后续 background-tab 等区分行为用。 */
   disposition: string;
+  /** 发起 popup 的 RSB tab id(TabRegistry 按 guest webContentsId 反查)。
+   *  guest 尚未 report(dom-ready 前)或非 RSB 管辖 webview 时缺省。 */
+  openerTabId?: string;
+  /** 发起 popup 的 tab 所属 session。renderer 端据此把 popup tab 落进 opener 的
+   *  bucket——没有它时只能落在"用户正在看的 session",agent 后台 session 触发的
+   *  popup 会串进无关会话。 */
+  openerSessionId?: string;
+}
+
+/**
+ * popup opener 反查钩子。webview-security 不直接依赖 rsb-browser-bridge 单例
+ * (保持本模块只做安全加固的单向依赖);bootstrap 在注册 RSB bridge IPC 时注入。
+ * 未注入(启动早期 / 单测)时 popup 照常路由,只是缺 opener 归属字段。
+ */
+export type RsbPopupOpenerResolver = (
+  webContentsId: number,
+) => { tabId: string; sessionId: string } | null;
+
+let popupOpenerResolver: RsbPopupOpenerResolver | null = null;
+
+export function setRsbPopupOpenerResolver(resolver: RsbPopupOpenerResolver | null): void {
+  popupOpenerResolver = resolver;
+}
+
+function resolvePopupOpener(
+  webContentsId: number,
+): { openerTabId: string; openerSessionId: string } | null {
+  if (!popupOpenerResolver) return null;
+  try {
+    const record = popupOpenerResolver(webContentsId);
+    if (!record) return null;
+    return { openerTabId: record.tabId, openerSessionId: record.sessionId };
+  } catch {
+    return null;
+  }
 }
 
 function isInitialBlankPopupUrl(url: string): boolean {
@@ -296,6 +331,7 @@ export function installDeferredPopupRouter(
   hostContents: WebContents,
   popupWindow: BrowserWindow,
   disposition: string,
+  opener?: { openerTabId: string; openerSessionId: string } | null,
 ): void {
   let routed = false;
   const closeTimer = setTimeout(() => {
@@ -311,7 +347,7 @@ export function installDeferredPopupRouter(
     if (routed || !isRoutablePopupUrl(url)) return;
     routed = true;
     cleanup();
-    sendBrowserPopup(hostContents, { url, disposition });
+    sendBrowserPopup(hostContents, { url, disposition, ...(opener ?? {}) });
     if (!popupWindow.isDestroyed()) {
       popupWindow.close();
     }
@@ -409,6 +445,7 @@ export function installWebviewHardener(): void {
           sendBrowserPopup(contents, {
             url: details.url,
             disposition: details.disposition,
+            ...(resolvePopupOpener(guestContents.id) ?? {}),
           });
           return { action: 'deny' };
         }
@@ -434,7 +471,12 @@ export function installWebviewHardener(): void {
         return { action: 'deny' };
       });
       guestContents.on('did-create-window', (popupWindow, details) => {
-        installDeferredPopupRouter(contents, popupWindow, details.disposition);
+        installDeferredPopupRouter(
+          contents,
+          popupWindow,
+          details.disposition,
+          resolvePopupOpener(guestContents.id),
+        );
       });
       // 拦截 webview guest 内的"浏览器级"快捷键 —— Electron webview 是独立
       // webContents,guest 触发的 keydown 不冒泡到 host 的 window,host renderer

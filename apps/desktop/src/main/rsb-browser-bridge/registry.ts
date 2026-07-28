@@ -150,6 +150,19 @@ export class TabRegistry {
     };
   }
 
+  /**
+   * webContentsId 反查 tab 记录。popup 路由用:guest 内 window.open 触发时,
+   * 只有发起方 guest 的 webContentsId 可拿,要靠它找回 opener tab 及其归属
+   * session,popup 才能落进正确的 bucket。线性扫——records 是每 session 个位数
+   * 的 tab,规模上限远小于任何需要索引的量级。
+   */
+  findByWebContentsId(webContentsId: number): TabRecord | null {
+    for (const record of this.records.values()) {
+      if (record.webContentsId === webContentsId) return record;
+    }
+    return null;
+  }
+
   /** Read by tab id. Returns null if unknown OR if the webContents is dead. */
   getWebContentsByTabId(tabId: string): WebContents | null {
     const record = this.records.get(tabId);

@@ -29,6 +29,8 @@ import {
   snapshotRsbBrowserTabs,
   subscribeTabResourceEvent,
 } from '../rsbBrowserBridge';
+import { _resetPopupTabsForTests, markPopupSpawnedTab } from '../popupTabs';
+import { _resetStore, addTab, ensureHydrated, getBucket } from '../../store';
 
 interface FakeIpcApi {
   report: ReturnType<typeof vi.fn>;
@@ -102,10 +104,14 @@ function clearIpc(): void {
 
 beforeEach(() => {
   _resetRsbBrowserBridgeForTests();
+  _resetPopupTabsForTests();
+  _resetStore();
 });
 
 afterEach(() => {
   _resetRsbBrowserBridgeForTests();
+  _resetPopupTabsForTests();
+  _resetStore();
   clearIpc();
   // Drain the pool — tests share the singleton.
   for (const tabId of browserWebviewPool.inspectTabIds()) {
@@ -193,6 +199,39 @@ describe('rsbBrowserBridge — initialization & teardown', () => {
     browserWebviewPool.release('tab-a');
 
     expect(api.release).toHaveBeenCalledWith({ tabId: 'tab-a' });
+  });
+
+  it('guest window.close() auto-closes a popup-spawned tab (残留空 tab 修复)', async () => {
+    installFakeIpc();
+    initRsbBrowserBridge();
+
+    // memory-only store 路径:无持久化 IPC,addTab 直接写 cache。
+    await ensureHydrated('sess-oauth');
+    const tab = await addTab('sess-oauth', 'web-browser', { url: 'https://cb.example' });
+    markPopupSpawnedTab(tab.id);
+    const entry = browserWebviewPool.acquire(tab.id);
+
+    // OAuth callback 页授权完成后的标准收尾:window.close() → webview 'close' 事件。
+    entry.webview.dispatchEvent(new Event('close'));
+
+    await vi.waitFor(() => {
+      expect(getBucket('sess-oauth').tabs).toHaveLength(0);
+    });
+  });
+
+  it('guest window.close() on a NON-popup tab is ignored (script-opened-only 语义)', async () => {
+    installFakeIpc();
+    initRsbBrowserBridge();
+
+    await ensureHydrated('sess-user');
+    const tab = await addTab('sess-user', 'web-browser', { url: 'https://page.example' });
+    const entry = browserWebviewPool.acquire(tab.id);
+
+    entry.webview.dispatchEvent(new Event('close'));
+
+    // 恶意 / 意外的 window.close() 不得关掉用户自己开的 tab。
+    await new Promise((r) => setTimeout(r, 10));
+    expect(getBucket('sess-user').tabs).toHaveLength(1);
   });
 
   it('binds main → pool pin/unpin sync', () => {
