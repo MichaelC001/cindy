@@ -5,6 +5,7 @@ import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { IssueConfirmCard } from '../IssueConfirmCard';
+import { clearIssueConfirmDraftsForSession } from '@/lib/issueConfirmDraftStore';
 import type { PendingIssueConfirm } from '@/lib/makerChatStore';
 
 vi.mock('react-i18next', () => ({
@@ -34,7 +35,6 @@ const initialPending: PendingIssueConfirm = {
 };
 
 function Harness() {
-  const [pending, setPending] = useState(initialPending);
   const [visible, setVisible] = useState(true);
 
   return (
@@ -43,26 +43,17 @@ function Harness() {
         switch session
       </button>
       {visible ? (
-        <IssueConfirmCard
-          pending={pending}
-          onDraftChange={(requestId, patch) =>
-            setPending((current) =>
-              current.requestId === requestId
-                ? {
-                    ...current,
-                    draft: { ...current.draft, ...patch },
-                  }
-                : current,
-            )
-          }
-          onRespond={vi.fn()}
-        />
+        <IssueConfirmCard sessionId="session-a" pending={initialPending} onRespond={vi.fn()} />
       ) : null}
     </>
   );
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  clearIssueConfirmDraftsForSession('session-a');
+  clearIssueConfirmDraftsForSession('session-b');
+});
 
 describe('IssueConfirmCard draft persistence', () => {
   it('restores title, body and type after a session-switch remount', () => {
@@ -91,5 +82,57 @@ describe('IssueConfirmCard draft persistence', () => {
         .getByRole('button', { name: 'issueAgent.confirm.typeFeature' })
         .getAttribute('aria-pressed'),
     ).toBe('true');
+  });
+
+  it('isolates drafts by both sessionId and requestId', () => {
+    const onRespond = vi.fn();
+    const { rerender } = render(
+      <IssueConfirmCard
+        key="session-a:issue-request-a"
+        sessionId="session-a"
+        pending={initialPending}
+        onRespond={onRespond}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText('issueAgent.confirm.titleLabel'), {
+      target: { value: '会话 A 的编辑' },
+    });
+
+    rerender(
+      <IssueConfirmCard
+        key="session-b:issue-request-a"
+        sessionId="session-b"
+        pending={initialPending}
+        onRespond={onRespond}
+      />,
+    );
+    expect((screen.getByLabelText('issueAgent.confirm.titleLabel') as HTMLInputElement).value).toBe(
+      '原始标题',
+    );
+
+    rerender(
+      <IssueConfirmCard
+        key="session-a:issue-request-b"
+        sessionId="session-a"
+        pending={{ ...initialPending, requestId: 'issue-request-b' }}
+        onRespond={onRespond}
+      />,
+    );
+    expect((screen.getByLabelText('issueAgent.confirm.titleLabel') as HTMLInputElement).value).toBe(
+      '原始标题',
+    );
+
+    rerender(
+      <IssueConfirmCard
+        key="session-a:issue-request-a"
+        sessionId="session-a"
+        pending={initialPending}
+        onRespond={onRespond}
+      />,
+    );
+    expect((screen.getByLabelText('issueAgent.confirm.titleLabel') as HTMLInputElement).value).toBe(
+      '会话 A 的编辑',
+    );
   });
 });

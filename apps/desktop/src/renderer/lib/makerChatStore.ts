@@ -190,6 +190,11 @@ import {
 } from '@/lib/imageRef';
 import { saveDraft as saveComposerDraft, plainTextToTiptapDoc } from '@/lib/composerDraftStore';
 import {
+  clearIssueConfirmDraft,
+  clearIssueConfirmDraftsForSession,
+  type IssueConfirmDraft,
+} from '@/lib/issueConfirmDraftStore';
+import {
   canStartComposerSteer,
   canStartQueuedSteer,
   deriveErrorRetryText,
@@ -573,7 +578,7 @@ export interface PendingPlanReview {
  */
 export interface PendingIssueConfirm {
   requestId: string;
-  draft: { title: string; body: string; type: 'bug' | 'feature' };
+  draft: IssueConfirmDraft;
   /**
    * 只读展示的环境信息(main 会附进 issue body)。`region` 是本构建的区域身份
    * (中国版 / 国际版 / 开发版);main 侧 payload 未带时按 undefined 处理,卡片
@@ -1192,6 +1197,7 @@ function isBeforeOrAtRendererClearBoundary(sessionId: string, createdAt: string)
  */
 function _purgeSession(sessionId: string): void {
   discardPendingTextDelta(sessionId);
+  clearIssueConfirmDraftsForSession(sessionId);
   // 代际递增(bump 而非 delete,原因见 _messagesEpoch 注释):作废 in-flight 翻页,
   // 避免其提交把旧窗口 merge 进 purge 后重建的空 slice。
   bumpMessagesEpoch(sessionId);
@@ -1392,6 +1398,10 @@ function setState(sessionId: string, updater: (prev: SessionChatState) => Sessio
   const prev = getOrCreateState(sessionId);
   const next = updater(prev);
   if (next === prev) return;
+  const previousIssueRequestId = prev.pendingIssueConfirm?.requestId;
+  if (previousIssueRequestId && next.pendingIssueConfirm?.requestId !== previousIssueRequestId) {
+    clearIssueConfirmDraft(sessionId, previousIssueRequestId);
+  }
   sessions.set(sessionId, next);
   // running-status 快照缓存失效(getRunningSnapshot 纯 getter 契约:只有
   // mutation 才允许让下一次读重算)。必须在 notify 之前置位。
@@ -6786,6 +6796,7 @@ async function clearSessionAfterGuard(sessionId: string, clearedAt: string): Pro
       // F-AUQ-DRAFT: Clear session also wipes any in-progress draft.
       askUserDraft: null,
       pendingPlanReview: null,
+      pendingIssueConfirm: null,
       pendingQueue: [],
       steeringQueueClientIds: [],
       queuePaused: false,
@@ -7115,40 +7126,6 @@ function respondToIssueConfirm(
   makerApiFor(sessionId)
     .resolveInteraction(requestId, result)
     .catch((err) => log.error('Failed to respond to issue confirm:', err));
-}
-
-/**
- * issue_confirm:把用户在确认卡片里的编辑同步进 session-keyed store。
- *
- * 卡片会在切换对话时随路由卸载;pendingIssueConfirm 本身按 sessionId 常驻,
- * 因此把编辑态收口到它的 draft 就能在返回原对话时恢复。requestId guard
- * 防止旧卡片的迟到 input 事件覆盖同一会话里新一轮确认请求。
- */
-function updateIssueConfirmDraft(
-  sessionId: string,
-  requestId: string,
-  patch: Partial<PendingIssueConfirm['draft']>,
-): void {
-  if (!sessionId) return;
-  setState(sessionId, (s) => {
-    const pending = s.pendingIssueConfirm;
-    if (!pending || pending.requestId !== requestId) return s;
-    const nextDraft = { ...pending.draft, ...patch };
-    if (
-      nextDraft.title === pending.draft.title &&
-      nextDraft.body === pending.draft.body &&
-      nextDraft.type === pending.draft.type
-    ) {
-      return s;
-    }
-    return {
-      ...s,
-      pendingIssueConfirm: {
-        ...pending,
-        draft: nextDraft,
-      },
-    };
-  });
 }
 
 function parseRenameSessionsConfirmItem(
@@ -8033,7 +8010,6 @@ export const makerChatStore = {
   updateSystemCardData,
   respondToPermission,
   respondToIssueConfirm,
-  updateIssueConfirmDraft,
   respondToRenameSessionsConfirm,
   respondToGhostGrantConfirm,
   answerUserQuestion,

@@ -13,16 +13,21 @@
  *   Esc            → 取消
  */
 
-import { useCallback, useEffect, useId } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import {
+  getIssueConfirmDraft,
+  saveIssueConfirmDraft,
+  type IssueConfirmDraft,
+} from '@/lib/issueConfirmDraftStore';
 import { cn } from '@/lib/utils';
 import type { PendingIssueConfirm } from '@/lib/makerChatStore';
 import { shouldLabelIssueRegion } from '../../../shared/issueRegionCode';
 
 interface IssueConfirmCardProps {
+  sessionId: string;
   pending: PendingIssueConfirm;
-  onDraftChange: (requestId: string, patch: Partial<PendingIssueConfirm['draft']>) => void;
   onRespond: (
     result:
       | {
@@ -42,13 +47,30 @@ const TITLE_MAX = 200;
 // githubIssueSubmitService clamp 到 server 上限 SERVER_DESC_MAX(5000)。
 const BODY_MAX = 4500;
 
-export function IssueConfirmCard({ pending, onDraftChange, onRespond }: IssueConfirmCardProps) {
+export function IssueConfirmCard({ sessionId, pending, onRespond }: IssueConfirmCardProps) {
   const { t, i18n } = useTranslation();
   const titleInputId = useId();
   const bodyInputId = useId();
-  const { title, body, type } = pending.draft;
+  const [draft, setDraft] = useState<IssueConfirmDraft>(
+    () => getIssueConfirmDraft(sessionId, pending.requestId) ?? pending.draft,
+  );
+  const { title, body, type } = draft;
 
   const canSubmit = title.trim().length > 0 && body.trim().length > 0;
+
+  const updateDraft = useCallback(
+    (patch: Partial<IssueConfirmDraft>) => {
+      const next = { ...draft, ...patch };
+      if (next.title === draft.title && next.body === draft.body && next.type === draft.type) {
+        return;
+      }
+      // Save synchronously with the input event so an immediate session switch
+      // cannot unmount the card before its latest edit reaches the draft slot.
+      saveIssueConfirmDraft(sessionId, pending.requestId, next);
+      setDraft(next);
+    },
+    [draft, pending.requestId, sessionId],
+  );
 
   // 构建区域代号,与登录页区域徽标同一套不对称命名(DESIGN.md §16.3):cn → CN、
   // dev → Dev、global 不标。「哪些区域要标」只有 ISSUE_REGION_CODE 一个事实源 ——
@@ -98,7 +120,7 @@ export function IssueConfirmCard({ pending, onDraftChange, onRespond }: IssueCon
     <button
       type="button"
       aria-pressed={type === value}
-      onClick={() => onDraftChange(pending.requestId, { type: value })}
+      onClick={() => updateDraft({ type: value })}
       className={cn(
         'rounded-[6px] border px-2.5 py-[3px] text-12 font-medium transition-colors',
         type === value
@@ -140,7 +162,7 @@ export function IssueConfirmCard({ pending, onDraftChange, onRespond }: IssueCon
         type="text"
         value={title}
         maxLength={TITLE_MAX}
-        onChange={(e) => onDraftChange(pending.requestId, { title: e.target.value })}
+        onChange={(e) => updateDraft({ title: e.target.value })}
         className={cn(
           'mt-1 w-full rounded-[8px] border px-3 py-2',
           'border-[var(--perm-code-border)] bg-[var(--perm-code-bg)]',
@@ -160,7 +182,7 @@ export function IssueConfirmCard({ pending, onDraftChange, onRespond }: IssueCon
         id={bodyInputId}
         value={body}
         maxLength={BODY_MAX}
-        onChange={(e) => onDraftChange(pending.requestId, { body: e.target.value })}
+        onChange={(e) => updateDraft({ body: e.target.value })}
         rows={8}
         className={cn(
           'mt-1 w-full resize-y rounded-[8px] border px-3 py-2',
