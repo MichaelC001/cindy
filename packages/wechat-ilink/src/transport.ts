@@ -27,6 +27,8 @@ export interface WechatTransport {
     challenge: WechatAuthChallenge,
     signal: AbortSignal,
   ): Promise<WechatCredentials>;
+  notifyStart(signal: AbortSignal): Promise<void>;
+  notifyStop(signal: AbortSignal): Promise<void>;
   poll(cursor: string, signal: AbortSignal): Promise<WechatPollResult>;
   sendMessage(
     request: WechatSendRequest,
@@ -83,6 +85,14 @@ export class TencentIlinkTransport implements WechatTransport {
     signal: AbortSignal,
   ): Promise<WechatCredentials> {
     return this.authorization.wait(challenge, signal);
+  }
+
+  async notifyStart(signal: AbortSignal): Promise<void> {
+    this.assertLifecycleResponse(await this.api.notifyStart(signal), "start");
+  }
+
+  async notifyStop(signal: AbortSignal): Promise<void> {
+    this.assertLifecycleResponse(await this.api.notifyStop(signal), "stop");
   }
 
   async poll(cursor: string, signal: AbortSignal): Promise<WechatPollResult> {
@@ -234,5 +244,25 @@ export class TencentIlinkTransport implements WechatTransport {
   ): Promise<WechatSendResult> {
     await this.api.sendMedia(request, signal);
     return { clientId: request.clientId };
+  }
+
+  private assertLifecycleResponse(
+    response: Record<string, unknown>,
+    operation: "start" | "stop",
+  ): void {
+    if (response.ret !== undefined && typeof response.ret !== "number") {
+      throw new WechatIlinkError(
+        "BAD_RESPONSE",
+        `iLink returned an invalid ${operation} notification status.`,
+        true,
+      );
+    }
+    if (typeof response.ret === "number" && response.ret !== 0) {
+      throw new WechatIlinkError(
+        "PROTOCOL_ERROR",
+        `iLink rejected the ${operation} notification.`,
+        true,
+      );
+    }
   }
 }

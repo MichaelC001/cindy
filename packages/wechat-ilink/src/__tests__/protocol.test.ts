@@ -192,6 +192,44 @@ describe("pure protocol utilities", () => {
 });
 
 describe("iLink HTTP boundary", () => {
+  it("notifies iLink when the channel starts and stops", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const transport = new TencentIlinkTransport({
+      baseUrl: "https://ilinkai.weixin.qq.com",
+      token: "fake-token",
+      clientVersion: "1.1.21",
+      botAgent: "Cindy/1.1.21",
+      fetch: async (input, init) => {
+        calls.push({ url: String(input), init });
+        return new Response(JSON.stringify({ ret: 0 }));
+      },
+    });
+
+    await expect(transport.notifyStart(signal())).resolves.toBeUndefined();
+    await expect(transport.notifyStop(signal())).resolves.toBeUndefined();
+
+    expect(calls.map(({ url }) => new URL(url).pathname)).toEqual([
+      "/ilink/bot/msg/notifystart",
+      "/ilink/bot/msg/notifystop",
+    ]);
+    expect(
+      calls.map(({ init }) => JSON.parse(String(init?.body))),
+    ).toEqual([
+      {
+        base_info: {
+          channel_version: "1.1.21",
+          bot_agent: "Cindy/1.1.21",
+        },
+      },
+      {
+        base_info: {
+          channel_version: "1.1.21",
+          bot_agent: "Cindy/1.1.21",
+        },
+      },
+    ]);
+  });
+
   it("builds authenticated poll requests without exposing response bodies in errors", async () => {
     const fetchMock = vi.fn(
       async (_input: string | URL, init?: RequestInit) => {

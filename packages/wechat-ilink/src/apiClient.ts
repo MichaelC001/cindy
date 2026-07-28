@@ -341,6 +341,14 @@ export class IlinkApiClient {
     }
   }
 
+  notifyStart(signal: AbortSignal): Promise<Record<string, unknown>> {
+    return this.notifyLifecycle("ilink/bot/msg/notifystart", signal);
+  }
+
+  notifyStop(signal: AbortSignal): Promise<Record<string, unknown>> {
+    return this.notifyLifecycle("ilink/bot/msg/notifystop", signal);
+  }
+
   async sendText(
     request: WechatSendRequest,
     signal: AbortSignal,
@@ -591,6 +599,22 @@ export class IlinkApiClient {
       }
     }
     return messages;
+  }
+
+  private notifyLifecycle(
+    endpoint: "ilink/bot/msg/notifystart" | "ilink/bot/msg/notifystop",
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      endpoint,
+      {
+        method: "POST",
+        authenticated: true,
+        body: { base_info: this.baseInfo() },
+      },
+      signal,
+      5_000,
+    );
   }
 }
 

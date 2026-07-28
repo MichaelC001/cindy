@@ -621,6 +621,21 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     if (generation === null) throw new Error('WECHAT_ACCOUNT_SCOPE_CLOSED');
     const abort = new AbortController();
     const transport = this.#deps.createTransport({ credentials });
+    try {
+      await transport.notifyStart(abort.signal);
+    } catch (error) {
+      if (abort.signal.aborted) return;
+      this.log.warn('WeChat start notification failed; continuing with polling', {
+        code: machineErrorCode(error),
+      });
+    }
+    if (
+      abort.signal.aborted ||
+      !this.#isGenerationCurrent(generation) ||
+      !this.#isCompatibilityRevisionAllowed(compatibilityRevision)
+    ) {
+      return;
+    }
     const drain = Promise.allSettled([
       this.#pollLoop(binding, transport, abort.signal, generation),
       this.#taskPump(binding, abort.signal, generation),
@@ -645,6 +660,13 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     if (!epoch) return;
     epoch.abort.abort();
     await epoch.drain;
+    try {
+      await epoch.transport.notifyStop(new AbortController().signal);
+    } catch (error) {
+      this.log.warn('WeChat stop notification failed', {
+        code: machineErrorCode(error),
+      });
+    }
     this.#activeTasks.clear();
   }
 
