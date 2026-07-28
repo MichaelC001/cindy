@@ -90,6 +90,7 @@ import { getMakerMemoryEnabled } from '@/lib/memorySettingsStore';
 import { buildUserMessageAttachmentPayload } from '@/lib/messageAttachmentPayload';
 import {
   parseIssueEnvRegion,
+  parseIssueSuggestedPublicName,
   parseIssueSubmissionIdentity,
   type IssueSubmissionIdentity,
 } from '@/lib/issueConfirmPayload';
@@ -593,6 +594,8 @@ export interface PendingIssueConfirm {
   };
   /** main 已经选定、确认后不会自动切换的实际 GitHub 作者身份。 */
   submissionIdentity: IssueSubmissionIdentity;
+  /** 平台代发的建议公开署名；缺失时卡片使用本地化“匿名”。 */
+  suggestedPublicName?: string;
 }
 
 /**
@@ -3873,6 +3876,10 @@ function initGlobalListeners(): void {
         | undefined;
       const submissionIdentity = parseIssueSubmissionIdentity(request.submissionIdentity);
       if (!draft || !rawEnv || !submissionIdentity) return;
+      const suggestedPublicName =
+        submissionIdentity.kind === 'platform'
+          ? parseIssueSuggestedPublicName(request.suggestedPublicName)
+          : undefined;
       // region 过一遍白名单:非法值宁可不展示区域,也不能把 CN 版说成默认版。
       const env = { ...rawEnv, region: parseIssueEnvRegion(rawEnv.region) };
       setState(sessionId, (s) => ({
@@ -3882,6 +3889,7 @@ function initGlobalListeners(): void {
           draft,
           env,
           submissionIdentity,
+          suggestedPublicName,
         },
       }));
       return;
@@ -7855,13 +7863,20 @@ function respondToPermission(sessionId: string, result: CCAgentPermissionResult)
 
 /**
  * issue_confirm: 把确认卡片结果回给 main(IssueConfirmBridge)并清 pendingIssueConfirm。
- * confirmed=true 时携带卡片当前的 title/body/type(用户编辑版,main 以此为准)
- * 和 renderer 界面语言(uiLanguage,main 附进 issue body 的环境块)。
+ * confirmed=true 时携带卡片当前的 title/body/type(用户编辑版,main 以此为准)、
+ * 平台代发公开署名(publicName)和 renderer 界面语言(uiLanguage)。
  */
 function respondToIssueConfirm(
   sessionId: string,
   result:
-    | { confirmed: true; title: string; body: string; type: 'bug' | 'feature'; uiLanguage: string }
+    | {
+        confirmed: true;
+        title: string;
+        body: string;
+        type: 'bug' | 'feature';
+        publicName?: string;
+        uiLanguage: string;
+      }
     | { confirmed: false },
 ): void {
   if (!sessionId) return;
