@@ -238,7 +238,7 @@ export function translateErrorNotification(
     // renderer 走 recoverableError → "网络异常,正在自动重试…" banner,恢复后随
     // 正常事件自动清;不结束 turn、不落 error 行)。第 1 次不透出:单次抖动 daemon
     // 一次重试就过,提示只会闪一下徒增噪音。
-    if (isNetworkishErrorMessage(message)) {
+    if (isNetworkishErrorMessage(safeMessage)) {
       const key = `${params.threadId ?? ''}|${params.turnId ?? ''}`;
       const notice = ctx.rt.networkRetryNotice;
       const count = notice?.key === key ? notice.count + 1 : 1;

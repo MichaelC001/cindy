@@ -347,6 +347,19 @@ describe('translateErrorNotification', () => {
     expect(events).toHaveLength(0);
   });
 
+  it('仅按脱敏后的可见文案识别通用网络错误', async () => {
+    const rt = newCodexRuntimeState();
+    const ctx = makeCtx(rt);
+    const q = createAsyncQueue<AgentEvent>();
+    const message = 'Authorization: Bearer secret-token ECONNRESET';
+
+    translateErrorNotification(makeParams({ willRetry: true, message }), q, ctx);
+    translateErrorNotification(makeParams({ willRetry: true, message }), q, ctx);
+
+    const events = await collect(q);
+    expect(events).toHaveLength(0);
+  });
+
   it('willRetry=true 网络类错误同 turn 第 2 次 → 透出一条非终止提示,之后不再发', async () => {
     const rt = newCodexRuntimeState();
     const ctx = makeCtx(rt);
