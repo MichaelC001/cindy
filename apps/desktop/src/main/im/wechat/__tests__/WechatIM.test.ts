@@ -48,6 +48,32 @@ describe('WechatIM host boundary', () => {
     expect(__testing.authorizationCancelPhase(true, true)).toBe('connected');
   });
 
+  it('parses one-shot permission and question replies from plain WeChat text', () => {
+    const permission = __testing.parseWechatInteractionReply(
+      { kind: 'permission', requestId: 'r1', toolName: 'Bash', input: {} },
+      '允许',
+    );
+    expect(permission).toEqual({ kind: 'permission', behavior: 'allow' });
+
+    const question = __testing.parseWechatInteractionReply(
+      {
+        kind: 'ask_user_question',
+        requestId: 'r2',
+        questions: [
+          {
+            question: '选择环境',
+            options: [{ label: '测试' }, { label: '生产' }],
+          },
+        ],
+      },
+      '2',
+    );
+    expect(question).toEqual({
+      kind: 'ask_user_question',
+      answers: { 选择环境: '生产' },
+    });
+  });
+
   it('fails closed before authorization when the signed compatibility policy disables it', async () => {
     const createTransport = vi.fn();
     const im = new WechatIM(

@@ -2257,6 +2257,20 @@ export function createTurnRunner(
       );
 
       if (output.kind === 'chunked-text') {
+        if (adapter.handleTextInteraction) {
+          if (req.kind === 'permission') {
+            const guard = checkDestructiveToolCall(req.toolName, req.input);
+            if (guard.destructive) {
+              log.warn(`destructive tool blocked: ${req.toolName} (${guard.reason})`);
+              return {
+                kind: 'permission',
+                behavior: 'deny',
+                reason: `[destructiveGuard] ${guard.reason}`,
+              };
+            }
+          }
+          return adapter.handleTextInteraction(userId, req);
+        }
         if (req.kind === 'ask_user_question') {
           return { kind: 'ask_user_question', answers: {} };
         }

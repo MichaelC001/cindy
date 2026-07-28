@@ -39,7 +39,9 @@ export function buildWechatAdapter(
       }),
     },
     processingEmoji: '',
-    buildVendorOptions: () => ({ source: 'wechat' }),
+    buildVendorOptions: (userId) => ({ source: 'wechat', wechatPeerId: userId }),
+    handleTextInteraction: (userId, request) =>
+      wechatIm.handleTextInteraction(userId, request),
     onUserMessagePersisted: (args) => wechatIm.onUserMessagePersisted(args),
   };
 }

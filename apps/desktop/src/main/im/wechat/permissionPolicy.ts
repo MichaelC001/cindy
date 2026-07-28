@@ -12,8 +12,9 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * Personal WeChat has no structured approval UI. Selected risky calls are
- * therefore routed to Cindy Desktop before provider execution.
+ * Personal WeChat has no structured card UI. Interaction requests are rendered
+ * as one-shot text prompts by the channel adapter; the destructive guard still
+ * blocks unsafe calls before a prompt can be approved.
  */
 export function createWechatTurnPermissionPolicy(
   taskId: string,
@@ -23,7 +24,7 @@ export function createWechatTurnPermissionPolicy(
 ): TurnPermissionPolicy {
   return {
     origin: { kind: 'im', channel: 'wechat', taskId },
-    confirmationSurface: 'desktop',
+    confirmationSurface: 'channel',
     confirmationTimeoutMs: 30 * 60 * 1_000,
     ...(options?.onInteractionStateChange
       ? { onInteractionStateChange: options.onInteractionStateChange }

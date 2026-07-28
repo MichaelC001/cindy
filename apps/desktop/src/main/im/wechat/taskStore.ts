@@ -121,6 +121,62 @@ export class WechatTaskStore {
     return row?.conversationEpoch ?? 0;
   }
 
+  /**
+   * Return the most recently received context for a peer. Context tokens are
+   * encrypted at rest and are intentionally only addressable through the
+   * currently active binding epoch, so proactive sends cannot target an
+   * arbitrary WeChat id or a stale binding.
+   */
+  async getLatestPeerContext(args: {
+    bindingEpoch: string;
+    peerId: string;
+  }): Promise<{ contextToken: string; sessionId: string | null } | null> {
+    const row = await this.#db.queryOne<{
+      taskId: string;
+      sessionId: string | null;
+      contextNonce: string;
+      contextCiphertext: string;
+      contextTag: string;
+    }>(
+      `SELECT id AS taskId,
+              session_id AS sessionId,
+              context_nonce AS contextNonce,
+              context_ciphertext AS contextCiphertext,
+              context_tag AS contextTag
+       FROM wechat_inbox
+       WHERE binding_epoch = ? AND peer_id = ?
+       ORDER BY received_at DESC, rowid DESC
+       LIMIT 1`,
+      [args.bindingEpoch, args.peerId],
+    );
+    if (!row) return null;
+    return {
+      contextToken: decryptWechatContextToken(
+        {
+          nonce: row.contextNonce,
+          ciphertext: row.contextCiphertext,
+          tag: row.contextTag,
+        },
+        this.#dataKey,
+        args.bindingEpoch,
+        row.taskId,
+      ),
+      sessionId: row.sessionId,
+    };
+  }
+
+  async getMostRecentPeer(bindingEpoch: string): Promise<string | null> {
+    const row = await this.#db.queryOne<{ peerId: string }>(
+      `SELECT peer_id AS peerId
+       FROM wechat_inbox
+       WHERE binding_epoch = ?
+       ORDER BY received_at DESC, rowid DESC
+       LIMIT 1`,
+      [bindingEpoch],
+    );
+    return row?.peerId ?? null;
+  }
+
   async advanceConversationEpoch(
     bindingEpoch: string,
     taskId: string,

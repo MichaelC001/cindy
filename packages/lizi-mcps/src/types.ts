@@ -125,6 +125,19 @@ export interface FeishuBotMcpHostDeps {
   logger?: LiziMcpLogger;
 }
 
+export interface WechatBotSendMessageResult {
+  ok: boolean;
+  messageId?: string;
+  reason?: string;
+}
+
+/** Host bridge for the personal WeChat proactive-message MCP. */
+export interface WechatBotMcpHostDeps {
+  getMostRecentPeerId(): Promise<string | null> | string | null;
+  sendMessage(peerId: string, text: string): Promise<WechatBotSendMessageResult>;
+  logger?: LiziMcpLogger;
+}
+
 // ── cindy_slack(Slack 网关工具, 2026-07 并轨 hook 通道) ──────────────────────
 
 /** Slack 网关工具的结构化错误(hook-control manager 定义的同构形状)。 */
@@ -418,6 +431,7 @@ export type LiziMcpId =
   | 'browser'
   | 'computer'
   | 'cindy_feishu_bot'
+  | 'cindy_wechat'
   | 'cindy_slack'
   | 'cindy_scheduler'
   | 'cindy_ssh'
