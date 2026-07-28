@@ -524,7 +524,7 @@ function pickDefaultBrowserTab(
  * 已 attach 过的 entry(getWebContentsId 可取)走幂等 re-report 快路径,
  * 不再动 src(避免把用户正在看的页面重新导航)。
  */
-async function eagerSpawnAndReport(
+export async function eagerSpawnAndReport(
   sessionId: string,
   tabId: string,
   url: string,

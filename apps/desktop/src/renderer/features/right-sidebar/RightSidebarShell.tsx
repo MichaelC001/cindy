@@ -53,7 +53,7 @@ import type { TabKindHostContext, TabKindId, TabState } from './types';
 // file-browser;Phase 5 注册 web-browser。Shell 不直接消费 plugin 实例,只通过
 // getTabKind 查 registry。
 import './plugins';
-import { initRsbBrowserBridge } from './lib/rsbBrowserBridge';
+import { eagerSpawnAndReport, initRsbBrowserBridge } from './lib/rsbBrowserBridge';
 import { markPopupSpawnedTab } from './lib/popupTabs';
 import { requestRightSidebarVisibility } from './lib/sidebarCommands';
 
@@ -369,10 +369,19 @@ export function RightSidebarShell({
           // 既有 tab 永久挡在本 renderer 外,见 rsbBrowserBridge.handleTabOpRequest)。
           await ensureHydrated(targetSessionId);
         }
-        const newTab = await addTab(targetSessionId, 'web-browser', initialState);
-        markPopupSpawnedTab(newTab.id);
+        // popup 来源标记必须在乐观插入的同一 tick 登记(onOptimisticAdd),不能等
+        // addTab resolve:持久化 IPC 在途期间 React 已可能 mount webview 并加载完
+        // callback 页,快速 window.close 会赶在登记前到达且 close 事件不重发。
+        const newTab = await addTab(targetSessionId, 'web-browser', initialState, {
+          onOptimisticAdd: markPopupSpawnedTab,
+        });
         if (targetSessionId !== sessionId) {
-          // 目标 session 不在前台:只写它的折叠存档,用户切回去时侧栏已展开。
+          // 目标 session 不在前台:Shell 只渲染当前 bucket,后台 tab 不会有
+          // BrowserTabBody 去出生 webview —— 必须离屏物化,否则 OAuth 授权页
+          // 根本不开始加载,后台 agent 的登录流程原地卡死(与 main 端 open
+          // tab-op 的 eagerSpawnAndReport 同理)。
+          await eagerSpawnAndReport(targetSessionId, newTab.id, url);
+          // 只写它的折叠存档,用户切回去时侧栏已展开。
           requestRightSidebarVisibility('open', { sessionId: targetSessionId });
         }
       })().catch((err) => {

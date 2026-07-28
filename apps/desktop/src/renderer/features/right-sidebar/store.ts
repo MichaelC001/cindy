@@ -390,11 +390,21 @@ export async function ensureHydrated(sessionId: string): Promise<void> {
   return promise;
 }
 
-/** 新增 tab —— 走乐观本地添加 + IPC upsert + setActive,失败回滚 cache。 */
+/**
+ * 新增 tab —— 走乐观本地添加 + IPC upsert + setActive,失败回滚 cache。
+ *
+ * `opts.onOptimisticAdd`:乐观 setBucket 之后、await IPC 之前**同步**回调新
+ * tabId。给需要"在 React 能看到这个 tab 的同一 tick 内登记副标记"的调用方用
+ * (如 popup 来源标记:等 addTab resolve 再登记的话,持久化 IPC 在途期间 React
+ * 已可能 mount webview 并加载完 callback 页,window.close 事件会赶在登记前到达
+ * 且不重发)。IPC 失败回滚时不反向通知——调用方的标记以 tabId 为键,tab 已不
+ * 存在,残留无害(tabId 不复用)。
+ */
 export async function addTab(
   sessionId: string,
   kind: TabKindId,
   initialState: unknown = null,
+  opts?: { onOptimisticAdd?: (tabId: string) => void },
 ): Promise<TabState> {
   const prev = getBucket(sessionId);
   if (prev.tabs.length >= MAX_TABS_PER_SESSION) {
@@ -407,6 +417,11 @@ export async function addTab(
   const position = prev.tabs.length;
   const newTab: TabState = { id, kind, state: initialState };
   setBucket(sessionId, { tabs: [...prev.tabs, newTab], activeTabId: id });
+  try {
+    opts?.onOptimisticAdd?.(id);
+  } catch {
+    // 调用方回调抛错不该毒化 addTab 主流程。
+  }
   try {
     const ipc = ipcApi();
     if (ipc && shouldPersist(sessionId)) {

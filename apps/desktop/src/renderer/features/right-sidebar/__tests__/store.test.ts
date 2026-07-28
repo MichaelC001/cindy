@@ -256,6 +256,29 @@ describe('RSB store', () => {
       expect(store.getBucket('s1').tabs.map((t) => t.id)).toEqual([a.id]);
       expect(store.getBucket('s2').tabs.map((t) => t.id)).toEqual([b.id]);
     });
+
+    it('onOptimisticAdd fires synchronously with the optimistic insert, before IPC settles', async () => {
+      // popup 来源标记的时序契约:持久化 IPC 在途期间 React 已能 mount 这个
+      // tab 的 webview,标记必须在乐观插入的同一 tick 就绪——不能等 addTab
+      // resolve(快速 OAuth callback 的 window.close 会赶在登记前到达)。
+      let releaseUpsert: (() => void) | null = null;
+      ipc.upsert.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseUpsert = () => resolve({ ok: true });
+          }),
+      );
+      const seen: string[] = [];
+      const pending = store.addTab('s1', 'web-browser', null, {
+        onOptimisticAdd: (tabId) => seen.push(tabId),
+      });
+      // upsert 仍挂起,回调必须已带着乐观插入的 tabId 执行过。
+      expect(seen).toHaveLength(1);
+      expect(store.getBucket('s1').tabs.map((t) => t.id)).toEqual(seen);
+      releaseUpsert!();
+      const tab = await pending;
+      expect(tab.id).toBe(seen[0]);
+    });
   });
 
   describe('addOrFocusSingletonTab', () => {
