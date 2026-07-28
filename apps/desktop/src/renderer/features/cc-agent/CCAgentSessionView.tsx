@@ -1124,6 +1124,7 @@ export function CCAgentSessionView({
     planViewerState,
     setPlanViewerState,
     pendingIssueConfirm,
+    updateIssueConfirmDraft,
     respondToIssueConfirm,
     pendingRenameSessionsConfirm,
     respondToRenameSessionsConfirm,
@@ -3097,6 +3098,7 @@ export function CCAgentSessionView({
                 ) : pendingIssueConfirm ? (
                   <IssueConfirmCard
                     pending={pendingIssueConfirm}
+                    onDraftChange={updateIssueConfirmDraft}
                     onRespond={respondToIssueConfirm}
                   />
                 ) : pendingRenameSessionsConfirm ? (

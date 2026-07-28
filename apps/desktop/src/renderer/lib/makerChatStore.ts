@@ -7117,6 +7117,40 @@ function respondToIssueConfirm(
     .catch((err) => log.error('Failed to respond to issue confirm:', err));
 }
 
+/**
+ * issue_confirm:把用户在确认卡片里的编辑同步进 session-keyed store。
+ *
+ * 卡片会在切换对话时随路由卸载;pendingIssueConfirm 本身按 sessionId 常驻,
+ * 因此把编辑态收口到它的 draft 就能在返回原对话时恢复。requestId guard
+ * 防止旧卡片的迟到 input 事件覆盖同一会话里新一轮确认请求。
+ */
+function updateIssueConfirmDraft(
+  sessionId: string,
+  requestId: string,
+  patch: Partial<PendingIssueConfirm['draft']>,
+): void {
+  if (!sessionId) return;
+  setState(sessionId, (s) => {
+    const pending = s.pendingIssueConfirm;
+    if (!pending || pending.requestId !== requestId) return s;
+    const nextDraft = { ...pending.draft, ...patch };
+    if (
+      nextDraft.title === pending.draft.title &&
+      nextDraft.body === pending.draft.body &&
+      nextDraft.type === pending.draft.type
+    ) {
+      return s;
+    }
+    return {
+      ...s,
+      pendingIssueConfirm: {
+        ...pending,
+        draft: nextDraft,
+      },
+    };
+  });
+}
+
 function parseRenameSessionsConfirmItem(
   raw: unknown,
 ): PendingRenameSessionsConfirm['changes'][number] | null {
@@ -7999,6 +8033,7 @@ export const makerChatStore = {
   updateSystemCardData,
   respondToPermission,
   respondToIssueConfirm,
+  updateIssueConfirmDraft,
   respondToRenameSessionsConfirm,
   respondToGhostGrantConfirm,
   answerUserQuestion,

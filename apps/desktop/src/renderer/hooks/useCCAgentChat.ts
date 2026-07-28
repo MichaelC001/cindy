@@ -220,6 +220,11 @@ interface UseCCAgentChatReturn {
   cancelPlanReview: (requestId: string) => void;
   /** issue_confirm: Currently pending GitHub issue confirm card */
   pendingIssueConfirm: PendingIssueConfirm | null;
+  /** issue_confirm: Persist edited fields across session-switch remounts. */
+  updateIssueConfirmDraft: (
+    requestId: string,
+    patch: Partial<PendingIssueConfirm['draft']>,
+  ) => void;
   /** issue_confirm: Respond to the pending issue confirm card */
   respondToIssueConfirm: (
     result:
@@ -560,6 +565,14 @@ export function useCCAgentChat(
     [sessionId],
   );
 
+  const updateIssueConfirmDraft = useCallback(
+    (requestId: string, patch: Partial<PendingIssueConfirm['draft']>) => {
+      if (!sessionId) return;
+      makerChatStore.updateIssueConfirmDraft(sessionId, requestId, patch);
+    },
+    [sessionId],
+  );
+
   const respondToRenameSessionsConfirm = useCallback(
     (result: { confirmed: true } | { confirmed: false }) => {
       if (!sessionId) return;
@@ -840,6 +853,7 @@ export function useCCAgentChat(
     respondToPlanReview,
     cancelPlanReview,
     pendingIssueConfirm: lightState.pendingIssueConfirm,
+    updateIssueConfirmDraft,
     respondToIssueConfirm,
     pendingRenameSessionsConfirm: lightState.pendingRenameSessionsConfirm,
     respondToRenameSessionsConfirm,
