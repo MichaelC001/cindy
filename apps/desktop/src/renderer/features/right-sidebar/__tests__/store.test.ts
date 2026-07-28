@@ -566,6 +566,34 @@ describe('RSB store', () => {
       expect(store.getBucket('s1').tabs.map((t) => t.id)).toEqual([a.id]);
     });
 
+    it('close 失败的回滚只插回被关的 tab,不覆盖 in-flight 期间并发的 addTab/setActive', async () => {
+      // addTab / setActiveTab 有意不进 close 队列:close 的 IPC 在途期间它们可能
+      // 已把新 tab 写进 cache 和 DB。整快照回滚会把并发 tab 从 cache 抹掉(DB 里
+      // 还在,重启 hydrate 后"幽灵复活")——精准回滚只恢复被关的那一个。
+      const a = await store.addTab('s1', 'web-browser', null);
+      let rejectClose!: (err: Error) => void;
+      ipc.close.mockImplementationOnce(
+        () => new Promise((_resolve, reject) => {
+          rejectClose = (err) => reject(err);
+        }),
+      );
+
+      const close = store.closeTab('s1', a.id);
+      await Promise.resolve();
+      // close IPC 挂起期间并发新增一个 tab(popup 场景)并成为 active。
+      const b = await store.addTab('s1', 'web-browser', { url: 'https://popup.example' });
+      expect(store.getBucket('s1').tabs.map((t) => t.id)).toEqual([b.id]);
+
+      rejectClose(new Error('boom'));
+      await expect(close).rejects.toThrow('boom');
+
+      const after = store.getBucket('s1');
+      // a 被插回,b 不能丢。
+      expect(after.tabs.map((t) => t.id).sort()).toEqual([a.id, b.id].sort());
+      // 并发操作已把 active 指向 b,回滚不得抢回。
+      expect(after.activeTabId).toBe(b.id);
+    });
+
     it('waits for queued state writes before deleting the tab row', async () => {
       const a = await store.addTab('s1', 'web-browser', { url: 'https://example.com/0' });
       ipc.upsert.mockClear();

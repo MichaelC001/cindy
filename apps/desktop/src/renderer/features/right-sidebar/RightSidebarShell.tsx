@@ -380,25 +380,28 @@ export function RightSidebarShell({
         const newTab = await addTab(targetSessionId, 'web-browser', initialState, {
           onOptimisticAdd: markPopupSpawnedTab,
         });
-        if (targetSessionId !== sessionId) {
-          // 目标 session 不在前台:Shell 只渲染当前 bucket,后台 tab 不会有
-          // BrowserTabBody 去出生 webview —— 必须离屏物化,否则 OAuth 授权页
-          // 根本不开始加载,后台 agent 的登录流程原地卡死(与 main 端 open
-          // tab-op 的 eagerSpawnAndReport 同理)。
-          await eagerSpawnAndReport(targetSessionId, newTab.id, url);
-          // 物化期间 tab 可能已经没了:OAuth callback 页在 dom-ready 前就
-          // window.close()(guest 自关路径会把最后一个 tab 关掉并请求收起侧栏),
-          // 或用户手动关了它。此时再无条件请求 'open' 会把刚写的"收起"存档翻回
-          // "展开",用户切回该 session 只看到一个空侧栏。
-          if (!getBucket(targetSessionId).tabs.some((t) => t.id === newTab.id)) return;
-          // 只写它的折叠存档,用户切回去时侧栏已展开。
-          // userInitiated:false —— popup 由 guest 页面脚本催生,不是用户当次手势;
-          // detached 形态下不得 show+focus 抢走用户前台(与 agent tab-op open 一致)。
-          requestRightSidebarVisibility('open', {
-            sessionId: targetSessionId,
-            userInitiated: false,
-          });
-        }
+        // 一律离屏物化,不区分目标 session 是否当前:
+        // - 跨 session:Shell 只渲染当前 bucket,后台 tab 没有 BrowserTabBody 去
+        //   出生 webview;
+        // - **同 session 但侧栏折叠**:Shell 挂着但 shellVisible=false,#700 之后
+        //   隐藏 tab 不再首次物化 —— popup URL 同样永远不开始加载,OAuth 卡死。
+        // 两种形态都没有别的物化路径(与 main 端 open tab-op 的 eagerSpawnAndReport
+        // 同理);侧栏可见时 TabBody 会 acquire 同一个 pool entry,eagerSpawn 幂等
+        // 复用,无副作用。
+        await eagerSpawnAndReport(targetSessionId, newTab.id, url);
+        // 物化期间 tab 可能已经没了:OAuth callback 页在 dom-ready 前就
+        // window.close()(guest 自关路径会把最后一个 tab 关掉并请求收起侧栏),
+        // 或用户手动关了它。此时再无条件请求 'open' 会把刚写的"收起"存档翻回
+        // "展开",用户切回该 session 只看到一个空侧栏。
+        if (!getBucket(targetSessionId).tabs.some((t) => t.id === newTab.id)) return;
+        // 当前 session:折叠时展开侧栏让用户看到 popup;已展开则 no-op。
+        // 跨 session:只写目标 session 的折叠存档,用户切回去时侧栏已展开。
+        // userInitiated:false —— popup 由 guest 页面脚本催生,不是用户当次手势;
+        // detached 形态下不得 show+focus 抢走用户前台(与 agent tab-op open 一致)。
+        requestRightSidebarVisibility('open', {
+          sessionId: targetSessionId,
+          userInitiated: false,
+        });
       })().catch((err) => {
         log.error('rsb popup → addTab failed', { sessionId: targetSessionId, url, err });
       });

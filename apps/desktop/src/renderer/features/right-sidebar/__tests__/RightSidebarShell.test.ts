@@ -717,6 +717,36 @@ describe('RightSidebarShell 跨 session popup 归属', () => {
     expect(requests[0].opts.userInitiated).toBe(false);
   });
 
+  it('当前 session 的 popup 也离屏物化并请求展开(折叠侧栏下 OAuth 不再卡死)', async () => {
+    // #700 之后隐藏 tab 不再首次物化:当前 session 侧栏折叠时 Shell 挂着但
+    // shellVisible=false,popup tab 若只靠 TabBody 出生 webview,授权页永远不
+    // 开始加载。popup 路径必须无条件 eagerSpawn,并对当前 session 发展开请求
+    // (折叠时展开;已展开 no-op)。
+    renderShell();
+    await waitFor(() => expect(rsbBrowserPopupListeners).toHaveLength(1));
+    await act(async () => {
+      rsbBrowserPopupListeners[0]({
+        url: 'https://accounts.example.com/oauth',
+        disposition: 'foreground-tab',
+        openerTabId: 'tab-opener',
+        openerSessionId: 's1', // 归属就是当前 session
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(getBucket('s1').tabs).toHaveLength(1));
+    await waitFor(() => expect(eagerSpawnAndReport).toHaveBeenCalledTimes(1));
+    expect(eagerSpawnAndReport).toHaveBeenCalledWith(
+      's1',
+      getBucket('s1').tabs[0].id,
+      'https://accounts.example.com/oauth',
+    );
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0].visibility).toBe('open');
+    expect(requests[0].opts.sessionId).toBe('s1');
+    expect(requests[0].opts.userInitiated).toBe(false);
+  });
+
   it('物化期间 tab 已被关掉时,不再请求展开(否则把"收起"翻回"展开")', async () => {
     // OAuth callback 页可能在 dom-ready 前就 window.close():guest 自关路径会关掉
     // 最后一个 tab 并请求收起侧栏,此处若无条件再请求 open,用户切回该 session

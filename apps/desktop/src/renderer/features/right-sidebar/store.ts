@@ -658,7 +658,23 @@ export async function closeTab(
       forgetClosedTab(sessionId, tabId);
     } catch (err) {
       log.error('closeTab IPC failed; rolling back cache', { sessionId, tabId, err });
-      setBucket(sessionId, { tabs: prev.tabs, activeTabId: prev.activeTabId });
+      // 精准回滚:只把被乐观删除的这个 tab 插回**当前** bucket,不整份恢复 prev
+      // 快照。close 队列只串行关闭之间的变更,addTab / setActiveTab 是有意留在
+      // 队列外的 —— close in-flight 期间它们可能已把新 tab 写进 cache 和 DB,
+      // 整快照回滚会把那些并发变更从 cache 抹掉(DB 里还在,重启 hydrate 后
+      // "幽灵复活",cache 与 DB 分叉)。
+      const now = getBucket(sessionId);
+      if (!now.tabs.some((t) => t.id === tabId)) {
+        const restored = [...now.tabs];
+        restored.splice(Math.min(idx, restored.length), 0, prev.tabs[idx]);
+        // activeTabId:只有"原 active 就是被关的 tab,且当前 active 仍是关闭时选出
+        // 的替代者"才恢复回被关 tab;并发操作已把 active 指向别处时尊重现值。
+        const activeTabId =
+          prev.activeTabId === tabId && now.activeTabId === nextActiveId
+            ? tabId
+            : now.activeTabId;
+        setBucket(sessionId, { tabs: restored, activeTabId });
+      }
       throw err;
     }
   });
