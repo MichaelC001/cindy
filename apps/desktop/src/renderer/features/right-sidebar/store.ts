@@ -436,8 +436,11 @@ export async function ensureHydrated(sessionId: string): Promise<void> {
  * tabId。给需要"在 React 能看到这个 tab 的同一 tick 内登记副标记"的调用方用
  * (如 popup 来源标记:等 addTab resolve 再登记的话,持久化 IPC 在途期间 React
  * 已可能 mount webview 并加载完 callback 页,window.close 事件会赶在登记前到达
- * 且不重发)。IPC 失败回滚时不反向通知——调用方的标记以 tabId 为键,tab 已不
- * 存在,残留无害(tabId 不复用)。
+ * 且不重发)。
+ *
+ * 不需要对称的"回滚回调":IPC 失败回滚时 store 自己走 `forgetClosedTab(id)` 把
+ * 挂在这个 tabId 上的旁路记录(含 popup 标记)清掉 —— 与关闭路径同一个收尾函数。
+ * 否则 DB / IPC 异常期间反复触发 popup,标记集合会随进程生命周期无界增长。
  */
 export async function addTab(
   sessionId: string,
@@ -487,6 +490,9 @@ export async function addTab(
     }
     log.error('addTab IPC failed; rolling back cache', { sessionId, kind, err });
     setBucket(sessionId, { tabs: prev.tabs, activeTabId: prev.activeTabId });
+    // 这个 tab 从未存在过 —— `onOptimisticAdd` 里登记的旁路记录(popup 标记等)
+    // 必须跟着回滚,否则没有任何 closeTab 成功分支会来清它。
+    forgetClosedTab(sessionId, id);
     throw err;
   }
 }

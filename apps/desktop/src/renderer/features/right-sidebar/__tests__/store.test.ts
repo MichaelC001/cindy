@@ -319,6 +319,25 @@ describe('RSB store', () => {
       expect(store.getBucket('s1').tabs).toHaveLength(0);
     });
 
+    it('创建失败回滚时清掉 onOptimisticAdd 登记的旁路标记', async () => {
+      // 没有任何 closeTab 会来清它:tab 从未存在过。不清则 DB/IPC 异常期间反复
+      // 触发 popup 会让标记集合随进程生命周期无界增长。
+      ipc.upsert.mockRejectedValueOnce(new Error('db down'));
+      let createdId = '';
+
+      await expect(
+        store.addTab('s1', 'web-browser', null, {
+          onOptimisticAdd: (tabId) => {
+            createdId = tabId;
+            markPopupSpawnedTab(tabId);
+          },
+        }),
+      ).rejects.toThrow('db down');
+
+      expect(store.getBucket('s1').tabs).toHaveLength(0);
+      expect(isPopupSpawnedTab(createdId)).toBe(false);
+    });
+
     it('创建失败时并发的 closeTab 不发 close,不留幽灵 tab', async () => {
       // 创建失败 = DB 里从来没有这行,addTab 已把它从 cache 回滚掉。此时若照样发
       // close 必然 NOT_FOUND,closeTab 的回滚分支会把这个幽灵 tab 写回 cache。
