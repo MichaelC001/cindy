@@ -372,7 +372,8 @@ export class PtyManager {
     const rows = opts.rows && opts.rows > 0 ? opts.rows : DEFAULT_ROWS;
     const resolved = resolveShellForCreate(opts.shellPref ?? null);
 
-    // 合并 env:先复制父进程环境,再做平台兜底,最后应用调用方显式覆盖。
+    // 合并 env:先复制父进程环境,做平台兜底,再应用调用方显式覆盖。
+    // ENV_KEYS_TO_STRIP 与 TERM 仍在下方强制执行,不允许 opts.env 改写。
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (typeof v === 'string') env[k] = v;
