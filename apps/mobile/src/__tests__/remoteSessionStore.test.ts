@@ -1305,9 +1305,37 @@ describe('remoteSessionStore', () => {
 
     remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
       sessionId: 's1',
-      event: { type: 'error', data: { message: 'retrying', willRetry: true } },
+      event: { type: 'error', data: { message: 'Reconnecting... 1/5', willRetry: true } },
     });
     expect(remoteSessionStore.isSessionRunning('s1')).toBe(true);
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toEqual({
+      attempt: 1,
+      maxAttempts: 5,
+    });
+
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: {
+        type: 'error',
+        data: {
+          message: 'Reconnecting... 2/5 (stream disconnected before completion)',
+          isTerminal: false,
+          willRetry: true,
+        },
+      },
+    });
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toEqual({
+      attempt: 2,
+      maxAttempts: 5,
+    });
+
+    pushMakerText('s1', 'persist-reconnected', 'resumed', false);
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toBeNull();
+
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: { type: 'error', data: { message: 'Reconnecting... 3/5', willRetry: true } },
+    });
 
     vi.setSystemTime(new Date('2026-01-01T00:00:20.000Z'));
     remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
@@ -1317,6 +1345,7 @@ describe('remoteSessionStore', () => {
     expect(remoteSessionStore.getSessionRunStatus('s1')).toMatchObject({
       isRunning: true,
       startedAt: Date.parse('2026-01-01T00:00:10.000Z'),
+      reconnectAttempt: null,
       status: 'Thinking',
       tokenUsage: 1200,
     });

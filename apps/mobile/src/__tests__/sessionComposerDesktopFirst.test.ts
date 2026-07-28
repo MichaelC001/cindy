@@ -124,11 +124,13 @@ describe('mobile session composer desktop-first surface', () => {
     expect(source).not.toContain('testID="session.attachmentPathPanel"');
     expect(source).not.toContain('被控电脑上的文件路径');
     expect(source).toContain('testID="session.composerActivityStatus"');
-    expect(source).toContain('Thinking...');
+    expect(source).toContain("t('session.screen.thinking')");
+    expect(source).toContain("t('session.screen.networkReconnecting', {");
     expect(source).toContain('ArrowDown');
     expect(source).toContain('useSessionRunStatus');
     expect(source).toContain('remoteSessionRunStatus.tokenUsage');
     expect(source).toContain('remoteSessionRunStatus.startedAt ?? composerActivityStartedAt');
+    expect(source).toContain('reconnectAttempt={remoteSessionRunStatus.reconnectAttempt}');
     expect(source).toContain('sideTaskRunning={remoteSessionRunStatus.sideTaskRunning}');
     expect(source).toContain('startedAt={composerActivityStartedAtMs}');
     expect(source).toContain('tokenUsage={composerActivityTokenUsage}');

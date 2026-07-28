@@ -46,10 +46,16 @@ export const sessionMetaWriteQueue = createSessionWriteQueue();
 
 export interface RemoteSessionRunStatus {
   isRunning: boolean;
+  reconnectAttempt: RemoteSessionReconnectAttempt | null;
   sideTaskRunning: boolean;
   startedAt: number | null;
   status: string;
   tokenUsage: number;
+}
+
+export interface RemoteSessionReconnectAttempt {
+  attempt: number;
+  maxAttempts: number;
 }
 
 interface SessionMessageSyncMarker {
@@ -65,6 +71,7 @@ interface LivePlanSnapshot {
 
 const EMPTY_SESSION_RUN_STATUS: RemoteSessionRunStatus = Object.freeze({
   isRunning: false,
+  reconnectAttempt: null,
   sideTaskRunning: false,
   startedAt: null,
   status: '',
@@ -1449,6 +1456,7 @@ export const remoteSessionStore = {
     const next: RemoteSessionRunStatus = {
       ...current,
       isRunning: running,
+      reconnectAttempt: running ? current.reconnectAttempt : null,
       sideTaskRunning: running ? current.sideTaskRunning : false,
       startedAt: running ? (current.startedAt ?? Date.now()) : null,
     };
@@ -1481,6 +1489,7 @@ export const remoteSessionStore = {
       const next: RemoteSessionRunStatus = {
         ...current,
         isRunning: running,
+        reconnectAttempt: running ? current.reconnectAttempt : null,
         sideTaskRunning: running ? current.sideTaskRunning : false,
         startedAt: running ? (current.startedAt ?? Date.now()) : null,
       };
@@ -1819,6 +1828,7 @@ export const remoteSessionStore = {
       changed = writeSessionRunStatus(sessionId, {
         ...current,
         isRunning: false,
+        reconnectAttempt: null,
         sideTaskRunning: false,
         startedAt: null,
       }) || changed;
@@ -1828,13 +1838,17 @@ export const remoteSessionStore = {
 
   applyMakerEvent(sessionId: string, event: Record<string, unknown>, persistId?: string): void {
     const type = readString(event, 'type');
+    const reconnectCleared = type !== null && type !== 'error' && type !== 'done'
+      ? clearSessionReconnectAttempt(sessionId)
+      : false;
     if (type === 'text') {
       if (isRemoteTextDeltaEvent(event)) {
-        if (enqueueRemoteTextDelta(sessionId, event, persistId)) emit();
+        if (enqueueRemoteTextDelta(sessionId, event, persistId) || reconnectCleared) emit();
         return;
       }
       let changed = flushPendingTextDelta(sessionId);
       changed = applyRemoteTextEvent(sessionId, event, persistId) || changed;
+      changed = reconnectCleared || changed;
       if (changed) emit();
       return;
     }
@@ -1890,6 +1904,25 @@ export const remoteSessionStore = {
     }
 
     const textFlushed = flushPendingTextDelta(sessionId);
+    if (type === 'error') {
+      const data = isRecord(event.data) ? event.data : null;
+      const reconnectAttempt = data?.willRetry === true
+        ? parseReconnectAttemptMessage(readString(data, 'message') ?? '')
+        : null;
+      if (reconnectAttempt) {
+        const current = readSessionRunStatus(sessionId);
+        const changed = writeSessionRunStatus(sessionId, {
+          ...current,
+          isRunning: true,
+          reconnectAttempt,
+          startedAt: current.startedAt ?? Date.now(),
+        });
+        if (changed || textFlushed) emit();
+      } else if (textFlushed) {
+        emit();
+      }
+      return;
+    }
     if (type === 'tool_use') {
       // Finalize before applying update_plan so its row update and the streaming
       // row transition are published in one snapshot notification.
@@ -1899,10 +1932,10 @@ export const remoteSessionStore = {
       );
       const livePlan = applyLivePlanToolUseMessage(sessionId, event, persistId);
       if (livePlan.handled) {
-        if (textFlushed || streamingChanged || livePlan.changed) emit();
+        if (textFlushed || streamingChanged || livePlan.changed || reconnectCleared) emit();
         return;
       }
-      if (textFlushed || streamingChanged) emit();
+      if (textFlushed || streamingChanged || reconnectCleared) emit();
       return;
     }
     if (type === 'agent_task_update') {
@@ -1917,7 +1950,7 @@ export const remoteSessionStore = {
       if (next) {
         sessionTaskUpdates.set(sessionId, next);
         emit();
-      } else if (textFlushed) {
+      } else if (textFlushed || reconnectCleared) {
         emit();
       }
       return;
@@ -1934,7 +1967,7 @@ export const remoteSessionStore = {
       // Transcript replay and the live stream may forward the same provider boundary.
       // De-duplicate before finalizing, otherwise a replay could end post-compact work.
       if (existing.some((message) => messageKey(message) === clientId)) {
-        if (textFlushed) emit();
+        if (textFlushed || reconnectCleared) emit();
         return;
       }
       // The compact boundary itself preserves the historical `streaming: false` marker
@@ -1995,6 +2028,7 @@ export const remoteSessionStore = {
       }
       const next: RemoteSessionRunStatus = {
         isRunning,
+        reconnectAttempt: null,
         sideTaskRunning: isRunning ? data?.skipTurnReset === true : false,
         startedAt: isRunning ? (current.startedAt ?? Date.now()) : null,
         status: rawStatus ?? current.status,
@@ -2006,10 +2040,11 @@ export const remoteSessionStore = {
         || turnBoundaryChanged
         || textFlushed
         || streamingChanged
+        || reconnectCleared
       ) emit();
       return;
     }
-    if (textFlushed) emit();
+    if (textFlushed || reconnectCleared) emit();
   },
 
   removeDevice(deviceId: string): void {
@@ -2211,6 +2246,28 @@ function deviceListsEqual(
 
 function readSessionRunStatus(sessionId: string): RemoteSessionRunStatus {
   return sessionRunStatus.get(sessionId) ?? EMPTY_SESSION_RUN_STATUS;
+}
+
+function clearSessionReconnectAttempt(sessionId: string): boolean {
+  const current = readSessionRunStatus(sessionId);
+  if (!current.reconnectAttempt) return false;
+  return writeSessionRunStatus(sessionId, { ...current, reconnectAttempt: null });
+}
+
+function parseReconnectAttemptMessage(message: string): RemoteSessionReconnectAttempt | null {
+  const match = /\bReconnecting(?:\.{3}|…)\s*(\d+)\s*\/\s*(\d+)\b/i.exec(message);
+  if (!match) return null;
+  const attempt = Number(match[1]);
+  const maxAttempts = Number(match[2]);
+  if (
+    !Number.isSafeInteger(attempt)
+    || !Number.isSafeInteger(maxAttempts)
+    || attempt < 1
+    || maxAttempts < attempt
+  ) {
+    return null;
+  }
+  return { attempt, maxAttempts };
 }
 
 // 写 maker turn 边界,返回是否实际变化——变化必须参与调用方的 emit 判定(宽 run status

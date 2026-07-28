@@ -398,6 +398,7 @@ import {
   sessionMetaWriteGuard,
   sessionMetaWriteQueue,
   sessionPendingWrites,
+  type RemoteSessionRunStatus,
   useRemoteSessions,
   useSessionGoalStatus,
   useSessionInputProjection,
@@ -7119,6 +7120,7 @@ export default function SessionScreen() {
                   ]}
                 >
                   <ComposerActivityStatus
+                    reconnectAttempt={remoteSessionRunStatus.reconnectAttempt}
                     sideTaskRunning={remoteSessionRunStatus.sideTaskRunning}
                     startedAt={composerActivityStartedAtMs}
                     tokenUsage={composerActivityTokenUsage}
@@ -7904,11 +7906,13 @@ function ComposerRuntimePill({
 }
 
 function ComposerActivityStatus({
+  reconnectAttempt,
   sideTaskRunning,
   startedAt,
   tokenUsage,
   visible,
 }: {
+  reconnectAttempt: RemoteSessionRunStatus['reconnectAttempt'];
   sideTaskRunning: boolean;
   startedAt: number | null;
   tokenUsage: number;
@@ -7916,6 +7920,7 @@ function ComposerActivityStatus({
 }) {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
+  const { t } = useTranslation();
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -7935,6 +7940,12 @@ function ComposerActivityStatus({
 
   const elapsedText = formatComposerActivityElapsed(elapsed);
   const tokenText = formatComposerActivityTokens(tokenUsage);
+  const activityText = reconnectAttempt
+    ? t('session.screen.networkReconnecting', {
+        attempt: reconnectAttempt.attempt,
+        maxAttempts: reconnectAttempt.maxAttempts,
+      })
+    : t('session.screen.thinking');
 
   return (
     <View
@@ -7944,7 +7955,7 @@ function ComposerActivityStatus({
     >
       <View style={styles.composerActivityPrimary}>
         <Sparkles color={colors.statusAccent} size={iconSize.sm} strokeWidth={iconStroke.regular} />
-        <Text style={styles.composerActivityStatusText}>Thinking...</Text>
+        <Text numberOfLines={1} style={styles.composerActivityStatusText}>{activityText}</Text>
       </View>
       <View style={styles.composerActivityMeta}>
         <Text style={styles.composerActivityMetaText}>{elapsedText}</Text>
