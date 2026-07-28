@@ -260,6 +260,7 @@ export function createLiziMcpProviders(
         instance: createWechatMcpServer({
           ...opts.wechatBot!,
           getPeerId: () => readWechatPeerId(ctx) ?? opts.wechatBot!.getMostRecentPeerId(),
+          workingDir: ctx.workingDir,
         }),
       }),
     });

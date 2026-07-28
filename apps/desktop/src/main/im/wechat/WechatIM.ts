@@ -961,7 +961,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       payload.unsupportedMedia.length > 0
         ? `${payload.text}\n\n（微信消息还包含当前版本暂不支持的媒体，本轮仅处理文字。）`
         : payload.text;
-    if (!prompt.trim()) {
+    if (!hasWechatTaskContent(prompt, payload.attachments)) {
       await this.#commitSimpleReply(task, '当前版本暂不支持处理这类微信媒体。');
       return;
     }
@@ -1733,6 +1733,10 @@ function normalizeFinalOutputText(text: string): string {
   return filterWechatMarkdown(text) || '✅ (本轮无文本输出)';
 }
 
+function hasWechatTaskContent(text: string, attachments: readonly WechatTaskAttachment[]): boolean {
+  return text.trim().length > 0 || attachments.length > 0;
+}
+
 function formatWechatInteractionPrompt(request: InteractionRequest): string {
   if (request.kind === 'permission') {
     return `需要确认工具“${request.displayName ?? request.toolName}”。
@@ -1817,6 +1821,7 @@ function machineErrorCode(error: unknown): string {
 
 export const __testing = {
   authorizationCancelPhase,
+  hasWechatTaskContent,
   normalizeFinalOutputText,
   formatWechatInteractionPrompt,
   parseWechatInteractionReply,

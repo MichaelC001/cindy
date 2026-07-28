@@ -131,10 +131,21 @@ export interface WechatBotSendMessageResult {
   reason?: string;
 }
 
+export interface WechatBotSendFileResult {
+  ok: boolean;
+  messageId?: string;
+  reason?: string;
+}
+
 /** Host bridge for the personal WeChat proactive-message MCP. */
 export interface WechatBotMcpHostDeps {
   getMostRecentPeerId(): Promise<string | null> | string | null;
   sendMessage(peerId: string, text: string): Promise<WechatBotSendMessageResult>;
+  sendFile(
+    peerId: string,
+    absPath: string,
+    displayName?: string,
+  ): Promise<WechatBotSendFileResult>;
   logger?: LiziMcpLogger;
 }
 

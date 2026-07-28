@@ -42,6 +42,19 @@ describe('WechatIM host boundary', () => {
     expect(__testing.normalizeFinalOutputText('hello')).toBe('hello');
   });
 
+  it('dispatches attachment-only WeChat messages to the agent', () => {
+    expect(__testing.hasWechatTaskContent('', [])).toBe(false);
+    expect(
+      __testing.hasWechatTaskContent('', [
+        {
+          kind: 'image',
+          absPath: 'wechat-image.png',
+          storage: 'cindy-media',
+        },
+      ] as never),
+    ).toBe(true);
+  });
+
   it('returns to needs_reauth when cancelling an authorization for an existing binding', () => {
     expect(__testing.authorizationCancelPhase(false, true)).toBe('needs_reauth');
     expect(__testing.authorizationCancelPhase(false, false)).toBe('disconnected');

@@ -157,6 +157,17 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
           return { ok: false, reason: 'SEND_FAIL' };
         }
       },
+      sendFile: async (peerId, absPath, displayName) => {
+        const result = await wechatIm.sendFile(peerId, absPath, displayName);
+        if (!result.ok) {
+          createLogger('mcp/cindy_wechat').warn(
+            'sendFile failed target=...%s reason=%s',
+            peerId.slice(-8),
+            result.reason ?? 'unknown',
+          );
+        }
+        return result;
+      },
       logger: createLogger('mcp/cindy_wechat'),
     },
     // cindy_slack(2026-07-19): Slack 网关工具。桥经 hook-control 的零依赖
