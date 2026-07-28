@@ -18,7 +18,7 @@ vi.mock('../../../cindy-media/blobStore', () => ({
 }));
 
 import { __testing, stageWechatTaskMedia } from '../mediaStaging';
-import { pcmS16leToWav } from '../silkWav';
+import { pcmS16leToWav, WavOutputLimitError } from '../silkWav';
 
 describe('WeChat media staging validation', () => {
   beforeEach(() => {
@@ -62,6 +62,12 @@ describe('WeChat media staging validation', () => {
     expect(wav.readUInt16LE(22)).toBe(1);
     expect(wav.readUInt16LE(34)).toBe(16);
     expect(wav.subarray(44)).toEqual(Buffer.from([1, 0, 2, 0]));
+  });
+
+  it('rejects oversized PCM before allocating its WAV output', () => {
+    expect(() => pcmS16leToWav(Buffer.from([1, 0]), 24_000, 45)).toThrow(
+      WavOutputLimitError,
+    );
   });
 
   it('distinguishes download, decode, and staging failures', async () => {

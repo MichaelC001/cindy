@@ -1,8 +1,27 @@
-export function pcmS16leToWav(pcm: Uint8Array, sampleRate: number): Uint8Array {
+const WAV_HEADER_BYTE_LENGTH = 44;
+
+export class WavOutputLimitError extends Error {
+  constructor() {
+    super('WAV output exceeds the configured byte limit.');
+    this.name = 'WavOutputLimitError';
+  }
+}
+
+export function pcmS16leToWav(
+  pcm: Uint8Array,
+  sampleRate: number,
+  maxOutputByteLength?: number,
+): Uint8Array {
   if (pcm.byteLength === 0 || pcm.byteLength % 2 !== 0) {
     throw new Error('Invalid PCM payload.');
   }
-  const result = Buffer.allocUnsafe(44 + pcm.byteLength);
+  if (
+    maxOutputByteLength !== undefined &&
+    pcm.byteLength > maxOutputByteLength - WAV_HEADER_BYTE_LENGTH
+  ) {
+    throw new WavOutputLimitError();
+  }
+  const result = Buffer.allocUnsafe(WAV_HEADER_BYTE_LENGTH + pcm.byteLength);
   result.write('RIFF', 0, 'ascii');
   result.writeUInt32LE(36 + pcm.byteLength, 4);
   result.write('WAVE', 8, 'ascii');
