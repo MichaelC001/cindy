@@ -94,7 +94,7 @@ test("client CI owns the complete Desktop Git integration tier", () => {
 	const workflow = fs.readFileSync(
 		path.join(ROOT, ".github", "workflows", "ci.yml"),
 		"utf8",
-	);
+	).replace(/\r\n/g, "\n");
 	const job = workflow.match(/\n  git-integration:\n([\s\S]*)$/);
 	assert.ok(job, "client CI must define an independent git-integration job");
 	assert.match(
