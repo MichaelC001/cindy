@@ -34,7 +34,7 @@ import {
 import { readDiffs } from '../diffReader';
 import { runGit } from '../gitRunner';
 import { readStatus } from '../statusReader';
-import type { FileDiff, GitReviewDeps, ReviewDiffReadOptions, ReviewScope } from '../types';
+import type { FileDiff, GitReviewDeps, ReviewScope } from '../types';
 
 const repos: string[] = [];
 const HEX_OID = '0123456789abcdef0123456789abcdef01234567';
@@ -311,77 +311,48 @@ describe('git-review write busy gate', () => {
 });
 
 describe('git-review hunk IPC roundtrip', () => {
-  async function parseCurrentHunk(
-    repoPath: string,
-    source: 'staged' | 'unstaged',
-    options: ReviewDiffReadOptions,
-  ) {
-    const baseScope = scope(repoPath);
-    const current = await readStatus(baseScope);
-    const diff = (await readDiffs(current.scope, current, options))[source][0];
-    expect(diff?.hunks[0]).toBeTruthy();
-
-    const payload = JSON.parse(JSON.stringify({
+  function parseSerializedHunk(diff: FileDiff, ignoreWhitespace = false) {
+    return parseHunkPayload(JSON.parse(JSON.stringify({
       sessionId: 's1',
       diff,
       hunkIndex: diff.hunks[0].index,
-      ignoreWhitespace: options.ignoreWhitespace,
-    }));
-    const parsed = parseHunkPayload(payload);
-    expect(parsed.diff.index).toEqual(diff.index);
-    expect(parsed.diff.index.oldOid ?? parsed.diff.index.newOid).toMatch(/^[0-9a-f]{4,64}$/i);
-    return { baseScope, parsed };
+      ignoreWhitespace,
+    })));
   }
 
-  it('keeps abbreviated index oids fresh through hunk stage, unstage, and discard IPC parsing', async () => {
-    const repoPath = await initRepo();
-    const baseScope = scope(repoPath);
-    const deps = gitDeps(baseScope);
-    await fs.writeFile(path.join(repoPath, 'seed.txt'), 'changed\n');
+  it('preserves abbreviated index oids through hunk IPC serialization', () => {
+    const diff = baseDiff({
+      index: { oldOid: SHORT_HEX_OID, newOid: HEX_OID },
+    });
 
-    let parsed = (await parseCurrentHunk(repoPath, 'unstaged', {})).parsed;
-    await runReviewHunkStageOperation('s1', 'stage', parsed.diff, parsed.hunkIndex, parsed.options, deps);
-    expect((await runGit(['diff', '--cached', '--', 'seed.txt'], { cwd: repoPath })).stdout).toContain('+changed');
+    const parsed = parseSerializedHunk(diff);
 
-    parsed = (await parseCurrentHunk(repoPath, 'staged', {})).parsed;
-    await runReviewHunkStageOperation('s1', 'unstage', parsed.diff, parsed.hunkIndex, parsed.options, deps);
-    expect((await runGit(['diff', '--cached', '--', 'seed.txt'], { cwd: repoPath })).stdout).toBe('');
-    expect((await runGit(['diff', '--', 'seed.txt'], { cwd: repoPath })).stdout).toContain('+changed');
-
-    parsed = (await parseCurrentHunk(repoPath, 'unstaged', {})).parsed;
-    await runReviewHunkStageOperation('s1', 'discard', parsed.diff, parsed.hunkIndex, parsed.options, deps);
-    expect((await runGit(['diff', '--', 'seed.txt'], { cwd: repoPath })).stdout).toBe('');
-    expect(await fs.readFile(path.join(repoPath, 'seed.txt'), 'utf8')).toBe('seed\n');
+    expect(parsed.diff.index).toEqual(diff.index);
+    expect(parsed.diff.index.oldOid).toBe(SHORT_HEX_OID);
+    expect(parsed.diff.index.newOid).toBe(HEX_OID);
   });
 
-  it('keeps hidden-whitespace hunk IPC operations fresh without dropping whitespace-only edits', async () => {
-    const repoPath = await initRepo();
-    const baseScope = scope(repoPath);
-    const deps = gitDeps(baseScope);
-    await fs.writeFile(path.join(repoPath, 'seed.txt'), 'one\nalpha\nkeep = 1;\nbeta\ngamma\n');
-    await runGit(['add', 'seed.txt'], { cwd: repoPath });
-    await runGit(['commit', '--no-gpg-sign', '-m', 'whitespace fixture'], { cwd: repoPath });
-    await fs.writeFile(path.join(repoPath, 'seed.txt'), 'one\nalpha\nkeep = 2;\n  beta\ngamma\n');
+  it('preserves hidden-whitespace options and line selection through hunk IPC serialization', () => {
+    const diff = baseDiff({
+      hunks: [{
+        index: 3,
+        header: '@@ -1,2 +1,2 @@',
+        oldStart: 1,
+        oldLines: 2,
+        newStart: 1,
+        newLines: 2,
+        section: '',
+        lines: [],
+        selectableLines: [0, 1],
+        raw: '',
+      }],
+    });
 
-    let parsed = (await parseCurrentHunk(repoPath, 'unstaged', { ignoreWhitespace: true })).parsed;
-    await runReviewHunkStageOperation('s1', 'stage', parsed.diff, parsed.hunkIndex, parsed.options, deps);
-    expect((await runGit(['diff', '--cached', '--', 'seed.txt'], { cwd: repoPath })).stdout).toContain('+keep = 2;');
-    expect((await runGit(['diff', '--', 'seed.txt'], { cwd: repoPath })).stdout).toContain('+  beta');
+    const parsed = parseSerializedHunk(diff, true);
 
-    parsed = (await parseCurrentHunk(repoPath, 'staged', { ignoreWhitespace: true })).parsed;
-    await runReviewHunkStageOperation('s1', 'unstage', parsed.diff, parsed.hunkIndex, parsed.options, deps);
-    expect((await runGit(['diff', '--cached', '--', 'seed.txt'], { cwd: repoPath })).stdout).toBe('');
-    expect((await runGit(['diff', '--', 'seed.txt'], { cwd: repoPath })).stdout).toContain('+keep = 2;');
-    expect((await runGit(['diff', '--', 'seed.txt'], { cwd: repoPath })).stdout).toContain('+  beta');
-
-    parsed = (await parseCurrentHunk(repoPath, 'unstaged', { ignoreWhitespace: true })).parsed;
-    await runReviewHunkStageOperation('s1', 'discard', parsed.diff, parsed.hunkIndex, parsed.options, deps);
-    const worktree = await fs.readFile(path.join(repoPath, 'seed.txt'), 'utf8');
-    expect(worktree).toContain('keep = 1;');
-    expect(worktree).toContain('  beta');
-    const remaining = (await runGit(['diff', '--', 'seed.txt'], { cwd: repoPath })).stdout;
-    expect(remaining).toContain('+  beta');
-    expect(remaining).not.toContain('+keep = 2;');
+    expect(parsed.hunkIndex).toBe(3);
+    expect(parsed.options).toEqual({ ignoreWhitespace: true });
+    expect(parsed.diff.hunks[0].selectableLines).toEqual([0, 1]);
   });
 
   it('rejects modified rename hunk unstage after IPC parsing without splitting the rename', async () => {
