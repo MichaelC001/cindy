@@ -86,9 +86,9 @@ export default defineConfig({
     // Main-process code is pure Node — no DOM needed. Renderer tests (if/when
     // added) should switch to 'jsdom' via per-file `// @vitest-environment`.
     environment: 'node',
-    // 普通单测保持跨 worktree 并行；只有真实 Git 长尾项目获取共享资源锁。
-    // 两个项目的 include/exclude 互补，完整覆盖仍由根级 include 与 test-workspaces
-    // manifest 门禁共同保证。
+    // Keep include arrays project-local: Vitest merges array options inherited
+    // through extends:true, so a root include would make the resource project
+    // collect standard tests too. The two projects remain mutually exclusive.
     projects: [
       {
         extends: true,
