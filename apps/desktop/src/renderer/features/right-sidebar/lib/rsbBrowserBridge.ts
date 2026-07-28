@@ -35,7 +35,7 @@ import {
   findSessionIdByTabId,
 } from '../store';
 import { requestRightSidebarVisibility } from './sidebarCommands';
-import { isPopupSpawnedTab, unmarkPopupSpawnedTab } from './popupTabs';
+import { isPopupSpawnedTab } from './popupTabs';
 
 /** Subset of `window.electronAPI.rsbBrowserBridge` actually used here. */
 interface RsbBrowserBridgeIpcSubset {
@@ -242,11 +242,10 @@ export function initRsbBrowserBridge(): () => void {
       if (!getBucket(sessionId).tabs.some((t) => t.id === tabId)) return;
       const beforeCount = getBucket(sessionId).tabs.length;
       await storeCloseTab(sessionId, tabId);
-      // closeTab 可能被 close interceptor 拦下(tab 留在 bucket)——此时既不清
-      // 标记也不动资源,保持"没关成"的完整语义。
+      // closeTab 可能被 close interceptor 拦下(tab 留在 bucket)——此时不动资源,
+      // 保持"没关成"的完整语义(popup 标记同理:store 只在真正关成时才清)。
       const stillPresent = getBucket(sessionId).tabs.some((t) => t.id === tabId);
       if (stillPresent) return;
-      unmarkPopupSpawnedTab(tabId);
       // 后台自关(BrowserTabBody 未挂载)没有 unmount cleanup 兜底,必须显式
       // release:销毁 guest webContents、经 onRelease 链同步 main 端 TabRegistry。
       // 前台场景 TabBody 的关闭路径先 release 过也没关系 —— release 幂等。

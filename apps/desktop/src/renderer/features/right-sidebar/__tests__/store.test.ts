@@ -14,6 +14,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { _resetTabKindRegistry, registerTabKind } from '../registry';
+import {
+  _resetPopupTabsForTests,
+  isPopupSpawnedTab,
+  markPopupSpawnedTab,
+} from '../lib/popupTabs';
 import type { TabKindPlugin } from '../types';
 
 // device-link origin 注册表桩:'remote-' 前缀的 sessionId 视为远程会话。
@@ -86,11 +91,13 @@ describe('RSB store', () => {
     _resetTabKindRegistry();
     ipc = makeIpcStub();
     installIpc(ipc);
+    _resetPopupTabsForTests();
   });
 
   afterEach(() => {
     store._resetStore();
     _resetTabKindRegistry();
+    _resetPopupTabsForTests();
   });
 
   describe('getBucket', () => {
@@ -279,6 +286,38 @@ describe('RSB store', () => {
       const tab = await pending;
       expect(tab.id).toBe(seen[0]);
     });
+
+    it('closeTab 等待进行中的创建落地,不会用 NOT_FOUND 把关闭回滚掉', async () => {
+      // OAuth callback 页能在 addTab 的 upsert 还在途时就 window.close():close 先
+      // 到 main 会拿到 NOT_FOUND → closeTab 回滚出这个 tab,随后 upsert 落地,
+      // cache 与 DB 里都留下一个本该消失的 tab(正是本 PR 要消灭的残留空 tab)。
+      let releaseUpsert: (() => void) | null = null;
+      ipc.upsert.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseUpsert = () => resolve({ ok: true });
+          }),
+      );
+      let createdId = '';
+      const pendingAdd = store.addTab('s1', 'web-browser', null, {
+        onOptimisticAdd: (tabId) => {
+          createdId = tabId;
+        },
+      });
+      // upsert 仍挂起时就关它(guest window.close 的时序)。
+      const pendingClose = store.closeTab('s1', createdId);
+      await Promise.resolve();
+      // 必须还没发 close —— 先等创建落地。
+      expect(ipc.close).not.toHaveBeenCalled();
+
+      releaseUpsert!();
+      await pendingAdd;
+      await pendingClose;
+
+      expect(ipc.upsert).toHaveBeenCalledTimes(1);
+      expect(ipc.close).toHaveBeenCalledWith({ id: createdId });
+      expect(store.getBucket('s1').tabs).toHaveLength(0);
+    });
   });
 
   describe('addOrFocusSingletonTab', () => {
@@ -322,6 +361,31 @@ describe('RSB store', () => {
   });
 
   describe('closeTab', () => {
+    it('清掉 tabId 上的 popup 来源标记(任何关闭入口,不只 guest 自关)', async () => {
+      const tab = await store.addTab('s1', 'web-browser', null, {
+        onOptimisticAdd: markPopupSpawnedTab,
+      });
+      expect(isPopupSpawnedTab(tab.id)).toBe(true);
+
+      // 用户手动关(或 closeAllTabs / agent close tab-op)也必须清标记,否则标记
+      // 集合会随进程生命周期无界增长。
+      await store.closeTab('s1', tab.id);
+
+      expect(isPopupSpawnedTab(tab.id)).toBe(false);
+    });
+
+    it('IPC 失败回滚时保留 popup 标记(tab 还在,自关语义不能丢)', async () => {
+      const tab = await store.addTab('s1', 'web-browser', null, {
+        onOptimisticAdd: markPopupSpawnedTab,
+      });
+      ipc.close.mockRejectedValueOnce(new Error('db down'));
+
+      await expect(store.closeTab('s1', tab.id)).rejects.toThrow('db down');
+
+      expect(store.getBucket('s1').tabs).toHaveLength(1);
+      expect(isPopupSpawnedTab(tab.id)).toBe(true);
+    });
+
     it('removes tab and shifts active to neighbor', async () => {
       const a = await store.addTab('s1', 'file-browser', null);
       const b = await store.addTab('s1', 'file-browser', null);

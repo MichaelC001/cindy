@@ -33,10 +33,13 @@ export function isPopupSpawnedTab(tabId: string): boolean {
 }
 
 /**
- * tab **真正从 store 关闭**后清除登记。清理时机必须跟 tab 生命周期而不是
- * webview 实例生命周期:pool release(LRU 淘汰 / 宿主迁移)只销毁 webview,
- * tab 仍在 bucket,标记必须保留——否则重建后的 callback 页 window.close()
- * 会被误判为普通 tab 而失效。
+ * tab **真正从 store 关闭**后清除登记。唯一调用点是 `store.closeTab` 的成功分支
+ * —— 所有关闭入口(用户手关 / closeAllTabs / agent close tab-op / guest 自关)都
+ * 汇聚到那里,标记不会随某条特定路径泄漏;IPC 失败回滚(tab 又回来了)则不清。
+ *
+ * 清理时机必须跟 tab 生命周期而不是 webview 实例生命周期:pool release(LRU
+ * 淘汰 / 宿主迁移)只销毁 webview,tab 仍在 bucket,标记必须保留——否则重建后的
+ * callback 页 window.close() 会被误判为普通 tab 而失效。
  */
 export function unmarkPopupSpawnedTab(tabId: string): void {
   popupSpawnedTabIds.delete(tabId);

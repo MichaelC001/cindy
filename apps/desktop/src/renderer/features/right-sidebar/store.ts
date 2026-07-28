@@ -19,6 +19,7 @@
 import { createLogger } from '@/lib/logger';
 import { getSessionDeviceId } from '@/features/device-link/remoteProjectsStore';
 import { getTabKind } from './registry';
+import { unmarkPopupSpawnedTab } from './lib/popupTabs';
 import type { TabKindId, TabState } from './types';
 
 const log = createLogger('rightSidebar.store');
@@ -42,6 +43,16 @@ const listeners = new Set<Listener>();
 const memoryOnlySessions = new Set<string>();
 const closeInterceptors = new Map<string, TabCloseInterceptor>();
 const patchRevisions = new Map<string, number>();
+/**
+ * 进行中的 tab 创建(tabId → 该 tab 的 upsert + setActive 落地)。
+ *
+ * closeTab 必须等它落地再发 close:tab 是乐观插入的,持久化 IPC 还在途时 React
+ * 已能 mount 它的 body(浏览器 tab 甚至已经加载完 OAuth callback 页并
+ * `window.close()`)。此时 close 先到 main 会拿到 NOT_FOUND → closeTab 回滚到
+ * "含这个 tab"的快照,随后 upsert 才落地 —— cache 和 DB 里都留下一个本该消失的
+ * tab。手动关闭刚建的 tab 也是同一个竞态。
+ */
+const pendingTabCreates = new Map<string, Promise<void>>();
 const persistedStateBaselines = new Map<string, unknown>();
 const STATE_WRITE_OVERLOAD_RETRY_DELAYS_MS = [25, 75, 150] as const;
 
@@ -425,8 +436,20 @@ export async function addTab(
   try {
     const ipc = ipcApi();
     if (ipc && shouldPersist(sessionId)) {
-      await ipc.upsert({ id, sessionId, kind, position, state: initialState });
-      await ipc.setActive({ sessionId, id });
+      // 同步登记 in-flight 创建(与乐观插入同一 tick),并发的 closeTab 才等得到。
+      const create = (async () => {
+        await ipc.upsert({ id, sessionId, kind, position, state: initialState });
+        await ipc.setActive({ sessionId, id });
+      })();
+      const settled = create.then(
+        () => undefined,
+        () => undefined,
+      );
+      pendingTabCreates.set(id, settled);
+      void settled.then(() => {
+        if (pendingTabCreates.get(id) === settled) pendingTabCreates.delete(id);
+      });
+      await create;
     }
     return newTab;
   } catch (err) {
@@ -527,6 +550,9 @@ export async function closeTab(
 
   setBucket(sessionId, { tabs: nextTabs, activeTabId: nextActiveId });
   try {
+    // 先等这个 tab 的创建落地(见 pendingTabCreates),再等它的 state 写落地 ——
+    // 否则 close 可能跑在 INSERT 之前,拿 NOT_FOUND 把整次关闭回滚掉。
+    await pendingTabCreates.get(tabId);
     await settleTabStateWrites(sessionId, tabId);
     const ipc = ipcApi();
     if (ipc && shouldPersist(sessionId)) {
@@ -538,6 +564,11 @@ export async function closeTab(
     const key = tabStateWriteKey(sessionId, tabId);
     patchRevisions.delete(key);
     persistedStateBaselines.delete(key);
+    // tab 已真正从 store 消失 —— 清掉挂在 tabId 上的旁路标记(popup 来源)。
+    // 放在成功分支:IPC 失败会回滚 cache,tab 还在,标记必须留着。所有关闭入口
+    // (用户手关 / closeAllTabs / agent close tab-op / guest 自关)都汇聚到这里,
+    // 标记不会随非 guest-close 的关闭路径泄漏。
+    unmarkPopupSpawnedTab(tabId);
   } catch (err) {
     log.error('closeTab IPC failed; rolling back cache', { sessionId, tabId, err });
     setBucket(sessionId, { tabs: prev.tabs, activeTabId: prev.activeTabId });
@@ -676,6 +707,7 @@ export function _resetStore(): void {
   inflight.clear();
   memoryOnlySessions.clear();
   closeInterceptors.clear();
+  pendingTabCreates.clear();
   resetStateWriteQueue();
   listeners.clear();
 }
