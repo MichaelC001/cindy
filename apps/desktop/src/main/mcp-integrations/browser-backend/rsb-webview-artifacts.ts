@@ -42,7 +42,9 @@ interface PendingDownload {
   filePath?: string;
   knownTotalBytes?: number;
   limitReason?: string;
+  reservationHeld?: boolean;
   reservationReleased?: boolean;
+  settledBytes?: number;
 }
 
 interface ArtifactCapture {
@@ -332,9 +334,13 @@ export class RsbWebviewArtifacts {
     };
     item.once('done', (_event: unknown, rawState: unknown) => {
       const receivedBytes = this.positiveBytes(item.getReceivedBytes());
+      pending.settledBytes = receivedBytes ?? 0;
       const observedBytes = Math.max(totalBytes ?? 0, receivedBytes ?? 0);
       const exceededFileQuota = observedBytes > MAX_DOWNLOAD_BYTES_PER_FILE;
-      const exceededCaptureQuota = this.receivedBytes(capture) > MAX_DOWNLOAD_BYTES_PER_CAPTURE;
+      const exceededCaptureQuota = (
+        !capture.pending.some((entry) => entry !== pending && entry.limitReason)
+        && this.receivedBytes(capture) > MAX_DOWNLOAD_BYTES_PER_CAPTURE
+      );
       const state = pending.limitReason || exceededFileQuota || exceededCaptureQuota
         ? 'cancelled'
         : rawState === 'completed'
@@ -377,7 +383,10 @@ export class RsbWebviewArtifacts {
     }
 
     capture.pending.push(pending);
-    if (totalBytes) capture.reservedBytes += totalBytes;
+    if (totalBytes) {
+      capture.reservedBytes += totalBytes;
+      pending.reservationHeld = true;
+    }
     pending.filePath = filePath;
     item.setSavePath(filePath);
     item.on('updated', () => {
@@ -393,6 +402,7 @@ export class RsbWebviewArtifacts {
             ? 'single download exceeds the size limit'
             : 'capture exceeds the total download limit',
         );
+        this.releaseReservation(capture, pending);
       }
     });
   }
@@ -406,7 +416,7 @@ export class RsbWebviewArtifacts {
     }
     if (
       totalBytes
-      && capture.reservedBytes + totalBytes > MAX_DOWNLOAD_BYTES_PER_CAPTURE
+      && this.receivedBytes(capture) + totalBytes > MAX_DOWNLOAD_BYTES_PER_CAPTURE
     ) {
       return 'capture exceeds the total download limit';
     }
@@ -424,8 +434,11 @@ export class RsbWebviewArtifacts {
 
   private receivedBytes(capture: ArtifactCapture): number {
     return capture.reservedBytes + capture.pending.reduce((sum, pending) => {
-      if (pending.limitReason) return sum;
       const received = this.positiveBytes(pending.item.getReceivedBytes()) ?? 0;
+      if (pending.reservationReleased) {
+        return sum + Math.max(received, pending.settledBytes ?? 0);
+      }
+      if (pending.limitReason) return sum;
       if (pending.knownTotalBytes) {
         return sum + Math.max(0, received - pending.knownTotalBytes);
       }
@@ -434,9 +447,12 @@ export class RsbWebviewArtifacts {
   }
 
   private releaseReservation(capture: ArtifactCapture, pending: PendingDownload): void {
-    if (!pending.knownTotalBytes || pending.reservationReleased) return;
+    if (pending.reservationReleased) return;
     pending.reservationReleased = true;
-    capture.reservedBytes = Math.max(0, capture.reservedBytes - pending.knownTotalBytes);
+    if (pending.reservationHeld && pending.knownTotalBytes) {
+      pending.reservationHeld = false;
+      capture.reservedBytes = Math.max(0, capture.reservedBytes - pending.knownTotalBytes);
+    }
   }
 
   private positiveBytes(value: number): number | undefined {

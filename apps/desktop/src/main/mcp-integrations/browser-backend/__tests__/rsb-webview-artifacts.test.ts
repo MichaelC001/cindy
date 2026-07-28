@@ -283,7 +283,10 @@ describe('RsbWebviewArtifacts', () => {
 
   it('releases reserved bytes after a download is cancelled', async () => {
     const harness = artifactHarness();
-    const cancelled = downloadItem('cancelled', { totalBytes: 32 * 1024 * 1024 });
+    const cancelled = downloadItem('cancelled', {
+      totalBytes: 32 * 1024 * 1024,
+      receivedBytes: 0,
+    });
     const later = [
       downloadItem('completed', { totalBytes: 32 * 1024 * 1024 }),
       downloadItem('completed', { totalBytes: 32 * 1024 * 1024 }),
@@ -308,6 +311,77 @@ describe('RsbWebviewArtifacts', () => {
       'cancelled',
       'completed',
       'completed',
+    ]);
+  });
+
+  it('does not release another download reservation for a quota-rejected item', async () => {
+    const harness = artifactHarness();
+    const first = downloadItem('completed', { totalBytes: 32 * 1024 * 1024 });
+    const rejected = downloadItem('cancelled', {
+      totalBytes: 32 * 1024 * 1024 + 1,
+      receivedBytes: 0,
+    });
+    const second = downloadItem('completed', { totalBytes: 32 * 1024 * 1024 });
+    const extra = downloadItem('cancelled', { totalBytes: 1, receivedBytes: 0 });
+    const artifacts = new RsbWebviewArtifacts(() => root, { warn: vi.fn() });
+
+    const result = await artifacts.capture(
+      harness.wc,
+      { sessionId: 'quota-unheld-reservation', timeoutMs: 1000 },
+      async () => {
+        harness.emitDownload(first);
+        harness.emitDownload(rejected);
+        rejected.finish();
+        harness.emitDownload(second);
+        harness.emitDownload(extra);
+        setTimeout(() => {
+          first.finish();
+          second.finish();
+          extra.finish();
+        }, 0);
+      },
+    );
+
+    expect(first.setSavePath).toHaveBeenCalledTimes(1);
+    expect(second.setSavePath).toHaveBeenCalledTimes(1);
+    expect(rejected.setSavePath).not.toHaveBeenCalled();
+    expect(extra.setSavePath).not.toHaveBeenCalled();
+    expect(result.downloads.map((artifact) => artifact.state)).toEqual([
+      'completed',
+      'cancelled',
+      'completed',
+      'cancelled',
+    ]);
+  });
+
+  it('keeps received bytes from cancelled downloads in the capture quota', async () => {
+    const harness = artifactHarness();
+    const cancelled = downloadItem('cancelled', { totalBytes: 32 * 1024 * 1024 });
+    const later = [
+      downloadItem('completed', { totalBytes: 32 * 1024 * 1024 }),
+      downloadItem('cancelled', { totalBytes: 32 * 1024 * 1024 }),
+    ];
+    const artifacts = new RsbWebviewArtifacts(() => root, { warn: vi.fn() });
+
+    const result = await artifacts.capture(
+      harness.wc,
+      { sessionId: 'quota-cancelled-bytes', timeoutMs: 1000 },
+      async () => {
+        harness.emitDownload(cancelled);
+        cancelled.finish();
+        for (const item of later) harness.emitDownload(item);
+        setTimeout(() => {
+          for (const item of later) item.finish();
+        }, 0);
+      },
+    );
+
+    expect(later[0].setSavePath).toHaveBeenCalledTimes(1);
+    expect(later[1].setSavePath).not.toHaveBeenCalled();
+    expect(result.downloads.map((artifact) => artifact.state)).toEqual([
+      'cancelled',
+      'completed',
+      'cancelled',
     ]);
   });
 
