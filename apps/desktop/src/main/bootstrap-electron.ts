@@ -469,6 +469,7 @@ import { disposeRemoteFileBrowser } from './file-browser/remote-deps.js';
 import { registerFileBrowserDeviceOp } from './file-browser/device-op.js';
 import { registerSearchIpc } from './file-browser/search/index.js';
 import { registerVoiceInputIpc } from './voice-input/index.js';
+import { installWindowHiddenBroadcast } from './windowHiddenBroadcast.js';
 import { openSessionInNewWindow } from './secondary-windows.js';
 import {
   isGlobalVoiceInputOverlayVisible,
@@ -2101,6 +2102,10 @@ const createWindow = () => {
       // Feishu OAuth 走 will-navigate 自定义 scheme + 主窗自身 webContents,
       // 跟嵌套 webview 是两条独立路径,不受影响。
       webviewTag: true,
+      // File drops are handled by renderer attachment/global-drop handlers.
+      // Do not let Chromium navigate the main window to a local dropped path
+      // when a platform-specific drag event misses a target.
+      navigateOnDragDrop: false,
     },
   });
   markAppContentWindow(mainWindow);
@@ -2221,6 +2226,10 @@ const createWindow = () => {
       mainWindow.webContents.send('fullscreen-change', false);
     }
   });
+
+  // 装饰动画闸门的兜底信号。主窗在 running turn 期间会关掉 backgroundThrottling,
+  // 那之后 Renderer 的 visibilityState 就不再反映真实可见性,细节见模块头注释。
+  installWindowHiddenBroadcast(mainWindow);
 
   // App badge: 用户把任意 XDMaker 窗口点回前台(Dock 点击 / taskbar / alt-tab / 点窗口)即视为
   // 「已查看」,直接清空整个 dock 红点。badge 是 app 级状态,不该依赖当前停在哪个

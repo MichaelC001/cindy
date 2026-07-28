@@ -150,6 +150,11 @@ import {
   getGhostMediaUriFromDataTransfer,
 } from '@/cindy-brain/ghostMediaHandover';
 import { isGlobalDropIntercepted } from '@/lib/globalDropIntercept';
+import {
+  classifyUnclassifiedDroppedItems,
+  getDroppedFileItems,
+  type DroppedFileItems,
+} from '@/lib/fileDrop';
 import { getCollaborationStartErrorMessage } from './collaborationErrors';
 import { useCollabProjectPolicy } from './hooks/useCollabProjectPolicy';
 import { shouldFallbackVendorModel } from './lib/vendorModelFallback';
@@ -2748,30 +2753,26 @@ export function CCAgentSessionView({
             if (sessionId) void attachGhostMediaToSession(ghostMediaUri, sessionId, t);
             return;
           }
-          if (e.dataTransfer.files.length > 0) {
-            const files: File[] = [];
-            for (let i = 0; i < e.dataTransfer.items.length; i++) {
-              const item = e.dataTransfer.items[i];
-              const entry = item.webkitGetAsEntry?.();
-              const file = e.dataTransfer.files[i];
-              if (!file) continue;
-              if (entry?.isDirectory) {
-                let folderPath = '';
-                try {
-                  folderPath = window.electronAPI.getFilePath(file);
-                } catch {
-                  /* ignore */
-                }
-                if (folderPath) attachmentState.addFolderPath(folderPath);
-              } else {
-                files.push(file);
+          const attachDroppedItems = (items: Pick<DroppedFileItems, 'files' | 'directories'>) => {
+            for (const directory of items.directories) {
+              let folderPath = '';
+              try {
+                folderPath = window.electronAPI.getFilePath(directory);
+              } catch {
+                /* ignore */
               }
+              if (folderPath) attachmentState.addFolderPath(folderPath);
             }
-            if (files.length > 0) {
-              const dt = new DataTransfer();
-              for (const f of files) dt.items.add(f);
-              attachmentState.addFiles(dt.files);
-            }
+            if (items.files.length > 0) attachmentState.addFiles(items.files);
+          };
+          const droppedItems = getDroppedFileItems(e.dataTransfer);
+          attachDroppedItems(droppedItems);
+          if (droppedItems.unclassified.length > 0) {
+            void classifyUnclassifiedDroppedItems(droppedItems.unclassified, {
+              getFilePath: (file) => window.electronAPI.getFilePath(file),
+              classifyPath: (path) =>
+                window.electronAPI.localDb.sessionShare.classifyPath({ path }),
+            }).then(attachDroppedItems);
           }
         }}
       >
@@ -3116,8 +3117,10 @@ export function CCAgentSessionView({
                     onViewerStateChange={setPluginSetupViewerState}
                     onCommand={respondToPluginSetup}
                   />
-                ) : pendingIssueConfirm ? (
+                ) : pendingIssueConfirm && sessionId ? (
                   <IssueConfirmCard
+                    key={`${sessionId}:${pendingIssueConfirm.requestId}`}
+                    sessionId={sessionId}
                     pending={pendingIssueConfirm}
                     onRespond={respondToIssueConfirm}
                   />

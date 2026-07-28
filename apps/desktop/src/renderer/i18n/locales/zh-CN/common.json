@@ -4373,6 +4373,12 @@
       "editTitle": "编辑粘贴的文本",
       "cancelEdit": "取消编辑",
       "saveEdit": "保存文本"
+    },
+    "permissionPrompt": {
+      "alwaysAllowScoped": "本对话都允许 {{scope}}",
+      "alwaysAllowScopedHint": "作用于整个对话，且只限这里列出的范围。",
+      "alwaysAllowSessionHint": "作用于整个对话，不只是这一次请求。",
+      "ruleSeparator": "、"
     }
   },
   "onboarding": {

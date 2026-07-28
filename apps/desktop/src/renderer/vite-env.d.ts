@@ -2704,6 +2704,10 @@ interface ElectronAPI {
    *  that fired before the renderer had a chance to subscribe). */
   getFullscreenState: () => Promise<boolean>;
 
+  /** 窗口是否对用户不可见(最小化 / hide)。装饰动画闸门用它兜底 ——
+   *  backgroundThrottling 关闭时 document.visibilityState 会一直停在 visible。 */
+  onWindowHiddenChange: (callback: (hidden: boolean) => void) => () => void;
+
   // ── Release notes (per-version, fetched from CDN by main) ──
   /**
    * Fetch the release notes JSON for a given version. Platform is resolved

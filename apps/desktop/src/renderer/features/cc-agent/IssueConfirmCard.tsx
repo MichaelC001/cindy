@@ -13,18 +13,30 @@
  *   Esc            → 取消
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import {
+  getIssueConfirmDraft,
+  saveIssueConfirmDraft,
+  type IssueConfirmDraft,
+} from '@/lib/issueConfirmDraftStore';
 import { cn } from '@/lib/utils';
 import type { PendingIssueConfirm } from '@/lib/makerChatStore';
 import { shouldLabelIssueRegion } from '../../../shared/issueRegionCode';
 
 interface IssueConfirmCardProps {
+  sessionId: string;
   pending: PendingIssueConfirm;
   onRespond: (
     result:
-      | { confirmed: true; title: string; body: string; type: 'bug' | 'feature'; uiLanguage: string }
+      | {
+          confirmed: true;
+          title: string;
+          body: string;
+          type: 'bug' | 'feature';
+          uiLanguage: string;
+        }
       | { confirmed: false },
   ) => void;
 }
@@ -35,20 +47,30 @@ const TITLE_MAX = 200;
 // githubIssueSubmitService clamp 到 server 上限 SERVER_DESC_MAX(5000)。
 const BODY_MAX = 4500;
 
-export function IssueConfirmCard({ pending, onRespond }: IssueConfirmCardProps) {
+export function IssueConfirmCard({ sessionId, pending, onRespond }: IssueConfirmCardProps) {
   const { t, i18n } = useTranslation();
-  const [title, setTitle] = useState(pending.draft.title);
-  const [body, setBody] = useState(pending.draft.body);
-  const [type, setType] = useState<'bug' | 'feature'>(pending.draft.type);
-
-  // 同一会话内连续两次提交(新 requestId)时重置编辑态。
-  useEffect(() => {
-    setTitle(pending.draft.title);
-    setBody(pending.draft.body);
-    setType(pending.draft.type);
-  }, [pending.requestId, pending.draft.title, pending.draft.body, pending.draft.type]);
+  const titleInputId = useId();
+  const bodyInputId = useId();
+  const [draft, setDraft] = useState<IssueConfirmDraft>(
+    () => getIssueConfirmDraft(sessionId, pending.requestId) ?? pending.draft,
+  );
+  const { title, body, type } = draft;
 
   const canSubmit = title.trim().length > 0 && body.trim().length > 0;
+
+  const updateDraft = useCallback(
+    (patch: Partial<IssueConfirmDraft>) => {
+      const next = { ...draft, ...patch };
+      if (next.title === draft.title && next.body === draft.body && next.type === draft.type) {
+        return;
+      }
+      // Save synchronously with the input event so an immediate session switch
+      // cannot unmount the card before its latest edit reaches the draft slot.
+      saveIssueConfirmDraft(sessionId, pending.requestId, next);
+      setDraft(next);
+    },
+    [draft, pending.requestId, sessionId],
+  );
 
   // 构建区域代号,与登录页区域徽标同一套不对称命名(DESIGN.md §16.3):cn → CN、
   // dev → Dev、global 不标。「哪些区域要标」只有 ISSUE_REGION_CODE 一个事实源 ——
@@ -97,7 +119,8 @@ export function IssueConfirmCard({ pending, onRespond }: IssueConfirmCardProps) 
   const typeButton = (value: 'bug' | 'feature', label: string) => (
     <button
       type="button"
-      onClick={() => setType(value)}
+      aria-pressed={type === value}
+      onClick={() => updateDraft({ type: value })}
       className={cn(
         'rounded-[6px] border px-2.5 py-[3px] text-12 font-medium transition-colors',
         type === value
@@ -128,14 +151,18 @@ export function IssueConfirmCard({ pending, onRespond }: IssueConfirmCardProps) 
       </div>
 
       {/* Issue title input */}
-      <label className="mt-3 block text-12 font-medium text-[var(--status-bar-meta)]">
+      <label
+        htmlFor={titleInputId}
+        className="mt-3 block text-12 font-medium text-[var(--status-bar-meta)]"
+      >
         {t('issueAgent.confirm.titleLabel')}
       </label>
       <input
+        id={titleInputId}
         type="text"
         value={title}
         maxLength={TITLE_MAX}
-        onChange={(e) => setTitle(e.target.value)}
+        onChange={(e) => updateDraft({ title: e.target.value })}
         className={cn(
           'mt-1 w-full rounded-[8px] border px-3 py-2',
           'border-[var(--perm-code-border)] bg-[var(--perm-code-bg)]',
@@ -145,13 +172,17 @@ export function IssueConfirmCard({ pending, onRespond }: IssueConfirmCardProps) 
       />
 
       {/* Issue body textarea */}
-      <label className="mt-3 block text-12 font-medium text-[var(--status-bar-meta)]">
+      <label
+        htmlFor={bodyInputId}
+        className="mt-3 block text-12 font-medium text-[var(--status-bar-meta)]"
+      >
         {t('issueAgent.confirm.bodyLabel')}
       </label>
       <textarea
+        id={bodyInputId}
         value={body}
         maxLength={BODY_MAX}
-        onChange={(e) => setBody(e.target.value)}
+        onChange={(e) => updateDraft({ body: e.target.value })}
         rows={8}
         className={cn(
           'mt-1 w-full resize-y rounded-[8px] border px-3 py-2',
