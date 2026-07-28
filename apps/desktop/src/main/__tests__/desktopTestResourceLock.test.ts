@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  classifyDesktopTestLockProbeError,
   decideDesktopTestLock,
   type DesktopTestLockProbeResult,
 } from '../../test/vitest/desktopTestResourceLock';
@@ -27,5 +28,13 @@ describe('decideDesktopTestLock', () => {
     expect(decideDesktopTestLock(probes('collision', 'collision'))).toEqual({
       type: 'unavailable',
     });
+  });
+});
+
+describe('classifyDesktopTestLockProbeError', () => {
+  it('only retries when the candidate port refused the connection', () => {
+    expect(classifyDesktopTestLockProbeError('ECONNREFUSED')).toBe('retry');
+    expect(classifyDesktopTestLockProbeError('ECONNRESET')).toBe('collision');
+    expect(classifyDesktopTestLockProbeError('ETIMEDOUT')).toBe('collision');
   });
 });

@@ -25,6 +25,12 @@ export type DesktopTestLockDecision =
   | { type: 'acquire'; port: number }
   | { type: 'unavailable' };
 
+export function classifyDesktopTestLockProbeError(
+  code: string | undefined,
+): DesktopTestLockProbeResult {
+  return code === 'ECONNREFUSED' ? 'retry' : 'collision';
+}
+
 /**
  * Decide only after every deterministic candidate has been probed. An owner
  * can be on a fallback port because an earlier unrelated service occupied the
@@ -128,7 +134,7 @@ async function probeLock(port: number, expectedBanner: string): Promise<DesktopT
     socket.on('end', () => finish(response.trim() === expectedBanner ? 'owner' : 'collision'));
     socket.on('timeout', () => finish('collision'));
     socket.on('error', (error: NodeJS.ErrnoException) => {
-      finish(error.code === 'ECONNREFUSED' || error.code === 'ECONNRESET' ? 'retry' : 'collision');
+      finish(classifyDesktopTestLockProbeError(error.code));
     });
   });
 }
