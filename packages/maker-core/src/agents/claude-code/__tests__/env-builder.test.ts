@@ -302,6 +302,24 @@ describe('buildClaudeEnv', () => {
       expect(env.CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL).toBeUndefined();
     });
 
+    it('oauth-spawn:移除宿主的 attribution 禁用开关，避免 auto 权限分类器被上游拒绝', async () => {
+      const env = await buildClaudeEnv(
+        createAuthAdapter({ CLAUDE_CODE_OAUTH_TOKEN: 'at-live' }),
+        { behaviorFlags: { CLAUDE_CODE_ATTRIBUTION_HEADER: '0' } },
+      );
+
+      expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBeUndefined();
+    });
+
+    it('gateway-spawn:保留 attribution 禁用开关以维持网关 prompt-cache 命中率', async () => {
+      const env = await buildClaudeEnv(
+        createAuthAdapter({ ANTHROPIC_API_KEY: 'sk-gw' }),
+        { behaviorFlags: { CLAUDE_CODE_ATTRIBUTION_HEADER: '0' } },
+      );
+
+      expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('0');
+    });
+
     it('合并顺序:process.env 的订阅 token 被剥离,authEnv 注入值存活', async () => {
       // SENSITIVE_ANTHROPIC_ENV_KEYS 的两道防线只作用于 process.env 继承;authEnv 在
       // cleanProcessEnv 之后合并 —— 本测试锁住该顺序,防止将来重排把注入值吞掉。
