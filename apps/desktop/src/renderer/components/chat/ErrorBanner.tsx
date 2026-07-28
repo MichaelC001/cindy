@@ -179,7 +179,7 @@ export function ErrorBanner({
   // 网络类错误(502/连接失败/fetch failed 等):友好文案 + 原始错误折叠可查。
   // Codex `Reconnecting... N/M` 额外解析次数，让 recoverable 状态持续更新而非裸英文。
   const reconnectAttempt = parseReconnectAttemptMessage(error);
-  const isNetworkishError = isNetworkishErrorMessage(error);
+  const isNetworkishError = reconnectAttempt !== null || isNetworkishErrorMessage(error);
   // Retry 的显示条件与网络错误文案必须共用同一个判定。外部发起的 turn（例如
   // scheduler / goal）失败时没有安全的 recovery target，errorRetryText 会是 null；
   // 此时不能一边隐藏按钮，一边仍提示用户“点击重试”。

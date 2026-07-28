@@ -331,6 +331,22 @@ describe('translateErrorNotification', () => {
     ]);
   });
 
+  it('仅按脱敏后的可见文案识别重连进度', async () => {
+    const rt = newCodexRuntimeState();
+    const q = createAsyncQueue<AgentEvent>();
+    translateErrorNotification(
+      makeParams({
+        willRetry: true,
+        message: 'Authorization: Bearer secret-token Reconnecting... 1/5',
+      }),
+      q,
+      makeCtx(rt),
+    );
+
+    const events = await collect(q);
+    expect(events).toHaveLength(0);
+  });
+
   it('willRetry=true 网络类错误同 turn 第 2 次 → 透出一条非终止提示,之后不再发', async () => {
     const rt = newCodexRuntimeState();
     const ctx = makeCtx(rt);

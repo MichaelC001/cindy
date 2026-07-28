@@ -225,7 +225,7 @@ export function translateErrorNotification(
     ctx.log.warn('codex error (will retry)', { message: safeMessage, threadId: params.threadId, turnId: params.turnId });
     // Codex 自带明确的有限重连进度时，每档都透出，让 UI 从 1/5 持续更新到 5/5。
     // 这是非终止状态：turn 仍由 app-server 继续，不结束也不另起一次不安全的请求重放。
-    if (parseReconnectAttemptMessage(message)) {
+    if (parseReconnectAttemptMessage(safeMessage)) {
       queue.push({
         type: 'error',
         data: { ...safeErrorData, isTerminal: false, willRetry: true },
