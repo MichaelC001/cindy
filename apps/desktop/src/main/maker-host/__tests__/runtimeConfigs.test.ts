@@ -59,6 +59,7 @@ describe('runtime-configs', () => {
 
     expect(claudeConfig.memoryEnabled).toBe(false);
     expect(claudeConfig.makerMemoryEnabled).toBe(true);
+    expect(claudeConfig.behaviorFlags?.CLAUDE_CODE_ATTRIBUTION_HEADER).toBeUndefined();
     expect(desktopCodexRuntimeConfig.memoryEnabled).toBe(false);
     expect(desktopCodexRuntimeConfig.makerMemoryEnabled).toBe(true);
 

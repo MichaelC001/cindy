@@ -77,9 +77,6 @@ function readMakerMemoryEnabled(): boolean {
 
 const staticClaudeBehaviorFlags = {
   CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS: '1',
-  // 仅网关 / 第三方 upstream 保留。maker-core 的 env-builder 在实际注入订阅 OAuth
-  // token 时移除此项，避免 Claude Code auto 权限分类器旁路请求被 Anthropic 拒绝。
-  CLAUDE_CODE_ATTRIBUTION_HEADER: '0',
   // 网关 upstream 透传 tool_reference 块, 显式开启 ToolSearch
   // 否则 CC 看到非 first-party host 默认 disable, 每次请求都全量塞工具定义。
   ENABLE_TOOL_SEARCH: 'auto',

@@ -87,6 +87,9 @@ export const SENSITIVE_ANTHROPIC_ENV_KEYS = [
   'CLAUDE_CODE_OAUTH_SCOPES',
   'CLAUDE_CODE_SUBSCRIPTION_TYPE',
   'CLAUDE_CODE_RATE_LIMIT_TIER',
+  // 请求归因开关也不能从启动 Cindy 的 shell 继承。Claude Agent SDK 会在 spawn 时
+  // 再次合并 process.env；固定网关 host 如需禁用归因，应通过 behaviorFlags 显式重加。
+  'CLAUDE_CODE_ATTRIBUTION_HEADER',
   // endpoint 重定向
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_UNIX_SOCKET',
@@ -207,15 +210,6 @@ export async function buildClaudeEnv(
     ? { credentialMode: options.credentialMode }
     : undefined;
   Object.assign(env, await auth.getAuthEnv(authOptions));
-
-  // Claude Code 的 auto 权限分类器会复用订阅 OAuth 身份发起旁路请求。上游当前会拒绝
-  // 「OAuth + attribution header 被禁用」的组合，因此宿主为网关缓存注入的关闭开关
-  // 不能进入 oauth-spawn。以最终 auth env 为准而不是 credentialMode：未显式选择来源
-  // 的 fallback 同样可能解析为订阅 OAuth，而远端 / 网关 / 第三方 provider spawn 都
-  // 不带 CLAUDE_CODE_OAUTH_TOKEN，继续保留宿主配置的缓存优化。
-  if (env.CLAUDE_CODE_OAUTH_TOKEN) {
-    delete env.CLAUDE_CODE_ATTRIBUTION_HEADER;
-  }
 
   // Claude Code's documented child-agent model override. Blank / undefined deliberately leaves
   // the key untouched so the host preserves the pre-existing native selection behavior.
