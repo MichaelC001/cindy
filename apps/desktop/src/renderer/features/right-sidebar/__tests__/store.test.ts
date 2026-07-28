@@ -318,6 +318,36 @@ describe('RSB store', () => {
       expect(ipc.close).toHaveBeenCalledWith({ id: createdId });
       expect(store.getBucket('s1').tabs).toHaveLength(0);
     });
+
+    it('创建失败时并发的 closeTab 不发 close,不留幽灵 tab', async () => {
+      // 创建失败 = DB 里从来没有这行,addTab 已把它从 cache 回滚掉。此时若照样发
+      // close 必然 NOT_FOUND,closeTab 的回滚分支会把这个幽灵 tab 写回 cache。
+      let rejectUpsert: ((err: Error) => void) | null = null;
+      ipc.upsert.mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectUpsert = reject;
+          }),
+      );
+      let createdId = '';
+      const pendingAdd = store.addTab('s1', 'web-browser', null, {
+        onOptimisticAdd: (tabId) => {
+          createdId = tabId;
+          markPopupSpawnedTab(tabId);
+        },
+      });
+      const pendingClose = store.closeTab('s1', createdId);
+      await Promise.resolve();
+
+      rejectUpsert!(new Error('db down'));
+      await expect(pendingAdd).rejects.toThrow('db down');
+      await expect(pendingClose).resolves.toBeUndefined();
+
+      expect(ipc.close).not.toHaveBeenCalled();
+      expect(store.getBucket('s1').tabs).toHaveLength(0);
+      // tab 已不存在,标记也要清掉(否则 tabId 永久留在标记集合里)。
+      expect(isPopupSpawnedTab(createdId)).toBe(false);
+    });
   });
 
   describe('addOrFocusSingletonTab', () => {

@@ -44,15 +44,19 @@ const memoryOnlySessions = new Set<string>();
 const closeInterceptors = new Map<string, TabCloseInterceptor>();
 const patchRevisions = new Map<string, number>();
 /**
- * 进行中的 tab 创建(tabId → 该 tab 的 upsert + setActive 落地)。
+ * 进行中的 tab 创建(tabId → 该 tab 是否**落库成功**)。
  *
- * closeTab 必须等它落地再发 close:tab 是乐观插入的,持久化 IPC 还在途时 React
+ * closeTab 必须等它落定再发 close:tab 是乐观插入的,持久化 IPC 还在途时 React
  * 已能 mount 它的 body(浏览器 tab 甚至已经加载完 OAuth callback 页并
  * `window.close()`)。此时 close 先到 main 会拿到 NOT_FOUND → closeTab 回滚到
  * "含这个 tab"的快照,随后 upsert 才落地 —— cache 和 DB 里都留下一个本该消失的
  * tab。手动关闭刚建的 tab 也是同一个竞态。
+ *
+ * 值是 boolean 而不是 void:创建**失败**时 DB 里从来没有这行(addTab 已把它从
+ * cache 回滚掉),此时若照样发 close,必然 NOT_FOUND,而 closeTab 的回滚分支会把
+ * 这个幽灵 tab 又写回 cache。所以 closeTab 要能区分"创建成功了"和"创建失败了"。
  */
-const pendingTabCreates = new Map<string, Promise<void>>();
+const pendingTabCreates = new Map<string, Promise<boolean>>();
 /**
  * per-session 关闭变更队列(sessionId → 队尾)。closeTab 的变更段在这里串行,
  * 保证任意两次关闭(用户手关 / ⌘W 连按 / closeAllTabs / agent close tab-op /
@@ -465,13 +469,13 @@ export async function addTab(
         await ipc.upsert({ id, sessionId, kind, position, state: initialState });
         await ipc.setActive({ sessionId, id });
       })();
-      const settled = create.then(
-        () => undefined,
-        () => undefined,
+      const persisted = create.then(
+        () => true,
+        () => false,
       );
-      pendingTabCreates.set(id, settled);
-      void settled.then(() => {
-        if (pendingTabCreates.get(id) === settled) pendingTabCreates.delete(id);
+      pendingTabCreates.set(id, persisted);
+      void persisted.then(() => {
+        if (pendingTabCreates.get(id) === persisted) pendingTabCreates.delete(id);
       });
       await create;
     }
@@ -528,6 +532,20 @@ export function setTabCloseInterceptor(
 
 export function hasTabCloseInterceptor(tabId: string): boolean {
   return closeInterceptors.has(tabId);
+}
+
+/**
+ * tab 已确定从 store 消失后的收尾:清掉挂在 tabId 上的所有旁路记录。
+ *
+ * 只在"真的没了"的分支调 —— close IPC 失败会回滚 cache(tab 还在),那时这些记录
+ * 必须留着。popup 来源标记同理:所有关闭入口(用户手关 / closeAllTabs / agent
+ * close tab-op / guest 自关)都汇聚到 closeTab,标记不会随某条路径泄漏。
+ */
+function forgetClosedTab(sessionId: string, tabId: string): void {
+  const key = tabStateWriteKey(sessionId, tabId);
+  patchRevisions.delete(key);
+  persistedStateBaselines.delete(key);
+  unmarkPopupSpawnedTab(tabId);
 }
 
 /**
@@ -591,10 +609,17 @@ export async function closeTab(
     }
 
     setBucket(sessionId, { tabs: nextTabs, activeTabId: nextActiveId });
+    // 先等这个 tab 的创建落定(见 pendingTabCreates)—— 否则 close 可能跑在 INSERT
+    // 之前,拿 NOT_FOUND 把整次关闭回滚掉。
+    const pendingCreate = pendingTabCreates.get(tabId);
+    if (pendingCreate && !(await pendingCreate)) {
+      // 创建失败:DB 里从来没有这行(addTab 已经把它从 cache 回滚掉)。这里绝不能
+      // 再发 close —— 必然 NOT_FOUND,而下面的回滚分支会把这个幽灵 tab 写回 cache。
+      // tab 已不存在,按"关成了"收尾即可。
+      forgetClosedTab(sessionId, tabId);
+      return;
+    }
     try {
-      // 先等这个 tab 的创建落地(见 pendingTabCreates),再等它的 state 写落地 ——
-      // 否则 close 可能跑在 INSERT 之前,拿 NOT_FOUND 把整次关闭回滚掉。
-      await pendingTabCreates.get(tabId);
       await settleTabStateWrites(sessionId, tabId);
       const ipc = ipcApi();
       if (ipc && shouldPersist(sessionId)) {
@@ -603,14 +628,7 @@ export async function closeTab(
           await ipc.setActive({ sessionId, id: nextActiveId });
         }
       }
-      const key = tabStateWriteKey(sessionId, tabId);
-      patchRevisions.delete(key);
-      persistedStateBaselines.delete(key);
-      // tab 已真正从 store 消失 —— 清掉挂在 tabId 上的旁路标记(popup 来源)。
-      // 放在成功分支:IPC 失败会回滚 cache,tab 还在,标记必须留着。所有关闭入口
-      // (用户手关 / closeAllTabs / agent close tab-op / guest 自关)都汇聚到这里,
-      // 标记不会随非 guest-close 的关闭路径泄漏。
-      unmarkPopupSpawnedTab(tabId);
+      forgetClosedTab(sessionId, tabId);
     } catch (err) {
       log.error('closeTab IPC failed; rolling back cache', { sessionId, tabId, err });
       setBucket(sessionId, { tabs: prev.tabs, activeTabId: prev.activeTabId });
