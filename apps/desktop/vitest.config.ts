@@ -1,8 +1,10 @@
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
 import { desktopClientBuildEnv } from '../../scripts/shared/client-endpoint-build-env.mjs';
+import { parseVitestCliExclude } from './src/test/vitest/cliExclude';
 
 const clientBuildEnv = desktopClientBuildEnv({ allowEnvOverride: false });
+const cliTestExclude = parseVitestCliExclude(process.argv.slice(2));
 const desktopTestInclude = [
   'src/main/__tests__/**/*.test.ts',
   'src/main/**/__tests__/**/*.test.ts',
@@ -96,6 +98,7 @@ export default defineConfig({
           name: 'standard',
           include: desktopTestInclude,
           exclude: resourceIntensiveTestInclude,
+          cliExclude: cliTestExclude,
         },
       },
       {
@@ -103,6 +106,7 @@ export default defineConfig({
         test: {
           name: 'resource-intensive',
           include: resourceIntensiveTestInclude,
+          cliExclude: cliTestExclude,
           globalSetup: ['src/test/vitest/desktopTestResourceLock.ts'],
         },
       },

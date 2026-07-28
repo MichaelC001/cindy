@@ -77,6 +77,8 @@ workers），说明存在资源争用；但墙钟仍持续下降。综合速度�
 - 无 `.git` 的源码归档按 checkout 实际路径派生锁，不因缺少 Git 元数据而启动失败。
 - 两个项目的 include/exclude 必须互补；该协调不改变测试范围或覆盖率，只防止多个
   worktree 把真实 Git 子进程负载相乘。
+- Vitest 3.2 的 inline project 不会自动继承根 CLI 的 `--exclude`；配置必须把这些排除项
+  显式传入两个 project，确保 unit、DB、migration 等 tier 的测试边界保持不变。
 
 真实 Git 测试的 fixture 还应优先复用 `src/test/vitest/testDirectoryTemplate.ts`：每个测试
 文件初始化一次不可变基准仓库，再为每个用例复制独立目录。不得为了提速把需要验证 Git
