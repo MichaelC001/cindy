@@ -13,8 +13,16 @@ export function normalizeIssuePublicName(raw: unknown): string | null {
     return null;
   }
   for (const character of value) {
-    const code = character.charCodeAt(0);
-    if (code <= 0x1f || code === 0x7f) return null;
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint === undefined ||
+      codePoint <= 0x1f ||
+      (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      codePoint === 0x2028 ||
+      codePoint === 0x2029
+    ) {
+      return null;
+    }
   }
   return value;
 }

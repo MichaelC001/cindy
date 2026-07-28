@@ -47,9 +47,13 @@ describe('parseIssueSuggestedPublicName', () => {
     expect(parseIssueSuggestedPublicName('  Cindy User  ')).toBe('Cindy User');
   });
 
-  it('drops empty, over-long and control-character values', () => {
+  it('drops empty, over-long, control-character and line-separator values', () => {
     expect(parseIssueSuggestedPublicName('')).toBeUndefined();
     expect(parseIssueSuggestedPublicName('x'.repeat(101))).toBeUndefined();
     expect(parseIssueSuggestedPublicName('line 1\nline 2')).toBeUndefined();
+    expect(parseIssueSuggestedPublicName('line 1\u0085line 2')).toBeUndefined();
+    expect(parseIssueSuggestedPublicName('line 1\u009fline 2')).toBeUndefined();
+    expect(parseIssueSuggestedPublicName('line 1\u2028line 2')).toBeUndefined();
+    expect(parseIssueSuggestedPublicName('line 1\u2029line 2')).toBeUndefined();
   });
 });
