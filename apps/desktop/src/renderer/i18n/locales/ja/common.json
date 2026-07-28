@@ -4497,6 +4497,7 @@
       "networkUnreachable": "ネットワークエラー:サービスに一時的に接続できません。「再試行」を押してください。",
       "networkUnreachableNoRetry": "ネットワークエラー:サービスに一時的に接続できません。",
       "networkAutoRetrying": "ネットワークエラー:自動的に再試行しています…",
+      "networkReconnecting": "接続が中断されました。再接続中（{{attempt}}/{{maxAttempts}}）…",
       "networkShowRaw": "元のエラーを表示",
       "networkHideRaw": "元のエラーを隠す",
       "silentStopContinue": "続行",

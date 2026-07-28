@@ -31,7 +31,10 @@ import type { AgentEvent, AgentTaskStatus, AgentTaskUpdateEventData } from '../.
 import { normalizeAccountRateLimitSnapshot } from '../../types/account-rate-limits.js';
 import type { AsyncQueue } from '../shared/async-queue.js';
 import { stripTerminalControlSequences } from '../shared/terminal-output.js';
-import { isNetworkishErrorMessage } from '../shared/network-error.js';
+import {
+  isNetworkishErrorMessage,
+  parseReconnectAttemptMessage,
+} from '../shared/network-error.js';
 import { commandExecutionDisplayInput, type CommandExecutionDisplayInput } from './command-display.js';
 import type {
   ItemCompletedNotification,
@@ -220,6 +223,16 @@ export function translateErrorNotification(
     errorStatus === 401 || /\b401\b|Missing bearer/i.test(safeMessage);
   if (params.willRetry && !isAuthMissing) {
     ctx.log.warn('codex error (will retry)', { message: safeMessage, threadId: params.threadId, turnId: params.turnId });
+    // Codex 自带明确的有限重连进度时，每档都透出，让 UI 从 1/5 持续更新到 5/5。
+    // 这是非终止状态：turn 仍由 app-server 继续，不结束也不另起一次不安全的请求重放。
+    if (parseReconnectAttemptMessage(message)) {
+      queue.push({
+        type: 'error',
+        data: { ...safeErrorData, isTerminal: false, willRetry: true },
+        source: 'codex',
+      });
+      return;
+    }
     // 网络类错误(502/连接失败等)持续重试 = 网络可能断了,daemon 卡在 retry-loop
     // 里 turn 无限转圈。同 turn 第 2 次时透出**一条**非终止提示(isTerminal:false,
     // renderer 走 recoverableError → "网络异常,正在自动重试…" banner,恢复后随
