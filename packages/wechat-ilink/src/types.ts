@@ -51,7 +51,8 @@ export interface IlinkMessageItem {
 }
 
 export interface IlinkMessage {
-  message_id?: number;
+  seq?: number;
+  message_id?: number | string;
   from_user_id?: string;
   to_user_id?: string;
   client_id?: string;
@@ -114,7 +115,7 @@ export interface WechatQuote {
 export interface WechatInboundMessage {
   messageId: string;
   senderId: string;
-  recipientId: string;
+  recipientId?: string;
   clientId?: string;
   createdAt?: number;
   contextToken: string;

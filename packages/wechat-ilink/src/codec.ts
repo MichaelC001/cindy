@@ -111,12 +111,8 @@ export function decodeInboundMessage(
     typeof message.context_token === "string"
       ? message.context_token.trim()
       : "";
-  const messageId =
-    typeof message.message_id === "number" &&
-    Number.isSafeInteger(message.message_id)
-      ? String(message.message_id)
-      : "";
-  if (!senderId || !recipientId || !contextToken || !messageId) return null;
+  const messageId = stableInboundMessageId(message);
+  if (!senderId || !contextToken || !messageId) return null;
 
   const textParts: string[] = [];
   const media: WechatMediaRef[] = [];
@@ -152,7 +148,7 @@ export function decodeInboundMessage(
   return {
     messageId,
     senderId,
-    recipientId,
+    ...(recipientId ? { recipientId } : {}),
     clientId: message.client_id,
     createdAt: message.create_time_ms,
     contextToken,
@@ -160,4 +156,29 @@ export function decodeInboundMessage(
     media,
     ...(quote ? { quote } : {}),
   };
+}
+
+function stableInboundMessageId(message: IlinkMessage): string {
+  const clientId =
+    typeof message.client_id === "string" ? message.client_id.trim() : "";
+  if (clientId) return `client:${clientId}`;
+
+  if (
+    typeof message.message_id === "number" &&
+    Number.isFinite(message.message_id) &&
+    Number.isInteger(message.message_id)
+  ) {
+    return `message:${message.message_id}`;
+  }
+  if (typeof message.message_id === "string" && message.message_id.trim()) {
+    return `message:${message.message_id.trim()}`;
+  }
+  if (
+    typeof message.seq === "number" &&
+    Number.isFinite(message.seq) &&
+    Number.isInteger(message.seq)
+  ) {
+    return `seq:${message.seq}`;
+  }
+  return "";
 }

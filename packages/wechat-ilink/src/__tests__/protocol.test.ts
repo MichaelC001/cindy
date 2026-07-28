@@ -74,7 +74,11 @@ describe("pure protocol utilities", () => {
         context_token: "ctx",
         item_list: [{ type: 1, text_item: { text: "hello" } }],
       }),
-    ).toMatchObject({ messageId: "1", senderId: "user", text: "hello" });
+    ).toMatchObject({
+      messageId: "message:1",
+      senderId: "user",
+      text: "hello",
+    });
     expect(
       decodeInboundMessage({
         message_id: 2,
@@ -92,7 +96,7 @@ describe("pure protocol utilities", () => {
         context_token: "ctx",
         item_list: [null] as never,
       }),
-    ).toMatchObject({ messageId: "3", media: [] });
+    ).toMatchObject({ messageId: "message:3", media: [] });
   });
 
   it("preserves a legitimate zero-byte file length", () => {
@@ -228,6 +232,32 @@ describe("iLink HTTP boundary", () => {
         },
       },
     ]);
+  });
+
+  it("accepts inbound messages with an omitted recipient and a 64-bit identifier", () => {
+    expect(
+      decodeInboundMessage({
+        message_id: 9_223_372_036_854_775_807,
+        client_id: "stable-client-id",
+        from_user_id: "user",
+        context_token: "ctx",
+        item_list: [{ type: 1, text_item: { text: "hello" } }],
+      }),
+    ).toMatchObject({
+      messageId: "client:stable-client-id",
+      senderId: "user",
+      text: "hello",
+    });
+    expect(
+      decodeInboundMessage({
+        message_id: "9223372036854775807",
+        from_user_id: "user",
+        context_token: "ctx",
+      }),
+    ).toMatchObject({
+      messageId: "message:9223372036854775807",
+      senderId: "user",
+    });
   });
 
   it("builds authenticated poll requests without exposing response bodies in errors", async () => {
