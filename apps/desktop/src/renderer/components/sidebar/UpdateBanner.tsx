@@ -328,7 +328,7 @@ export function UpdateBanner({ isCollapsed }: UpdateBannerProps) {
         <p
           className={cn(
             'text-center text-xs',
-            confirming && hasSessionInTurn
+            !isPreparing && confirming && hasSessionInTurn
               ? 'text-[var(--warning-fg)]'
               : 'text-sidebar-muted',
           )}
