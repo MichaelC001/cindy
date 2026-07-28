@@ -58,18 +58,20 @@ describe('RsbWebviewDialogs', () => {
       defaultValue: 'Cindy',
     });
 
-    await expect(dialogs.respond(harness.wc, {
-      dialogId: pending?.id,
-      accept: true,
-      promptText: 'New name',
-    })).resolves.toMatchObject({
+    await expect(
+      dialogs.respond(harness.wc, {
+        dialogId: pending?.id,
+        accept: true,
+        promptText: 'New name',
+      }),
+    ).resolves.toMatchObject({
       id: pending?.id,
       accepted: true,
     });
-    expect(harness.sendCommand).toHaveBeenCalledWith(
-      'Page.handleJavaScriptDialog',
-      { accept: true, promptText: 'New name' },
-    );
+    expect(harness.sendCommand).toHaveBeenCalledWith('Page.handleJavaScriptDialog', {
+      accept: true,
+      promptText: 'New name',
+    });
     harness.emit('Page.javascriptDialogClosed', {
       result: true,
       userInput: 'New name',
@@ -86,11 +88,13 @@ describe('RsbWebviewDialogs', () => {
       message: 'Continue?',
     });
 
-    await expect(dialogs.respond(harness.wc, {
-      dialogId: 'stale-dialog',
-      accept: false,
-      timeoutMs: 50,
-    })).rejects.toThrow('is no longer pending');
+    await expect(
+      dialogs.respond(harness.wc, {
+        dialogId: 'stale-dialog',
+        accept: false,
+        timeoutMs: 50,
+      }),
+    ).rejects.toThrow('is no longer pending');
     expect(harness.sendCommand).not.toHaveBeenCalledWith(
       'Page.handleJavaScriptDialog',
       expect.anything(),
@@ -156,10 +160,40 @@ describe('RsbWebviewDialogs', () => {
       message: 'Continue again?',
       closedBy: 'armed',
     });
-    expect(harness.sendCommand).toHaveBeenCalledWith(
-      'Page.handleJavaScriptDialog',
-      { accept: true },
-    );
+    expect(harness.sendCommand).toHaveBeenCalledWith('Page.handleJavaScriptDialog', {
+      accept: true,
+    });
+  });
+
+  it('does not let an undirected response consume a stale recent dialog', async () => {
+    const harness = dialogHarness();
+    const dialogs = new RsbWebviewDialogs({ warn: vi.fn() });
+    await dialogs.observe(harness.wc);
+    harness.emit('Page.javascriptDialogOpening', {
+      type: 'confirm',
+      message: 'Old dialog',
+    });
+    harness.emit('Page.javascriptDialogClosed', {
+      result: false,
+      userInput: '',
+    });
+
+    await expect(
+      dialogs.respond(harness.wc, {
+        accept: true,
+        timeoutMs: 20,
+      }),
+    ).rejects.toThrow('no page dialog is pending');
+
+    const armed = dialogs.armNext(harness.wc, { accept: true });
+    harness.emit('Page.javascriptDialogOpening', {
+      type: 'confirm',
+      message: 'Fresh dialog',
+    });
+    await expect(armed.response).resolves.toMatchObject({
+      message: 'Fresh dialog',
+      closedBy: 'armed',
+    });
   });
 
   it('keeps a prepared response active beyond the regular action timeout', async () => {
@@ -181,10 +215,9 @@ describe('RsbWebviewDialogs', () => {
         message: 'Continue later?',
         closedBy: 'armed',
       });
-      expect(harness.sendCommand).toHaveBeenCalledWith(
-        'Page.handleJavaScriptDialog',
-        { accept: true },
-      );
+      expect(harness.sendCommand).toHaveBeenCalledWith('Page.handleJavaScriptDialog', {
+        accept: true,
+      });
     } finally {
       vi.useRealTimers();
     }

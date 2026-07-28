@@ -194,11 +194,11 @@ function buildSnapshotTree(nodes: RawAxNode[]): { tree: SnapshotTreeNode[]; root
     const nodeId = raw.nodeId;
     const backendDOMNodeId = raw.backendDOMNodeId;
     if (
-      raw.ignored === true
-      || typeof nodeId !== 'string'
-      || nodeId === ''
-      || typeof backendDOMNodeId !== 'number'
-      || backendDOMNodeId <= 0
+      raw.ignored === true ||
+      typeof nodeId !== 'string' ||
+      nodeId === '' ||
+      typeof backendDOMNodeId !== 'number' ||
+      backendDOMNodeId <= 0
     ) {
       continue;
     }
@@ -262,10 +262,7 @@ function shouldReference(node: SnapshotTreeNode): boolean {
   return Boolean(node.name) && !STRUCTURAL_ROLES.has(node.role);
 }
 
-function shouldRender(
-  node: SnapshotTreeNode,
-  req: BrowserControlRequest,
-): boolean {
+function shouldRender(node: SnapshotTreeNode, req: BrowserControlRequest): boolean {
   if (typeof req.depth === 'number' && node.depth > req.depth) return false;
   if (req.interactive === true) return INTERACTIVE_ROLES.has(node.role);
   if (req.compact === true && STRUCTURAL_ROLES.has(node.role) && !node.name && !node.ref) {
@@ -325,30 +322,38 @@ async function resolveHref(
   send: DebuggerTransport['sendCommand'],
   backendDOMNodeId: number,
 ): Promise<string | undefined> {
-  const resolved = await send('DOM.resolveNode', { backendNodeId: backendDOMNodeId }) as {
+  const resolved = (await send('DOM.resolveNode', { backendNodeId: backendDOMNodeId })) as {
     object?: { objectId?: string };
   };
   const objectId = resolved.object?.objectId;
   if (!objectId) return undefined;
   try {
-    const result = await send('Runtime.callFunctionOn', {
+    const result = (await send('Runtime.callFunctionOn', {
       objectId,
       functionDeclaration: 'function() { return typeof this.href === "string" ? this.href : ""; }',
       returnByValue: true,
-    }) as { result?: { value?: unknown } };
+    })) as { result?: { value?: unknown } };
     return typeof result.result?.value === 'string' && result.result.value !== ''
       ? result.result.value
       : undefined;
   } finally {
-    await send('Runtime.releaseObject', { objectId }).catch(() => undefined);
+    await releaseObject(send, objectId);
   }
+}
+
+async function releaseObject(
+  send: DebuggerTransport['sendCommand'],
+  objectId: string | undefined,
+): Promise<void> {
+  if (!objectId) return;
+  await send('Runtime.releaseObject', { objectId }).catch(() => undefined);
 }
 
 async function inspectPage(
   send: DebuggerTransport['sendCommand'],
   includeResources: boolean,
 ): Promise<PageInspection> {
-  const evaluated = await send('Runtime.evaluate', {
+  const evaluated = (await send('Runtime.evaluate', {
     expression: `(() => {
       const normalize = (value) => String(value ?? "").replace(/\\s+/g, " ").trim();
       const pageText = normalize(document.body?.innerText || "").slice(0, 6000);
@@ -423,7 +428,7 @@ async function inspectPage(
     })()`,
     awaitPromise: true,
     returnByValue: true,
-  }) as { result?: { value?: unknown }; exceptionDetails?: { text?: string } };
+  })) as { result?: { value?: unknown }; exceptionDetails?: { text?: string } };
   if (evaluated.exceptionDetails) {
     throw new Error(evaluated.exceptionDetails.text ?? 'page inspection failed');
   }
@@ -480,23 +485,27 @@ async function resolveFrameRoot(
   timeoutMs?: number,
 ): Promise<{ frameId: string; nodeId?: number }> {
   const frame = await resolveSelector(send, selector, timeoutMs);
-  const described = await send('DOM.describeNode', {
-    backendNodeId: frame.backendDOMNodeId,
-    depth: 1,
-  }) as {
-    node?: {
-      frameId?: string;
-      contentDocument?: { frameId?: string; nodeId?: number };
+  try {
+    const described = (await send('DOM.describeNode', {
+      backendNodeId: frame.backendDOMNodeId,
+      depth: 1,
+    })) as {
+      node?: {
+        frameId?: string;
+        contentDocument?: { frameId?: string; nodeId?: number };
+      };
     };
-  };
-  const frameId = described.node?.contentDocument?.frameId ?? described.node?.frameId;
-  if (!frameId) throw new Error(`frame selector did not resolve to an iframe: ${selector}`);
-  return {
-    frameId,
-    ...(described.node?.contentDocument?.nodeId
-      ? { nodeId: described.node.contentDocument.nodeId }
-      : {}),
-  };
+    const frameId = described.node?.contentDocument?.frameId ?? described.node?.frameId;
+    if (!frameId) throw new Error(`frame selector did not resolve to an iframe: ${selector}`);
+    return {
+      frameId,
+      ...(described.node?.contentDocument?.nodeId
+        ? { nodeId: described.node.contentDocument.nodeId }
+        : {}),
+    };
+  } finally {
+    await releaseObject(send, frame.objectId);
+  }
 }
 
 async function resolveSelectorInFrame(
@@ -504,14 +513,14 @@ async function resolveSelectorInFrame(
   frameNodeId: number,
   selector: string,
 ): Promise<ResolvedNode> {
-  const queried = await send('DOM.querySelector', {
+  const queried = (await send('DOM.querySelector', {
     nodeId: frameNodeId,
     selector,
-  }) as { nodeId?: number };
+  })) as { nodeId?: number };
   if (!queried.nodeId) throw new Error(`selector not found in frame: ${selector}`);
-  const described = await send('DOM.describeNode', {
+  const described = (await send('DOM.describeNode', {
     nodeId: queried.nodeId,
-  }) as { node?: { backendNodeId?: number } };
+  })) as { node?: { backendNodeId?: number } };
   if (!described.node?.backendNodeId) {
     throw new Error(`selector could not be resolved in frame: ${selector}`);
   }
@@ -527,10 +536,7 @@ async function resolveElementQuery(
   timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
   options?: { allowHidden?: boolean },
 ): Promise<ResolvedNode> {
-  if (
-    query.index !== undefined
-    && (!Number.isInteger(query.index) || query.index < 0)
-  ) {
+  if (query.index !== undefined && (!Number.isInteger(query.index) || query.index < 0)) {
     throw new Error('element query index must be a non-negative integer');
   }
   const hasLookupField = [
@@ -545,13 +551,9 @@ async function resolveElementQuery(
   if (!hasLookupField) {
     throw new Error('element query requires at least one field');
   }
-  const boundedTimeout = positiveInt(
-    timeoutMs,
-    DEFAULT_WAIT_TIMEOUT_MS,
-    MAX_WAIT_TIMEOUT_MS,
-  );
+  const boundedTimeout = positiveInt(timeoutMs, DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS);
   const allowHidden = options?.allowHidden === true;
-  const evaluated = await send('Runtime.evaluate', {
+  const evaluated = (await send('Runtime.evaluate', {
     expression: `(() => {
       const query = ${JSON.stringify(query)};
       const deadline = Date.now() + ${boundedTimeout};
@@ -687,7 +689,7 @@ async function resolveElementQuery(
     awaitPromise: true,
     returnByValue: false,
     timeout: boundedTimeout + 1_000,
-  }) as {
+  })) as {
     result?: { objectId?: string; subtype?: string };
     exceptionDetails?: {
       text?: string;
@@ -696,17 +698,18 @@ async function resolveElementQuery(
   };
   if (evaluated.exceptionDetails) {
     const details = evaluated.exceptionDetails;
-    const message = details.exception?.description
-      ?? (typeof details.exception?.value === 'string' ? details.exception.value : undefined)
-      ?? details.text
-      ?? 'element query failed';
+    const message =
+      details.exception?.description ??
+      (typeof details.exception?.value === 'string' ? details.exception.value : undefined) ??
+      details.text ??
+      'element query failed';
     throw new Error(message);
   }
   const objectId = evaluated.result?.objectId;
   if (!objectId || evaluated.result?.subtype === 'null') {
     throw new Error('element query did not resolve to an element');
   }
-  const described = await send('DOM.describeNode', { objectId }) as {
+  const described = (await send('DOM.describeNode', { objectId })) as {
     node?: { backendNodeId?: number };
   };
   return { objectId, backendDOMNodeId: described.node?.backendNodeId };
@@ -716,9 +719,9 @@ async function resolveRef(
   send: DebuggerTransport['sendCommand'],
   target: SnapshotRef,
 ): Promise<ResolvedNode> {
-  const resolved = await send('DOM.resolveNode', {
+  const resolved = (await send('DOM.resolveNode', {
     backendNodeId: target.backendDOMNodeId,
-  }) as { object?: { objectId?: string } };
+  })) as { object?: { objectId?: string } };
   const objectId = resolved.object?.objectId;
   if (!objectId) {
     throw new Error('snapshot ref is stale; take a new snapshot');
@@ -732,25 +735,38 @@ async function callOnNode<T>(
   functionDeclaration: string,
   args?: unknown[],
 ): Promise<T> {
-  const result = await send('Runtime.callFunctionOn', {
+  const result = (await send('Runtime.callFunctionOn', {
     objectId,
     functionDeclaration,
     arguments: args?.map((value) => ({ value })),
     returnByValue: true,
     awaitPromise: true,
     userGesture: true,
-  }) as {
+  })) as {
     result?: { value?: unknown };
     exceptionDetails?: { text?: string; exception?: { description?: string } };
   };
   if (result.exceptionDetails) {
     throw new Error(
-      result.exceptionDetails.exception?.description
-      ?? result.exceptionDetails.text
-      ?? 'page script failed',
+      result.exceptionDetails.exception?.description ??
+        result.exceptionDetails.text ??
+        'page script failed',
     );
   }
   return result.result?.value as T;
+}
+
+async function withReleasedNode<T>(
+  send: DebuggerTransport['sendCommand'],
+  resolve: () => Promise<ResolvedNode>,
+  body: (node: ResolvedNode) => Promise<T>,
+): Promise<T> {
+  const node = await resolve();
+  try {
+    return await body(node);
+  } finally {
+    await releaseObject(send, node.objectId);
+  }
 }
 
 async function fillNode(
@@ -772,7 +788,12 @@ async function fillNode(
         }
         const checked = value === true || value === 1 || value === "1" || value === "true";
         if (this.checked !== checked) {
-          this.checked = checked;
+          const setter = Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            "checked",
+          )?.set;
+          if (setter) setter.call(this, checked);
+          else this.checked = checked;
           this.dispatchEvent(new Event("input", { bubbles: true }));
           this.dispatchEvent(new Event("change", { bubbles: true }));
         }
@@ -870,11 +891,7 @@ async function waitForActionable(
   node: ResolvedNode,
   options: { editable?: boolean; timeoutMs?: number } = {},
 ): Promise<void> {
-  const timeoutMs = positiveInt(
-    options.timeoutMs,
-    DEFAULT_WAIT_TIMEOUT_MS,
-    MAX_WAIT_TIMEOUT_MS,
-  );
+  const timeoutMs = positiveInt(options.timeoutMs, DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS);
   const result = await callOnNode<{ ok: boolean; reason?: string }>(
     send,
     node.objectId,
@@ -956,11 +973,11 @@ async function centerOfNode(
   options: { focus?: boolean } = {},
 ): Promise<{ x: number; y: number }> {
   if (options.focus !== false) await focusNode(send, node);
-  const box = await send('DOM.getBoxModel', {
+  const box = (await send('DOM.getBoxModel', {
     ...(node.backendDOMNodeId
       ? { backendNodeId: node.backendDOMNodeId }
       : { objectId: node.objectId }),
-  }) as { model?: { content?: number[]; border?: number[] } };
+  })) as { model?: { content?: number[]; border?: number[] } };
   const quad = box.model?.content ?? box.model?.border;
   if (!quad || quad.length < 8) throw new Error('target has no visible box');
   const xs = [quad[0], quad[2], quad[4], quad[6]];
@@ -1007,9 +1024,7 @@ function modifierMask(modifiers: unknown): number {
 }
 
 type TranslatedInputMethod =
-  | 'Input.dispatchKeyEvent'
-  | 'Input.dispatchMouseEvent'
-  | 'Input.insertText';
+  'Input.dispatchKeyEvent' | 'Input.dispatchMouseEvent' | 'Input.insertText';
 
 interface TranslatedInputCommand {
   method: TranslatedInputMethod;
@@ -1056,10 +1071,9 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
   };
   const eventWindow = (element: Element): Window & typeof globalThis =>
     element.ownerDocument.defaultView ?? window;
-  const modifiers = (mask: number): Pick<
-    KeyboardEventInit,
-    'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'
-  > => {
+  const modifiers = (
+    mask: number,
+  ): Pick<KeyboardEventInit, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'> => {
     const enabled = (value: number): boolean => Math.floor(mask / value) % 2 === 1;
     return {
       altKey: enabled(1),
@@ -1094,8 +1108,8 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
       const symbol = currentWindow.Symbol.for('cindy.rsb.action-target');
       if (Reflect.get(current, symbol) === command.targetTicket) return true;
       const root = current.getRootNode();
-      current = current.parentElement
-        ?? (root instanceof currentWindow.ShadowRoot ? root.host : null);
+      current =
+        current.parentElement ?? (root instanceof currentWindow.ShadowRoot ? root.host : null);
     }
     return false;
   };
@@ -1109,9 +1123,8 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
     x: number,
     y: number,
   ): { target: Element; x: number; y: number } | null => {
-    const rootWindow = (
-      'defaultView' in root ? root.defaultView : root.ownerDocument.defaultView
-    ) ?? window;
+    const rootWindow =
+      ('defaultView' in root ? root.defaultView : root.ownerDocument.defaultView) ?? window;
     const target = root.elementFromPoint(x, y);
     if (!(target instanceof rootWindow.Element)) return null;
     if (target.shadowRoot) {
@@ -1123,8 +1136,7 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
         const frameDocument = target.contentDocument;
         if (frameDocument) {
           const bounds = target.getBoundingClientRect();
-          return pointTarget(frameDocument, x - bounds.left, y - bounds.top)
-            ?? { target, x, y };
+          return pointTarget(frameDocument, x - bounds.left, y - bounds.top) ?? { target, x, y };
         }
       } catch {
         throw new Error('cross-origin iframe input is not supported');
@@ -1132,16 +1144,9 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
     }
     return { target, x, y };
   };
-  const dispatchMouse = (
-    target: Element,
-    type: string,
-    init: MouseEventInit,
-  ): boolean => target.dispatchEvent(new (eventWindow(target).MouseEvent)(type, init));
-  const mouseInit = (
-    target: Element,
-    x: number,
-    y: number,
-  ): MouseEventInit => ({
+  const dispatchMouse = (target: Element, type: string, init: MouseEventInit): boolean =>
+    target.dispatchEvent(new (eventWindow(target).MouseEvent)(type, init));
+  const mouseInit = (target: Element, x: number, y: number): MouseEventInit => ({
     ...modifiers(Number(params.modifiers ?? 0)),
     bubbles: true,
     button: mouseButton(params.button),
@@ -1185,7 +1190,7 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
       mousePress?: { button: unknown; moved: boolean; x: number; y: number } | null;
     };
   };
-  const state = stateRoot.__cindyRsbInputTranslationState ??= {};
+  const state = (stateRoot.__cindyRsbInputTranslationState ??= {});
   const translateMouse = (): void => {
     const type = stringParam(params.type, 'type');
     const screenX = numberParam(params.x, 'x');
@@ -1221,11 +1226,11 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
       const pressed = state.mousePress;
       state.mousePress = null;
       if (
-        !pressed
-        || pressed.moved
-        || pressed.button !== (params.button ?? 'left')
-        || Math.abs(pressed.x - screenX) > 1
-        || Math.abs(pressed.y - screenY) > 1
+        !pressed ||
+        pressed.moved ||
+        pressed.button !== (params.button ?? 'left') ||
+        Math.abs(pressed.x - screenX) > 1 ||
+        Math.abs(pressed.y - screenY) > 1
       ) {
         return;
       }
@@ -1245,9 +1250,7 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
     }
     throw new Error(`unsupported mouse event type: ${type}`);
   };
-  const deepestActiveElement = (
-    root: Document | ShadowRoot,
-  ): Element | null => {
+  const deepestActiveElement = (root: Document | ShadowRoot): Element | null => {
     const active = root.activeElement;
     if (!active) return null;
     if (active instanceof eventWindow(active).HTMLIFrameElement) {
@@ -1258,36 +1261,34 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
         throw new Error('cross-origin iframe input is not supported');
       }
     }
-    return active.shadowRoot ? deepestActiveElement(active.shadowRoot) ?? active : active;
+    return active.shadowRoot ? (deepestActiveElement(active.shadowRoot) ?? active) : active;
   };
   const isDirectTextControl = (
     element: Element,
   ): element is HTMLInputElement | HTMLTextAreaElement => {
     const view = eventWindow(element);
     if (element instanceof view.HTMLTextAreaElement) return true;
-    return element instanceof view.HTMLInputElement
-      && ['password', 'search', 'tel', 'text', 'url'].includes(element.type);
+    return (
+      element instanceof view.HTMLInputElement &&
+      ['password', 'search', 'tel', 'text', 'url'].includes(element.type)
+    );
   };
   const isStructuredValueControl = (element: Element): element is HTMLInputElement =>
-    element instanceof eventWindow(element).HTMLInputElement
-    && ['date', 'datetime-local', 'month', 'time', 'week'].includes(element.type);
+    element instanceof eventWindow(element).HTMLInputElement &&
+    ['date', 'datetime-local', 'month', 'time', 'week'].includes(element.type);
   const isValueTextControl = (element: Element): element is HTMLInputElement =>
-    element instanceof eventWindow(element).HTMLInputElement
-    && (['email', 'number'].includes(element.type) || isStructuredValueControl(element));
+    element instanceof eventWindow(element).HTMLInputElement &&
+    (['email', 'number'].includes(element.type) || isStructuredValueControl(element));
   const isContentEditable = (element: Element): element is HTMLElement =>
     element instanceof eventWindow(element).HTMLElement && element.isContentEditable;
   const editableElement = (): Element | null => {
     const active = deepestActiveElement(document);
-    return active
-      && (isDirectTextControl(active) || isValueTextControl(active) || isContentEditable(active))
+    return active &&
+      (isDirectTextControl(active) || isValueTextControl(active) || isContentEditable(active))
       ? active
       : null;
   };
-  const createInputEvent = (
-    element: Element,
-    type: string,
-    init: InputEventInit,
-  ): Event => {
+  const createInputEvent = (element: Element, type: string, init: InputEventInit): Event => {
     const view = eventWindow(element);
     return typeof view.InputEvent === 'function'
       ? new view.InputEvent(type, init)
@@ -1297,11 +1298,7 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
           composed: init.composed,
         });
   };
-  const insertText = (
-    element: Element | null,
-    text: string,
-    inputType = 'insertText',
-  ): void => {
+  const insertText = (element: Element | null, text: string, inputType = 'insertText'): void => {
     if (!element) throw new Error('no editable element is focused');
     const beforeInput = createInputEvent(element, 'beforeinput', {
       bubbles: true,
@@ -1338,19 +1335,19 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
     } else {
       throw new Error('focused element is not editable');
     }
-    element.dispatchEvent(createInputEvent(element, 'input', {
-      bubbles: true,
-      cancelable: false,
-      composed: true,
-      data: text,
-      inputType,
-    }));
+    element.dispatchEvent(
+      createInputEvent(element, 'input', {
+        bubbles: true,
+        cancelable: false,
+        composed: true,
+        data: text,
+        inputType,
+      }),
+    );
   };
   const deleteText = (element: Element | null, direction: 'backward' | 'forward'): void => {
     if (!element) return;
-    const inputType = direction === 'forward'
-      ? 'deleteContentForward'
-      : 'deleteContentBackward';
+    const inputType = direction === 'forward' ? 'deleteContentForward' : 'deleteContentBackward';
     const beforeInput = createInputEvent(element, 'beforeinput', {
       bubbles: true,
       cancelable: true,
@@ -1369,20 +1366,21 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
       }
       element.setRangeText('', start, end, 'end');
     } else if (isValueTextControl(element)) {
-      if (element.ownerDocument.execCommand?.(
-        direction === 'forward' ? 'forwardDelete' : 'delete',
-      )) return;
+      if (element.ownerDocument.execCommand?.(direction === 'forward' ? 'forwardDelete' : 'delete'))
+        return;
       if (direction === 'backward') element.value = element.value.slice(0, -1);
     } else {
       return;
     }
-    element.dispatchEvent(createInputEvent(element, 'input', {
-      bubbles: true,
-      cancelable: false,
-      composed: true,
-      data: null,
-      inputType,
-    }));
+    element.dispatchEvent(
+      createInputEvent(element, 'input', {
+        bubbles: true,
+        cancelable: false,
+        composed: true,
+        data: null,
+        inputType,
+      }),
+    );
   };
   const keyCode = (key: string): number => {
     const known: Record<string, number> = {
@@ -1396,7 +1394,7 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
       ArrowDown: 40,
       Delete: 46,
     };
-    return known[key] ?? (key.length === 1 ? key.toUpperCase().codePointAt(0) ?? 0 : 0);
+    return known[key] ?? (key.length === 1 ? (key.toUpperCase().codePointAt(0) ?? 0) : 0);
   };
   const translateKey = (): void => {
     const type = stringParam(params.type, 'type');
@@ -1450,16 +1448,14 @@ function translateInputCommand(command: TranslatedInputCommand): TranslatedInput
     else if (key === 'Delete') deleteText(activeEditable, 'forward');
     else if (key === 'Enter') {
       if (
-        activeEditable
-        && (
-          activeEditable instanceof eventWindow(activeEditable).HTMLTextAreaElement
-          || isContentEditable(activeEditable)
-        )
+        activeEditable &&
+        (activeEditable instanceof eventWindow(activeEditable).HTMLTextAreaElement ||
+          isContentEditable(activeEditable))
       ) {
         insertText(activeEditable, '\n', 'insertLineBreak');
       } else if (
-        activeEditable
-        && activeEditable instanceof eventWindow(activeEditable).HTMLInputElement
+        activeEditable &&
+        activeEditable instanceof eventWindow(activeEditable).HTMLInputElement
       ) {
         activeEditable.form?.requestSubmit();
       }
@@ -1493,16 +1489,13 @@ async function dispatchTranslatedInput(
   params: Record<string, unknown>,
   targetTicket?: string,
 ): Promise<void> {
-  const source = `(${translateInputCommand.toString()})(${
-    JSON.stringify({
-      method,
-      params,
-      ...(targetTicket ? { targetTicket } : {}),
-    } satisfies TranslatedInputCommand)
-  });`;
-  const userGesture = method === 'Input.dispatchMouseEvent'
-    && params.type === 'mouseReleased';
-  const result = await wc.executeJavaScript(source, userGesture) as TranslatedInputResult;
+  const source = `(${translateInputCommand.toString()})(${JSON.stringify({
+    method,
+    params,
+    ...(targetTicket ? { targetTicket } : {}),
+  } satisfies TranslatedInputCommand)});`;
+  const userGesture = method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased';
+  const result = (await wc.executeJavaScript(source, userGesture)) as TranslatedInputResult;
   if (result?.ok !== true) {
     throw new Error(result?.error ?? `failed to translate ${method}`);
   }
@@ -1548,30 +1541,41 @@ async function dispatchClick(
   const clickCount = request.doubleClick === true ? 2 : 1;
   const modifiers = modifierMask(request.modifiers);
   for (let count = 1; count <= clickCount; count += 1) {
-    await dispatchInput('Input.dispatchMouseEvent', {
-      type: 'mousePressed',
-      x,
-      y,
-      button,
-      clickCount: count,
-      modifiers,
-    }, targetTicket);
+    await dispatchInput(
+      'Input.dispatchMouseEvent',
+      {
+        type: 'mousePressed',
+        x,
+        y,
+        button,
+        clickCount: count,
+        modifiers,
+      },
+      targetTicket,
+    );
     if (typeof request.delayMs === 'number' && request.delayMs > 0) {
       await delay(Math.min(request.delayMs, 5_000));
     }
-    await dispatchInput('Input.dispatchMouseEvent', {
-      type: 'mouseReleased',
-      x,
-      y,
-      button,
-      clickCount: count,
-      modifiers,
-    }, targetTicket);
+    await dispatchInput(
+      'Input.dispatchMouseEvent',
+      {
+        type: 'mouseReleased',
+        x,
+        y,
+        button,
+        clickCount: count,
+        modifiers,
+      },
+      targetTicket,
+    );
   }
 }
 
 function parseKey(raw: string): { key: string; modifiers: number } {
-  const parts = raw.split('+').map((part) => part.trim()).filter(Boolean);
+  const parts = raw
+    .split('+')
+    .map((part) => part.trim())
+    .filter(Boolean);
   const key = parts.pop();
   if (!key) throw new Error('key required');
   return { key, modifiers: modifierMask(parts) };
@@ -1585,8 +1589,8 @@ async function dispatchKey(
   delayMs?: number,
 ): Promise<void> {
   const { key, modifiers } = parseKey(rawKey);
-  const keyCode = nativeKeyCode(key)
-    ?? (modifiers !== 0 && key.length === 1 ? key.toUpperCase() : undefined);
+  const keyCode =
+    nativeKeyCode(key) ?? (modifiers !== 0 && key.length === 1 ? key.toUpperCase() : undefined);
   // Printable unmodified characters and Enter retain the page-side path,
   // which emits the input/change events expected by web applications. Native
   // dispatch is reserved for navigation/editing keys whose browser defaults
@@ -1600,18 +1604,26 @@ async function dispatchKey(
     return;
   }
   const text = key.length === 1 && modifiers === 0 ? key : undefined;
-  await dispatchInput('Input.dispatchKeyEvent', {
-    type: 'keyDown',
-    key,
-    ...(text ? { text } : {}),
-    modifiers,
-  }, targetTicket);
+  await dispatchInput(
+    'Input.dispatchKeyEvent',
+    {
+      type: 'keyDown',
+      key,
+      ...(text ? { text } : {}),
+      modifiers,
+    },
+    targetTicket,
+  );
   if (delayMs && delayMs > 0) await delay(Math.min(delayMs, 5_000));
-  await dispatchInput('Input.dispatchKeyEvent', {
-    type: 'keyUp',
-    key,
-    modifiers,
-  }, targetTicket);
+  await dispatchInput(
+    'Input.dispatchKeyEvent',
+    {
+      type: 'keyUp',
+      key,
+      modifiers,
+    },
+    targetTicket,
+  );
 }
 
 export class RsbWebviewAutomation {
@@ -1629,9 +1641,7 @@ export class RsbWebviewAutomation {
 
   getHumanVerificationBarrier(tabId: string): HumanVerificationBarrier | undefined {
     const barrier = this.barriersByTab.get(tabId);
-    return barrier
-      ? { kind: barrier.kind, evidence: [...barrier.evidence] }
-      : undefined;
+    return barrier ? { kind: barrier.kind, evidence: [...barrier.evidence] } : undefined;
   }
 
   async snapshot(
@@ -1642,15 +1652,16 @@ export class RsbWebviewAutomation {
     if (req.labels === true) {
       throw new Error('snapshot labels are unavailable in the embedded browser backend');
     }
-    const snapshotReq = req.mode === 'efficient'
-      ? {
-          ...req,
-          interactive: req.interactive ?? true,
-          compact: req.compact ?? true,
-          depth: req.depth ?? EFFICIENT_SNAPSHOT_DEPTH,
-          maxChars: req.maxChars ?? EFFICIENT_SNAPSHOT_MAX_CHARS,
-        }
-      : req;
+    const snapshotReq =
+      req.mode === 'efficient'
+        ? {
+            ...req,
+            interactive: req.interactive ?? true,
+            compact: req.compact ?? true,
+            depth: req.depth ?? EFFICIENT_SNAPSHOT_DEPTH,
+            maxChars: req.maxChars ?? EFFICIENT_SNAPSHOT_MAX_CHARS,
+          }
+        : req;
     return withDebugger(wc, async (send) => {
       let inspection: PageInspection = { resources: [] };
       try {
@@ -1660,7 +1671,10 @@ export class RsbWebviewAutomation {
       }
       this.resourcesByTab.delete(tabId);
       if (inspection.resources.length > 0) {
-        this.resourcesByTab.set(tabId, new Set(inspection.resources.map((resource) => resource.url)));
+        this.resourcesByTab.set(
+          tabId,
+          new Set(inspection.resources.map((resource) => resource.url)),
+        );
       }
       if (inspection.barrier) {
         this.refsByTab.set(tabId, new Map());
@@ -1677,9 +1691,10 @@ export class RsbWebviewAutomation {
       this.barriersByTab.delete(tabId);
       await send('Accessibility.enable');
       let response: { nodes?: RawAxNode[] };
-      const frame = typeof snapshotReq.frame === 'string' && snapshotReq.frame !== ''
-        ? await resolveFrameRoot(send, snapshotReq.frame, snapshotReq.timeoutMs)
-        : undefined;
+      const frame =
+        typeof snapshotReq.frame === 'string' && snapshotReq.frame !== ''
+          ? await resolveFrameRoot(send, snapshotReq.frame, snapshotReq.timeoutMs)
+          : undefined;
       if (typeof snapshotReq.selector === 'string' && snapshotReq.selector !== '') {
         const selected = frame?.nodeId
           ? await resolveSelectorInFrame(send, frame.nodeId, snapshotReq.selector)
@@ -1689,26 +1704,33 @@ export class RsbWebviewAutomation {
         if (!selected) {
           throw new Error('frame document is unavailable for selector-scoped snapshot');
         }
-        response = await send('Accessibility.getPartialAXTree', {
-          backendNodeId: selected.backendDOMNodeId,
-          fetchRelatives: true,
-        }) as { nodes?: RawAxNode[] };
+        try {
+          response = (await send('Accessibility.getPartialAXTree', {
+            backendNodeId: selected.backendDOMNodeId,
+            fetchRelatives: true,
+          })) as { nodes?: RawAxNode[] };
+        } finally {
+          await releaseObject(send, selected.objectId);
+        }
       } else {
-        response = await send(
+        response = (await send(
           'Accessibility.getFullAXTree',
           frame ? { frameId: frame.frameId } : undefined,
-        ) as { nodes?: RawAxNode[] };
+        )) as { nodes?: RawAxNode[] };
       }
 
-      const { tree, roots } = buildSnapshotTree(Array.isArray(response.nodes) ? response.nodes : []);
+      const { tree, roots } = buildSnapshotTree(
+        Array.isArray(response.nodes) ? response.nodes : [],
+      );
       const refs: Record<string, SnapshotRef> = {};
       let refNumber = 1;
       const refOrder = tree
         .map((_node, index) => index)
-        .toSorted((left, right) => (
-          Number(INTERACTIVE_ROLES.has(tree[right].role))
-          - Number(INTERACTIVE_ROLES.has(tree[left].role))
-        ));
+        .toSorted(
+          (left, right) =>
+            Number(INTERACTIVE_ROLES.has(tree[right].role)) -
+            Number(INTERACTIVE_ROLES.has(tree[left].role)),
+        );
       for (const index of refOrder) {
         const node = tree[index];
         if (!shouldReference(node) || refNumber > MAX_SNAPSHOT_REFS) continue;
@@ -1792,11 +1814,7 @@ export class RsbWebviewAutomation {
     if (typeof request.fn !== 'string' || request.fn === '') {
       throw new Error('evaluate.fn (JS expression source) required');
     }
-    const timeoutMs = positiveInt(
-      request.timeoutMs,
-      DEFAULT_WAIT_TIMEOUT_MS,
-      MAX_WAIT_TIMEOUT_MS,
-    );
+    const timeoutMs = positiveInt(request.timeoutMs, DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS);
     return withDebugger(wc, async (send) => {
       let response: {
         result?: { value?: unknown };
@@ -1808,22 +1826,26 @@ export class RsbWebviewAutomation {
           throw new Error(`unknown or stale snapshot ref: ${request.ref}; take a new snapshot`);
         }
         const target = await resolveRef(send, snapshotRef);
-        response = await send('Runtime.callFunctionOn', {
-          objectId: target.objectId,
-          functionDeclaration: `function(fnSource) {
-            var candidate = eval("(" + fnSource + ")");
-            if (typeof candidate !== "function") {
-              throw new Error("evaluate source did not produce a function");
-            }
-            return Promise.resolve(candidate(this));
-          }`,
-          arguments: [{ value: request.fn }],
-          awaitPromise: true,
-          returnByValue: true,
-          timeout: timeoutMs,
-        }) as typeof response;
+        try {
+          response = (await send('Runtime.callFunctionOn', {
+            objectId: target.objectId,
+            functionDeclaration: `function(fnSource) {
+              var candidate = eval("(" + fnSource + ")");
+              if (typeof candidate !== "function") {
+                throw new Error("evaluate source did not produce a function");
+              }
+              return Promise.resolve(candidate(this));
+            }`,
+            arguments: [{ value: request.fn }],
+            awaitPromise: true,
+            returnByValue: true,
+            timeout: timeoutMs,
+          })) as typeof response;
+        } finally {
+          await releaseObject(send, target.objectId);
+        }
       } else {
-        response = await send('Runtime.evaluate', {
+        response = (await send('Runtime.evaluate', {
           expression: `(() => {
             var candidate = eval("(" + ${JSON.stringify(request.fn)} + ")");
             if (typeof candidate !== "function") {
@@ -1834,13 +1856,13 @@ export class RsbWebviewAutomation {
           awaitPromise: true,
           returnByValue: true,
           timeout: timeoutMs,
-        }) as typeof response;
+        })) as typeof response;
       }
       if (response.exceptionDetails) {
         throw new Error(
-          response.exceptionDetails.exception?.description
-          ?? response.exceptionDetails.text
-          ?? 'evaluate failed',
+          response.exceptionDetails.exception?.description ??
+            response.exceptionDetails.text ??
+            'evaluate failed',
         );
       }
       return response.result?.value;
@@ -1873,39 +1895,43 @@ export class RsbWebviewAutomation {
         target = await resolveRef(send, snapshotRef);
       }
 
-      const readiness = await callOnNode<{
-        ok: boolean;
-        reason?: string;
-        multiple?: boolean;
-      }>(
-        send,
-        target.objectId,
-        `function() {
-          if (!(this instanceof HTMLInputElement) || this.type !== "file") {
-            return { ok: false, reason: "upload target is not a file input" };
-          }
-          if (!this.isConnected) return { ok: false, reason: "upload target is detached" };
-          if (this.disabled || this.getAttribute("aria-disabled") === "true") {
-            return { ok: false, reason: "upload target is disabled" };
-          }
-          return { ok: true, multiple: this.multiple };
-        }`,
-      );
-      if (!readiness?.ok) {
-        throw new Error(readiness?.reason ?? 'upload target is not ready');
+      try {
+        const readiness = await callOnNode<{
+          ok: boolean;
+          reason?: string;
+          multiple?: boolean;
+        }>(
+          send,
+          target.objectId,
+          `function() {
+            if (!(this instanceof HTMLInputElement) || this.type !== "file") {
+              return { ok: false, reason: "upload target is not a file input" };
+            }
+            if (!this.isConnected) return { ok: false, reason: "upload target is detached" };
+            if (this.disabled || this.getAttribute("aria-disabled") === "true") {
+              return { ok: false, reason: "upload target is disabled" };
+            }
+            return { ok: true, multiple: this.multiple };
+          }`,
+        );
+        if (!readiness?.ok) {
+          throw new Error(readiness?.reason ?? 'upload target is not ready');
+        }
+        const paths = req.paths ?? [];
+        if (paths.length > 1 && readiness.multiple !== true) {
+          throw new Error('upload target accepts only one file');
+        }
+        await send('DOM.setFileInputFiles', {
+          files: paths,
+          objectId: target.objectId,
+        });
+        return {
+          tabId,
+          uploadedFiles: paths.length,
+        };
+      } finally {
+        await releaseObject(send, target.objectId);
       }
-      const paths = req.paths ?? [];
-      if (paths.length > 1 && readiness.multiple !== true) {
-        throw new Error('upload target accepts only one file');
-      }
-      await send('DOM.setFileInputFiles', {
-        files: paths,
-        objectId: target.objectId,
-      });
-      return {
-        tabId,
-        uploadedFiles: paths.length,
-      };
     });
   }
 
@@ -1945,12 +1971,13 @@ export class RsbWebviewAutomation {
         case 'saveResource':
           throw new Error('saveResource must be handled by the browser artifact manager');
         case 'click': {
-          const target = await resolveTarget();
-          await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
-          const ticket = await stampActionTarget(send, target);
-          const point = await centerOfNode(send, target);
-          await dispatchClick(dispatchInput, point.x, point.y, request, ticket);
-          return { tabId, kind: request.kind, ...point };
+          return withReleasedNode(send, resolveTarget, async (target) => {
+            await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
+            const ticket = await stampActionTarget(send, target);
+            const point = await centerOfNode(send, target);
+            await dispatchClick(dispatchInput, point.x, point.y, request, ticket);
+            return { tabId, kind: request.kind, ...point };
+          });
         }
         case 'clickCoords': {
           const x = finiteNonNegative(request.x, 'clickCoords.x');
@@ -1969,13 +1996,19 @@ export class RsbWebviewAutomation {
               if (typeof field.ref !== 'string' || field.ref === '') {
                 throw new Error('fill.fields[].ref required');
               }
-              const target = await resolveTarget(field.ref, undefined, undefined);
-              await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
-              await fillNode(
+              const fieldRef = field.ref;
+              await withReleasedNode(
                 send,
-                target,
-                field.value,
-                typeof field.type === 'string' ? field.type : undefined,
+                () => resolveTarget(fieldRef, undefined, undefined),
+                async (target) => {
+                  await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
+                  await fillNode(
+                    send,
+                    target,
+                    field.value,
+                    typeof field.type === 'string' ? field.type : undefined,
+                  );
+                },
               );
               filled += 1;
             }
@@ -1983,59 +2016,73 @@ export class RsbWebviewAutomation {
           }
           // Keep the single-target form accepted by existing embedded-backend
           // callers while also honoring the shared multi-field contract above.
-          const target = await resolveTarget();
-          await waitForActionable(send, target, {
-            editable: true,
-            timeoutMs: request.timeoutMs,
+          return withReleasedNode(send, resolveTarget, async (target) => {
+            await waitForActionable(send, target, {
+              editable: true,
+              timeoutMs: request.timeoutMs,
+            });
+            await focusNode(send, target, true);
+            if (typeof request.text !== 'string') throw new Error('fill.text required');
+            await fillNode(send, target, request.text);
+            if (request.submit === true) {
+              const ticket = await stampActionTarget(send, target);
+              await dispatchKey(dispatchInput, 'Enter', ticket);
+            }
+            return { tabId, kind: request.kind, textLength: request.text.length };
           });
-          await focusNode(send, target, true);
-          if (typeof request.text !== 'string') throw new Error('fill.text required');
-          await fillNode(send, target, request.text);
-          if (request.submit === true) {
-            const ticket = await stampActionTarget(send, target);
-            await dispatchKey(dispatchInput, 'Enter', ticket);
-          }
-          return { tabId, kind: request.kind, textLength: request.text.length };
         }
         case 'type': {
-          const target = await resolveTarget();
-          await waitForActionable(send, target, {
-            editable: true,
-            timeoutMs: request.timeoutMs,
-          });
-          await focusNode(send, target, true);
-          const ticket = await stampActionTarget(send, target);
-          if (typeof request.text !== 'string') throw new Error('type.text required');
-          const structured = await callOnNode<boolean>(
-            send,
-            target.objectId,
-            `function() {
-              return this instanceof HTMLInputElement
-                && ["date", "datetime-local", "month", "time", "week"].includes(this.type);
-            }`,
-          );
-          if (structured) {
-            await fillNode(send, target, request.text);
-          } else if (request.slowly === true) {
-            const perCharacterDelay = Math.min(request.delayMs ?? 50, 1_000);
-            for (const character of Array.from(request.text)) {
-              await dispatchInput('Input.insertText', { text: character }, ticket);
-              if (perCharacterDelay > 0) await delay(perCharacterDelay);
+          return withReleasedNode(send, resolveTarget, async (target) => {
+            await waitForActionable(send, target, {
+              editable: true,
+              timeoutMs: request.timeoutMs,
+            });
+            await focusNode(send, target, true);
+            const ticket = await stampActionTarget(send, target);
+            if (typeof request.text !== 'string') throw new Error('type.text required');
+            const structured = await callOnNode<boolean>(
+              send,
+              target.objectId,
+              `function() {
+                return this instanceof HTMLInputElement
+                  && ["date", "datetime-local", "month", "time", "week"].includes(this.type);
+              }`,
+            );
+            if (structured) {
+              await fillNode(send, target, request.text);
+            } else if (request.slowly === true) {
+              const perCharacterDelay = Math.min(request.delayMs ?? 50, 1_000);
+              for (const character of Array.from(request.text)) {
+                await dispatchInput('Input.insertText', { text: character }, ticket);
+                if (perCharacterDelay > 0) await delay(perCharacterDelay);
+              }
+            } else {
+              await selectEditableContents(send, target);
+              await dispatchInput('Input.insertText', { text: request.text }, ticket);
             }
-          } else {
-            await selectEditableContents(send, target);
-            await dispatchInput('Input.insertText', { text: request.text }, ticket);
-          }
-          if (request.submit === true) await dispatchKey(dispatchInput, 'Enter', ticket);
-          return { tabId, kind: request.kind, textLength: request.text.length };
+            if (request.submit === true) await dispatchKey(dispatchInput, 'Enter', ticket);
+            return { tabId, kind: request.kind, textLength: request.text.length };
+          });
         }
         case 'press': {
           let ticket: string | undefined;
           if (request.ref || request.selector || request.query) {
-            const target = await resolveTarget();
-            await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
-            await focusNode(send, target);
-            ticket = await stampActionTarget(send, target);
+            return withReleasedNode(send, resolveTarget, async (target) => {
+              await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
+              await focusNode(send, target);
+              const targetTicket = await stampActionTarget(send, target);
+              if (typeof request.key !== 'string' || request.key === '') {
+                throw new Error('press.key required');
+              }
+              await dispatchKey(
+                dispatchInput,
+                request.key,
+                targetTicket,
+                options?.nativeKeyDispatch,
+                request.delayMs,
+              );
+              return { tabId, kind: request.kind, key: request.key };
+            });
           }
           if (typeof request.key !== 'string' || request.key === '') {
             throw new Error('press.key required');
@@ -2050,69 +2097,79 @@ export class RsbWebviewAutomation {
           return { tabId, kind: request.kind, key: request.key };
         }
         case 'hover': {
-          const target = await resolveTarget();
-          await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
-          const ticket = await stampActionTarget(send, target);
-          const point = await centerOfNode(send, target, { focus: false });
-          await dispatchInput('Input.dispatchMouseEvent', {
-            type: 'mouseMoved',
-            x: point.x,
-            y: point.y,
-            modifiers: modifierMask(request.modifiers),
-          }, ticket);
-          return { tabId, kind: request.kind, ...point };
+          return withReleasedNode(send, resolveTarget, async (target) => {
+            await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
+            const ticket = await stampActionTarget(send, target);
+            const point = await centerOfNode(send, target, { focus: false });
+            await dispatchInput(
+              'Input.dispatchMouseEvent',
+              {
+                type: 'mouseMoved',
+                x: point.x,
+                y: point.y,
+                modifiers: modifierMask(request.modifiers),
+              },
+              ticket,
+            );
+            return { tabId, kind: request.kind, ...point };
+          });
         }
         case 'drag': {
-          const start = await centerOfNode(
-            send,
-            await resolveTarget(request.startRef, undefined),
-          );
-          const end = await centerOfNode(
-            send,
-            await resolveTarget(request.endRef, undefined),
-          );
-          await send('Input.dispatchMouseEvent', {
-            type: 'mouseMoved',
-            x: start.x,
-            y: start.y,
-          });
-          await send('Input.dispatchMouseEvent', {
-            type: 'mousePressed',
-            x: start.x,
-            y: start.y,
-            button: 'left',
-            clickCount: 1,
-          });
-          for (let step = 1; step <= 8; step += 1) {
-            const ratio = step / 8;
+          let startTarget: ResolvedNode | undefined;
+          let endTarget: ResolvedNode | undefined;
+          try {
+            const resolvedStart = await resolveTarget(request.startRef, undefined);
+            startTarget = resolvedStart;
+            const resolvedEnd = await resolveTarget(request.endRef, undefined);
+            endTarget = resolvedEnd;
+            const start = await centerOfNode(send, resolvedStart);
+            const end = await centerOfNode(send, resolvedEnd);
             await send('Input.dispatchMouseEvent', {
               type: 'mouseMoved',
-              x: start.x + ((end.x - start.x) * ratio),
-              y: start.y + ((end.y - start.y) * ratio),
-              button: 'left',
-              buttons: 1,
+              x: start.x,
+              y: start.y,
             });
+            await send('Input.dispatchMouseEvent', {
+              type: 'mousePressed',
+              x: start.x,
+              y: start.y,
+              button: 'left',
+              clickCount: 1,
+            });
+            for (let step = 1; step <= 8; step += 1) {
+              const ratio = step / 8;
+              await send('Input.dispatchMouseEvent', {
+                type: 'mouseMoved',
+                x: start.x + (end.x - start.x) * ratio,
+                y: start.y + (end.y - start.y) * ratio,
+                button: 'left',
+                buttons: 1,
+              });
+            }
+            await send('Input.dispatchMouseEvent', {
+              type: 'mouseReleased',
+              x: end.x,
+              y: end.y,
+              button: 'left',
+              clickCount: 1,
+            });
+            return { tabId, kind: request.kind, start, end };
+          } finally {
+            await releaseObject(send, startTarget?.objectId);
+            await releaseObject(send, endTarget?.objectId);
           }
-          await send('Input.dispatchMouseEvent', {
-            type: 'mouseReleased',
-            x: end.x,
-            y: end.y,
-            button: 'left',
-            clickCount: 1,
-          });
-          return { tabId, kind: request.kind, start, end };
         }
         case 'select': {
-          const target = await resolveTarget();
-          await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
-          const values = Array.isArray(request.values)
-            ? request.values.filter((value): value is string => typeof value === 'string')
-            : [];
-          if (values.length === 0) throw new Error('select.values required');
-          const selected = await callOnNode<string[]>(
-            send,
-            target.objectId,
-            `function(values) {
+          return withReleasedNode(send, resolveTarget, async (target) => {
+            await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
+            const values = Array.isArray(request.values)
+              ? request.values.filter((value): value is string => typeof value === 'string')
+              : [];
+            if (values.length === 0) throw new Error('select.values required');
+            const selected = await callOnNode<string[]>(
+              send,
+              target.objectId,
+              `function(values) {
               if (!(this instanceof HTMLSelectElement)) throw new Error("target is not a select element");
               if (values.length > 1 && !this.multiple) {
                 throw new Error("target select does not accept multiple values");
@@ -2132,9 +2189,10 @@ export class RsbWebviewAutomation {
               this.dispatchEvent(new Event("change", { bubbles: true }));
               return Array.from(this.selectedOptions, option => option.value);
             }`,
-            [values],
-          );
-          return { tabId, kind: request.kind, values: selected };
+              [values],
+            );
+            return { tabId, kind: request.kind, values: selected };
+          });
         }
         case 'resize': {
           if (request.width === undefined && request.height === undefined) {
@@ -2153,11 +2211,9 @@ export class RsbWebviewAutomation {
           return { tabId, kind: request.kind, width, height };
         }
         case 'wait': {
-          const waitDeadline = Date.now() + positiveInt(
-            request.timeoutMs,
-            DEFAULT_WAIT_TIMEOUT_MS,
-            MAX_WAIT_TIMEOUT_MS,
-          );
+          const waitDeadline =
+            Date.now() +
+            positiveInt(request.timeoutMs, DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS);
           const timeMs = Math.min(
             typeof request.timeMs === 'number' && request.timeMs >= 0 ? request.timeMs : 0,
             MAX_WAIT_TIMEOUT_MS,
@@ -2169,12 +2225,12 @@ export class RsbWebviewAutomation {
             MAX_WAIT_TIMEOUT_MS,
           );
           const hasCondition = Boolean(
-            request.selector
-            || request.url
-            || request.loadState
-            || request.text
-            || request.textGone
-            || request.fn,
+            request.selector ||
+            request.url ||
+            request.loadState ||
+            request.text ||
+            request.textGone ||
+            request.fn,
           );
           if (hasCondition) {
             const params = {
@@ -2186,7 +2242,7 @@ export class RsbWebviewAutomation {
               fn: request.fn,
               timeoutMs,
             };
-            const result = await send('Runtime.evaluate', {
+            const result = (await send('Runtime.evaluate', {
               expression: `(() => {
                 const params = ${JSON.stringify(params)};
                 const deadline = Date.now() + params.timeoutMs;
@@ -2234,15 +2290,15 @@ export class RsbWebviewAutomation {
               awaitPromise: true,
               returnByValue: true,
               timeout: timeoutMs + 1_000,
-            }) as {
+            })) as {
               result?: { value?: unknown };
               exceptionDetails?: { exception?: { description?: string }; text?: string };
             };
             if (result.exceptionDetails) {
               throw new Error(
-                result.exceptionDetails.exception?.description
-                ?? result.exceptionDetails.text
-                ?? 'wait failed',
+                result.exceptionDetails.exception?.description ??
+                  result.exceptionDetails.text ??
+                  'wait failed',
               );
             }
             if (request.loadState === 'networkidle') {

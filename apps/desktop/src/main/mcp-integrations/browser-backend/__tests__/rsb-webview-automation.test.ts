@@ -115,10 +115,13 @@ describe('RsbWebviewAutomation snapshot', () => {
 
     expect(result.format).toBe('aria');
     expect(result.nodes).toHaveLength(1);
-    expect(harness.sendCommand).toHaveBeenCalledWith(
-      'Accessibility.getPartialAXTree',
-      { backendNodeId: 2, fetchRelatives: true },
-    );
+    expect(harness.sendCommand).toHaveBeenCalledWith('Accessibility.getPartialAXTree', {
+      backendNodeId: 2,
+      fetchRelatives: true,
+    });
+    expect(harness.sendCommand).toHaveBeenCalledWith('Runtime.releaseObject', {
+      objectId: 'selector-object',
+    });
   });
 
   it('returns a bounded resource list and authorizes only the latest snapshot URLs', async () => {
@@ -157,14 +160,12 @@ describe('RsbWebviewAutomation snapshot', () => {
         label: 'Preview',
       },
     ]);
-    expect(() => instance.assertResource(
-      'tab-1',
-      'https://cdn.example.test/image.png',
-    )).not.toThrow();
-    expect(() => instance.assertResource(
-      'tab-1',
-      'https://other.example.test/file.zip',
-    )).toThrow('not present in the latest page resource list');
+    expect(() =>
+      instance.assertResource('tab-1', 'https://cdn.example.test/image.png'),
+    ).not.toThrow();
+    expect(() => instance.assertResource('tab-1', 'https://other.example.test/file.zip')).toThrow(
+      'not present in the latest page resource list',
+    );
   });
 
   it('returns a structured verification barrier without creating action refs', async () => {
@@ -206,10 +207,12 @@ describe('RsbWebviewAutomation act', () => {
       throw new Error('query should fail before debugger evaluation');
     });
 
-    await expect(automation().act('tab-1', harness.wc, {
-      kind: 'click',
-      query: { role: 'button', index: -1 },
-    })).rejects.toThrow('element query index must be a non-negative integer');
+    await expect(
+      automation().act('tab-1', harness.wc, {
+        kind: 'click',
+        query: { role: 'button', index: -1 },
+      }),
+    ).rejects.toThrow('element query index must be a non-negative integer');
     expect(harness.sendCommand).not.toHaveBeenCalled();
   });
 
@@ -220,14 +223,19 @@ describe('RsbWebviewAutomation act', () => {
     const sendInputEvent = vi.fn();
     Object.assign(harness.wc, { sendInputEvent });
 
-    await automation().act('tab-1', harness.wc, {
-      kind: 'press',
-      key: 'Ctrl+A',
-    }, {
-      nativeKeyDispatch: async (type, keyCode, modifiers) => {
-        sendInputEvent({ type, keyCode, modifiers });
+    await automation().act(
+      'tab-1',
+      harness.wc,
+      {
+        kind: 'press',
+        key: 'Ctrl+A',
       },
-    });
+      {
+        nativeKeyDispatch: async (type, keyCode, modifiers) => {
+          sendInputEvent({ type, keyCode, modifiers });
+        },
+      },
+    );
 
     expect(sendInputEvent).toHaveBeenNthCalledWith(1, {
       type: 'keyDown',
@@ -272,10 +280,12 @@ describe('RsbWebviewAutomation act', () => {
     expect(efficient.snapshot).toContain('[ref=e1]');
     expect(efficient.stats.lines).toBeGreaterThan(0);
 
-    await expect(automation().snapshot('tab-1', harness.wc, {
-      action: 'snapshot',
-      labels: true,
-    })).rejects.toThrow('snapshot labels are unavailable');
+    await expect(
+      automation().snapshot('tab-1', harness.wc, {
+        action: 'snapshot',
+        labels: true,
+      }),
+    ).rejects.toThrow('snapshot labels are unavailable');
   });
 
   it('scopes snapshots to the requested frame', async () => {
@@ -324,10 +334,9 @@ describe('RsbWebviewAutomation act', () => {
     });
 
     expect(result).toMatchObject({ stats: { refs: 2 } });
-    expect(harness.sendCommand).toHaveBeenCalledWith(
-      'Accessibility.getFullAXTree',
-      { frameId: 'frame-document' },
-    );
+    expect(harness.sendCommand).toHaveBeenCalledWith('Accessibility.getFullAXTree', {
+      frameId: 'frame-document',
+    });
   });
 
   it('clicks a snapshot ref at the center of its DOM box', async () => {
@@ -372,6 +381,10 @@ describe('RsbWebviewAutomation act', () => {
       '"method":"Input.dispatchMouseEvent","params":{"type":"mouseReleased"',
     );
     expect(harness.executeJavaScript.mock.calls[1][1]).toBe(true);
+    expect(harness.sendCommand).toHaveBeenCalledWith(
+      'Runtime.releaseObject',
+      { objectId: 'button-object' },
+    );
   });
 
   it('types into a selector and optionally submits', async () => {
@@ -383,8 +396,8 @@ describe('RsbWebviewAutomation act', () => {
         return {
           result: {
             value:
-              declaration.includes('options.editable')
-              || declaration.includes('function(requireEditable)')
+              declaration.includes('options.editable') ||
+              declaration.includes('function(requireEditable)')
                 ? { ok: true }
                 : false,
           },
@@ -407,9 +420,7 @@ describe('RsbWebviewAutomation act', () => {
     });
     expect(harness.executeJavaScript).toHaveBeenCalledTimes(3);
     const insertTextCall = harness.executeJavaScript.mock.calls.find(([script]) =>
-      String(script).includes(
-        '"method":"Input.insertText","params":{"text":"hello@example.test"}',
-      ),
+      String(script).includes('"method":"Input.insertText","params":{"text":"hello@example.test"}'),
     );
     expect(insertTextCall?.[0]).toContain('"targetTicket":"rsb-');
     const enterKeyDownCall = harness.executeJavaScript.mock.calls.find(([script]) =>
@@ -444,10 +455,12 @@ describe('RsbWebviewAutomation act', () => {
     });
 
     expect(result).toMatchObject({ kind: 'fill', textLength: 10 });
-    const fillCall = harness.sendCommand.mock.calls.find(([method, params]) =>
-      method === 'Runtime.callFunctionOn'
-      && String((params as { functionDeclaration?: unknown })?.functionDeclaration)
-        .includes('const type ='),
+    const fillCall = harness.sendCommand.mock.calls.find(
+      ([method, params]) =>
+        method === 'Runtime.callFunctionOn' &&
+        String((params as { functionDeclaration?: unknown })?.functionDeclaration).includes(
+          'const type =',
+        ),
     );
     expect(fillCall?.[1]).toMatchObject({
       arguments: [{ value: '2026-07-27' }, { value: undefined }],
@@ -483,6 +496,14 @@ describe('RsbWebviewAutomation act', () => {
     });
 
     expect(result).toMatchObject({ kind: 'fill', filled: 1 });
+    const fillCall = harness.sendCommand.mock.calls.find(
+      ([method, params]) =>
+        method === 'Runtime.callFunctionOn' &&
+        String((params as { functionDeclaration?: string })?.functionDeclaration).includes(
+          'HTMLInputElement.prototype',
+        ),
+    );
+    expect(fillCall).toBeDefined();
   });
 
   it('hovers without focusing the target', async () => {
@@ -499,10 +520,12 @@ describe('RsbWebviewAutomation act', () => {
       throw new Error(`unexpected command: ${method}`);
     });
 
-    await expect(automation().act('tab-1', harness.wc, {
-      kind: 'hover',
-      selector: '#hover-target',
-    })).resolves.toMatchObject({ kind: 'hover', x: 10, y: 5 });
+    await expect(
+      automation().act('tab-1', harness.wc, {
+        kind: 'hover',
+        selector: '#hover-target',
+      }),
+    ).resolves.toMatchObject({ kind: 'hover', x: 10, y: 5 });
   });
 
   it('resolves a semantic query and waits for an actionable target', async () => {
@@ -527,12 +550,14 @@ describe('RsbWebviewAutomation act', () => {
     });
 
     expect(result).toMatchObject({ kind: 'click', x: 10, y: 5 });
-    const pageCalls = harness.sendCommand.mock.calls.filter(([method]) =>
-      method === 'Runtime.callFunctionOn'
+    const pageCalls = harness.sendCommand.mock.calls.filter(
+      ([method]) => method === 'Runtime.callFunctionOn',
     );
-    expect(pageCalls.some(([, params]) =>
-      String(params?.functionDeclaration).includes('target is not visible')
-    )).toBe(true);
+    expect(
+      pageCalls.some(([, params]) =>
+        String(params?.functionDeclaration).includes('target is not visible'),
+      ),
+    ).toBe(true);
   });
 
   it('surfaces page-side query failures before attempting input', async () => {
@@ -548,10 +573,12 @@ describe('RsbWebviewAutomation act', () => {
       throw new Error(`unexpected command: ${method}`);
     });
 
-    await expect(automation().act('tab-1', harness.wc, {
-      kind: 'click',
-      query: { role: 'button', name: 'Continue' },
-    })).rejects.toThrow('element query matched 2 elements; provide index');
+    await expect(
+      automation().act('tab-1', harness.wc, {
+        kind: 'click',
+        query: { role: 'button', name: 'Continue' },
+      }),
+    ).rejects.toThrow('element query matched 2 elements; provide index');
     expect(harness.executeJavaScript).not.toHaveBeenCalled();
   });
 
@@ -560,10 +587,12 @@ describe('RsbWebviewAutomation act', () => {
       throw new Error(`unexpected command: ${method}`);
     });
 
-    await expect(automation().act('tab-1', harness.wc, {
-      kind: 'click',
-      query: { exact: true, index: 0 },
-    })).rejects.toThrow('element query requires at least one field');
+    await expect(
+      automation().act('tab-1', harness.wc, {
+        kind: 'click',
+        query: { exact: true, index: 0 },
+      }),
+    ).rejects.toThrow('element query requires at least one field');
     expect(harness.sendCommand).not.toHaveBeenCalled();
   });
 
@@ -612,10 +641,12 @@ describe('RsbWebviewAutomation act', () => {
       throw new Error(`unexpected command: ${method}`);
     });
 
-    await expect(automation().setFiles('tab-1', harness.wc, {
-      paths: ['C:\\safe\\one.txt', 'C:\\safe\\two.txt'],
-      element: 'input[type=file]',
-    })).rejects.toThrow('accepts only one file');
+    await expect(
+      automation().setFiles('tab-1', harness.wc, {
+        paths: ['C:\\safe\\one.txt', 'C:\\safe\\two.txt'],
+        element: 'input[type=file]',
+      }),
+    ).rejects.toThrow('accepts only one file');
     expect(harness.sendCommand).not.toHaveBeenCalledWith(
       'DOM.setFileInputFiles',
       expect.anything(),
@@ -638,9 +669,7 @@ describe('RsbWebviewAutomation act', () => {
     expect(harness.executeJavaScript.mock.calls[0][0]).toContain(
       '"method":"Input.dispatchMouseEvent","params":{"type":"mousePressed"',
     );
-    expect(harness.executeJavaScript.mock.calls[0][0]).toContain(
-      '"button":"right"',
-    );
+    expect(harness.executeJavaScript.mock.calls[0][0]).toContain('"button":"right"');
   });
 
   it('waits for page conditions inside the guest and returns observed state', async () => {

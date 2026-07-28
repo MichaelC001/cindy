@@ -111,17 +111,10 @@ export class RsbWebviewDialogs {
     return dialog ? { ...dialog } : undefined;
   }
 
-  recent(
-    wc: WebContents,
-    dialogId?: string,
-    openedAfter?: number,
-  ): BrowserPageDialog | undefined {
+  recent(wc: WebContents, dialogId?: string, openedAfter?: number): BrowserPageDialog | undefined {
     const dialog = this.states.get(wc)?.recent;
     if (!dialog || (dialogId && dialog.id !== dialogId)) return undefined;
-    if (
-      openedAfter !== undefined
-      && Date.parse(dialog.openedAt) < openedAfter
-    ) {
+    if (openedAfter !== undefined && Date.parse(dialog.openedAt) < openedAfter) {
       return undefined;
     }
     return { ...dialog };
@@ -172,10 +165,7 @@ export class RsbWebviewDialogs {
     if (options.dialogId && options.dialogId.length > 256) {
       throw new Error('dialogId is too long');
     }
-    if (
-      typeof options.promptText === 'string'
-      && options.promptText.length > MAX_PROMPT_TEXT
-    ) {
+    if (typeof options.promptText === 'string' && options.promptText.length > MAX_PROMPT_TEXT) {
       throw new Error(`promptText exceeds ${MAX_PROMPT_TEXT} characters`);
     }
     await this.observe(wc);
@@ -193,7 +183,11 @@ export class RsbWebviewDialogs {
         throw new Error(`dialog ${options.dialogId} is no longer pending`);
       }
       const recent = state.recent;
-      if (recent && (!options.dialogId || recent.id === options.dialogId)) {
+      // An undirected response must wait for a fresh dialog. A recent dialog
+      // is only meaningful when the caller explicitly targets its id; using a
+      // stale recent record here would prevent arm-next from observing the
+      // next dialog.
+      if (recent && options.dialogId && recent.id === options.dialogId) {
         return {
           ...recent,
           accepted: options.accept === true,
@@ -255,9 +249,7 @@ export class RsbWebviewDialogs {
       }, timeout);
       prepared = {
         accept: options.accept === true,
-        ...(typeof options.promptText === 'string'
-          ? { promptText: options.promptText }
-          : {}),
+        ...(typeof options.promptText === 'string' ? { promptText: options.promptText } : {}),
         resolve,
         reject,
         timer,
@@ -302,9 +294,8 @@ export class RsbWebviewDialogs {
     state.messageHandler = (...args: unknown[]) => {
       try {
         const method = text(args[1]);
-        const params = args[2] && typeof args[2] === 'object'
-          ? args[2] as Record<string, unknown>
-          : {};
+        const params =
+          args[2] && typeof args[2] === 'object' ? (args[2] as Record<string, unknown>) : {};
         if (method === 'Page.javascriptDialogOpening') {
           dialogSequence += 1;
           const dialog: BrowserPageDialog = {
@@ -326,17 +317,17 @@ export class RsbWebviewDialogs {
             state.prepared = undefined;
             clearTimeout(prepared.timer);
             state.handledIds.set(dialog.id, 'armed');
-            void state.debugger.sendCommand('Page.handleJavaScriptDialog', {
-              accept: prepared.accept,
-              ...(prepared.accept && typeof prepared.promptText === 'string'
-                ? { promptText: prepared.promptText }
-                : {}),
-            }).then(
-              () => prepared.resolve({ ...dialog, closedBy: 'armed' }),
-              (err) => prepared.reject(
-                err instanceof Error ? err : new Error(String(err)),
-              ),
-            );
+            void state.debugger
+              .sendCommand('Page.handleJavaScriptDialog', {
+                accept: prepared.accept,
+                ...(prepared.accept && typeof prepared.promptText === 'string'
+                  ? { promptText: prepared.promptText }
+                  : {}),
+              })
+              .then(
+                () => prepared.resolve({ ...dialog, closedBy: 'armed' }),
+                (err) => prepared.reject(err instanceof Error ? err : new Error(String(err))),
+              );
           }
         } else if (method === 'Page.javascriptDialogClosed') {
           const dialog = state.pending;
@@ -358,9 +349,11 @@ export class RsbWebviewDialogs {
     state.destroyedHandler = () => this.release(wc);
     electronDebugger.on('message', state.messageHandler);
     electronDebugger.on('detach', state.detachHandler);
-    (wc as unknown as {
-      once?: (event: string, listener: (...args: unknown[]) => void) => void;
-    }).once?.('destroyed', state.destroyedHandler);
+    (
+      wc as unknown as {
+        once?: (event: string, listener: (...args: unknown[]) => void) => void;
+      }
+    ).once?.('destroyed', state.destroyedHandler);
     return state;
   }
 
@@ -371,9 +364,11 @@ export class RsbWebviewDialogs {
     try {
       state.debugger.removeListener('message', state.messageHandler);
       state.debugger.removeListener('detach', state.detachHandler);
-      (wc as unknown as {
-        removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
-      }).removeListener?.('destroyed', state.destroyedHandler);
+      (
+        wc as unknown as {
+          removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
+        }
+      ).removeListener?.('destroyed', state.destroyedHandler);
     } catch {
       // The guest may already be destroyed.
     }
