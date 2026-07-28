@@ -45,6 +45,7 @@ import type {
   LocalThemeWriteRequest,
   LocalThemeWriteResult,
 } from '../shared/local-themes';
+import type { LocalThemeImportResult } from '../shared/theme-import/types';
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from '../shared/locale';
 import {
   MODEL_ACCESS_STATUS_CHANNEL,
@@ -744,6 +745,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('local-themes:write', req),
     openDir: (): Promise<LocalThemeOpenDirResult> =>
       ipcRenderer.invoke('local-themes:open-dir'),
+    // 导入 VSCode / Obsidian 主题文件。对话框与读文件都在 main 侧,这里不接受
+    // 任何路径参数。失败走 IPC 错误协议(reject,renderer 用 extractIpcError 解码)。
+    importExternal: (): Promise<LocalThemeImportResult> =>
+      ipcRenderer.invoke('local-themes:import') as Promise<LocalThemeImportResult>,
   },
 
   // RSB terminal tab(PTY 后端 + xterm.js)
@@ -2529,6 +2534,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     url: string;
   }): Promise<{ base64: string; mimeType: string }> =>
     ipcRenderer.invoke('media:read-image-bytes', params),
+
+  // 附件卡缩略图:本机文件交给系统缩略图服务(macOS QuickLook / Windows Shell)
+  // 出一张小预览,顺带回传复核那一刻的当前字节数。整体不可用(路径越界 / 文件不在)
+  // 回 null;文件在但出不了图时 dataUrl 为 null,调用方回落自绘文件图标。
+  getFileThumbnail: (params: {
+    path: string;
+    size: number;
+    revalidate?: boolean;
+  }): Promise<{ dataUrl: string | null; byteSize: number } | null> =>
+    ipcRenderer.invoke('file:thumbnail', params),
 
   // markdown-monorepo-resolve: smart relative-path resolver.
   // Tries `cwd/href` first, then BFS the workspace for files whose absolute

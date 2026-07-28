@@ -972,6 +972,10 @@ interface ElectronAPI {
     list: () => Promise<LocalThemesResult>;
     write: (req: LocalThemeWriteRequest) => Promise<LocalThemeWriteResult>;
     openDir: () => Promise<LocalThemeOpenDirResult>;
+    /** 导入 VSCode / Obsidian 主题文件；对话框与读文件都在 main 侧。 */
+    importExternal: () => Promise<
+      import('../shared/theme-import/types').LocalThemeImportResult
+    >;
   };
 
   /** RSB terminal tab —— PTY 后端 + xterm.js,详见 shared/terminal-bridge.ts 注释。 */
@@ -2101,6 +2105,19 @@ interface ElectronAPI {
   readImageBytes: (params: {
     url: string;
   }) => Promise<{ base64: string; mimeType: string }>;
+
+  /**
+   * 附件卡缩略图:本机文件走系统缩略图服务(macOS QuickLook / Windows Shell)。
+   * 路径越界 / 不是文件 / stat 失败 → 整体回 null;文件在但出不了图(系统不支持、
+   * 超时、排不上并发名额)→ `dataUrl` 为 null,调用方回落自绘文件图标。
+   * `byteSize` 是复核那一刻的当前大小,用来刷新卡片上「类型 · 大小」的快照值。
+   */
+  getFileThumbnail: (params: {
+    path: string;
+    size: number;
+    /** 显式复核:跳过正缓存重新生成(负缓存仍尊重)。焦点复核时传 true。 */
+    revalidate?: boolean;
+  }) => Promise<{ dataUrl: string | null; byteSize: number } | null>;
 
   /**
    * markdown-monorepo-resolve: smart relative-path resolver. Tries direct

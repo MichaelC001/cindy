@@ -213,6 +213,7 @@ import {
 import { localFileSchemePrivilege, registerLocalFileProtocolHandler } from './localFileProtocol';
 import { audioFileSchemePrivilege, registerAudioFileProtocolHandler } from './audioFileProtocol';
 import { buildSystemPathBlocklist, isPathAllowedAgainst } from './filePathPolicy';
+import { readFileThumbnail } from './fileThumbnail';
 import { resolveShellOpenPathTarget } from './shellOpenPath';
 import { cindyGhostSchemePrivilege } from './cindy-brain/runtime/electronSandboxAdapter';
 import { fetchReleaseNotes, fetchReleaseNotesIndex } from './releaseNotesService';
@@ -355,6 +356,7 @@ import {
 import {
   disposeBrowserRuntime,
   registerBrowserBackendIpc,
+  setBrowserSessionUploadRootResolver,
   setMainWindowAccessorForBackend,
   setEnsureHostForBackend,
   setIsDetachedForBackend,
@@ -1102,6 +1104,15 @@ registerTabOpResultHandler({
 setMainWindowAccessorForBackend(() => rsbWindowController.getHostWebContents());
 setEnsureHostForBackend(() => rsbWindowController.ensureOpenForAutomation());
 setIsDetachedForBackend(() => readRsbWindowSettings().detached);
+setBrowserSessionUploadRootResolver(async (sessionId) => {
+  try {
+    const meta = await getMakerCore().getSessionMeta(sessionId);
+    if (!meta?.workDir || meta.remoteHostId) return [];
+    return [meta.workDir];
+  } catch {
+    return [];
+  }
+});
 registerBrowserBackendIpc();
 
 // ── 应用级快捷键 override 存储 IPC ──────────────────────────────────────
@@ -4907,6 +4918,20 @@ const registerIpcHandlers = () => {
       lightboxMedia.readImageBytes(params),
     );
   }
+
+  // 附件卡缩略图:系统缩略图服务(macOS QuickLook / Windows Shell)按路径出小预览。
+  // 高权限入口——先过 sender 闸,再由 readFileThumbnail 做路径策略与 payload 校验;
+  // 任何失败都回 null,由 renderer 回落到自绘文件图标。
+  ipcMain.handle(
+    'file:thumbnail',
+    async (
+      event: Electron.IpcMainInvokeEvent,
+      params: { path: string; size: number; revalidate?: boolean },
+    ) => {
+      assertTrustedAppRendererEvent(event);
+      return readFileThumbnail(params);
+    },
+  );
 
   // ── CC Agent SDK IPC handlers (Stage 2 C1 大批退役) ──
   // 老 cc-agent:* handler 全部退役 —— renderer 已切到 maker.* (A4/A5/B/B'/B''/C1/C2)。
