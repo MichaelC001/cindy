@@ -386,6 +386,45 @@ describe('RSB store', () => {
       expect(isPopupSpawnedTab(tab.id)).toBe(true);
     });
 
+    it('同 session 并发关闭按序落盘,不用旧快照复活已删 tab', async () => {
+      // 交错场景(不限于 popup 自关):关掉 active 的 A 会把 active 挪到 B,若此时
+      // 另一路关闭已经把 B 删掉,前者延迟到达的 setActive(B) 会 NOT_FOUND,
+      // closeTab 便用"含 A、B"的旧快照整体回滚,两个 tab 一起复活。
+      const a = await store.addTab('s1', 'web-browser', null);
+      const b = await store.addTab('s1', 'web-browser', null);
+      await store.setActiveTab('s1', a.id);
+      // close 的 IPC 慢一拍,给两路关闭制造交错窗口。
+      ipc.close.mockImplementation(
+        () => new Promise((resolve) => setTimeout(() => resolve({ ok: true }), 5)),
+      );
+      ipc.setActive.mockImplementation((input: { id: string | null }) => {
+        // main 端真实行为:setActive 指向已删除的 tab 会报错。
+        if (input.id !== null && !store.getBucket('s1').tabs.some((t) => t.id === input.id)) {
+          return Promise.reject(new Error('NOT_FOUND'));
+        }
+        return Promise.resolve({ ok: true });
+      });
+
+      await Promise.all([store.closeTab('s1', a.id), store.closeTab('s1', b.id)]);
+
+      expect(store.getBucket('s1').tabs).toHaveLength(0);
+      expect(store.getBucket('s1').activeTabId).toBeNull();
+    });
+
+    it('前一次关闭失败不会把同 session 后续关闭拖挂', async () => {
+      const a = await store.addTab('s1', 'web-browser', null);
+      const b = await store.addTab('s1', 'web-browser', null);
+      ipc.close.mockRejectedValueOnce(new Error('db down'));
+
+      const first = store.closeTab('s1', a.id);
+      const second = store.closeTab('s1', b.id);
+
+      await expect(first).rejects.toThrow('db down');
+      await expect(second).resolves.toBeUndefined();
+      // a 回滚留下,b 正常关掉。
+      expect(store.getBucket('s1').tabs.map((t) => t.id)).toEqual([a.id]);
+    });
+
     it('removes tab and shifts active to neighbor', async () => {
       const a = await store.addTab('s1', 'file-browser', null);
       const b = await store.addTab('s1', 'file-browser', null);

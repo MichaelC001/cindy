@@ -170,14 +170,13 @@ export function forceKillBrowserTab(tabId: string): Promise<void> {
 /**
  * guest 自关的 per-session 串行队列。
  *
- * `store.closeTab` 在入口抓一份 bucket 快照,await 完 interceptor / IPC 才算数,
- * 失败还会用这份快照**整体**回滚。同一 session 里两个 popup 几乎同时
- * `window.close()` 时,两条并发 closeTab 各拿到一份"还含着对方"的旧快照:后完成
- * 的那条会把已经删掉的 tab 写回 cache;若它的 setActive 指向已被前一条删掉的
- * tab,IPC 报错又会把两次乐观删除一起回滚 —— cache 与 DB 从此不一致。
+ * "两次关闭的 store 变更不许交错"由 `store.closeTab` 自己的 per-session 队列保证
+ * (它覆盖所有关闭入口,包括用户手关)。这里这一层管的是**自关的整套收尾**:
+ * 存在性重取 → closeTab → pool.release → "最后一个 tab 才收侧栏" 判定。这些
+ * 步骤在 closeTab 之外,store 的队列管不到 —— 同 session 两个 popup 同时自关时
+ * 不排队,两套收尾会读到彼此中途的 bucket。
  *
- * UI 的多 tab 关闭路径(handleCloseAll / closeAllTabs)本来就是逐个 await 串行
- * 的,这里给自动路径补上同样的纪律:同 session 排队,跨 session 并行。
+ * 同 session 排队,跨 session 并行。
  */
 const guestCloseQueues = new Map<string, Promise<void>>();
 
