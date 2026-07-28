@@ -97,8 +97,7 @@ export default defineConfig({
         test: {
           name: 'standard',
           include: desktopTestInclude,
-          exclude: resourceIntensiveTestInclude,
-          cliExclude: cliTestExclude,
+          exclude: [...resourceIntensiveTestInclude, ...cliTestExclude],
         },
       },
       {
@@ -106,7 +105,7 @@ export default defineConfig({
         test: {
           name: 'resource-intensive',
           include: resourceIntensiveTestInclude,
-          cliExclude: cliTestExclude,
+          exclude: cliTestExclude,
           globalSetup: ['src/test/vitest/desktopTestResourceLock.ts'],
         },
       },
