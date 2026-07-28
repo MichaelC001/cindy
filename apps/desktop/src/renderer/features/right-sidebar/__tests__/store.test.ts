@@ -391,10 +391,29 @@ describe('RSB store', () => {
       await expect(pendingAdd).rejects.toThrow('db down');
       await expect(pendingClose).resolves.toBeUndefined();
 
-      expect(ipc.close).not.toHaveBeenCalled();
+      // best-effort close(state 写队列同样走 upsert,可能反倒把行写进 DB);
+      // 它必须**吞掉**失败,不能像正常分支那样回滚出一个幽灵 tab。
+      expect(ipc.close).toHaveBeenCalledWith({ id: createdId });
       expect(store.getBucket('s1').tabs).toHaveLength(0);
       // tab 已不存在,标记也要清掉(否则 tabId 永久留在标记集合里)。
       expect(isPopupSpawnedTab(createdId)).toBe(false);
+    });
+
+    it('创建失败分支的 best-effort close 报错也不回滚出幽灵 tab', async () => {
+      ipc.upsert.mockRejectedValueOnce(new Error('db down'));
+      ipc.close.mockRejectedValueOnce(new Error('NOT_FOUND'));
+      let createdId = '';
+      const pendingAdd = store.addTab('s1', 'web-browser', null, {
+        onOptimisticAdd: (tabId) => {
+          createdId = tabId;
+        },
+      });
+      const pendingClose = store.closeTab('s1', createdId);
+
+      await expect(pendingAdd).rejects.toThrow('db down');
+      await expect(pendingClose).resolves.toBeUndefined();
+
+      expect(store.getBucket('s1').tabs).toHaveLength(0);
     });
   });
 

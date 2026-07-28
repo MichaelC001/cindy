@@ -347,9 +347,13 @@ export function RightSidebarShell({
   // 触发 popup——没有 opener 归属时它会落进"用户正在看的 session",串会话;有
   // openerSessionId 时落进 opener 的 bucket,跨 session 场景只写存档不动当前 UI
   // (交给 MainLayout 的 visibility 分支)。
-  // 已知边界:本订阅随 Shell 的 sessionId 存在——用户在草稿页等无 session 路由
-  // 时推上来的 popup 仍被丢弃(与修复前行为一致,丢弃优于落错 session)。要消除
-  // 这个盲区需要把订阅挪到窗口级常驻位置,留作 follow-up。
+  // 已知边界(与修复前一致,本 PR 不扩大也不消除):本订阅随 Shell 生命周期 ——
+  //   - 用户在草稿页等无 session 路由时推上来的 popup 被丢弃(丢弃优于落错 session);
+  //   - 用户离开聊天视图(如进设置页)导致 Shell 卸载期间,后台 agent 触发的 popup
+  //     也会丢,授权流程要等 agent 重试。
+  // preload 的 popup 扇出不缓存事件,所以"没人订阅"就等于丢。要消除这个盲区得把
+  // popup 路由挪到窗口级常驻位置(bridge 已是常驻单例,但它没有"用户正在看哪个
+  // session"这个回落信息),涉及 RSB 事件归属的架构决定,留作独立 follow-up。
   useEffect(() => {
     if (!sessionId) return;
     const off = window.electronAPI.onRsbBrowserPopup(({ url, openerSessionId }) => {

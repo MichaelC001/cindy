@@ -624,10 +624,20 @@ export async function closeTab(
     // 之前,拿 NOT_FOUND 把整次关闭回滚掉。
     const pendingCreate = pendingTabCreates.get(tabId);
     if (pendingCreate && !(await pendingCreate)) {
-      // 创建**连 upsert 都没成**:DB 里从来没有这行(addTab 已经把它从 cache 回滚
-      // 掉)。这里绝不能再发 close —— 必然 NOT_FOUND,而下面的回滚分支会把这个
-      // 幽灵 tab 写回 cache。tab 已不存在,按"关成了"收尾即可。
+      // 创建**连 upsert 都没成**:DB 里"通常"没有这行(addTab 已经把它从 cache
+      // 回滚掉)。绝不能走下面的正常分支 —— close 报 NOT_FOUND 会命中 catch 里的
+      // 回滚,把这个幽灵 tab 写回 cache。
       // (upsert 成功、只是 setActive 失败的半失败情形返回 true,照常走下面的 close。)
+      //
+      // 但"通常"不等于"一定":state 写队列同样走 `ipc.upsert`(还带 overload 重试),
+      // 乐观插入后入队的某次 patch 可能反倒把这一行写进了 DB。所以先等 state 写落定,
+      // 再发一次 **best-effort** close 兜掉这种孤儿行 —— 失败无所谓(NOT_FOUND 就是
+      // "本来就没有"),吞掉即可,绝不触发回滚。
+      await settleTabStateWrites(sessionId, tabId);
+      const ipc = ipcApi();
+      if (ipc && shouldPersist(sessionId)) {
+        await ipc.close({ id: tabId }).catch(() => undefined);
+      }
       forgetClosedTab(sessionId, tabId);
       return;
     }
